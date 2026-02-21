@@ -65,13 +65,24 @@ private struct SettingsPaneView: View {
 
             GroupBox("Output") {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Open the output location from your latest completed transcription.")
+                    Text("Open or change the output folder. Defaults to your Downloads folder.")
                         .foregroundStyle(.secondary)
-                    Button("Open Output Folder") {
-                        viewModel.openOutputFolder()
+                    Text(viewModel.outputFolderPath)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                    HStack(spacing: 10) {
+                        Button("Change Folder…") {
+                            viewModel.browseOutputFolder()
+                        }
+                        .buttonStyle(.bordered)
+                        Button("Open Output Folder") {
+                            viewModel.openOutputFolder()
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(!viewModel.canOpenOutputFolder)
                 }
             }
 
