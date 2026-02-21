@@ -196,6 +196,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+BUNDLED_BINARY="$SCRIPT_DIR/LectureTranscribeNative"
 
 if [[ -z "${TRANSCRIBE_PYTHON:-}" ]]; then
   if command -v python3 >/dev/null 2>&1; then
@@ -205,8 +206,36 @@ if [[ -z "${TRANSCRIBE_PYTHON:-}" ]]; then
   fi
 fi
 
-# Prefer a local prebuilt dev binary when present so app launches reflect recent source edits.
-if [[ "${TRANSCRIBE_PREFER_DEV_BINARY:-1}" == "1" ]]; then
+# Optional source build/run path for debugging only.
+if [[ "${TRANSCRIBE_PREFER_SOURCE:-0}" == "1" ]] && command -v swift >/dev/null 2>&1; then
+  DEV_CANDIDATES=()
+  if [[ -n "${TRANSCRIBE_DEV_PROJECT_DIR:-}" ]]; then
+    DEV_CANDIDATES+=("${TRANSCRIBE_DEV_PROJECT_DIR}")
+  fi
+  DEV_CANDIDATES+=("${HOME}/Documents/transcribe")
+  DEV_CANDIDATES+=("$(cd "$SCRIPT_DIR/../../.." && pwd)")
+
+  for dev_root in "${DEV_CANDIDATES[@]}"; do
+    [[ -n "$dev_root" ]] || continue
+    if [[ -f "$dev_root/Package.swift" && -d "$dev_root/Sources/LectureTranscribeNative" ]]; then
+      if /usr/bin/env swift build --package-path "$dev_root" >/dev/null 2>&1; then
+        DEV_BINARY_CANDIDATES=(
+          "$dev_root/.build/debug/LectureTranscribeNative"
+          "$dev_root/.build/arm64-apple-macosx/debug/LectureTranscribeNative"
+          "$dev_root/.build/x86_64-apple-macosx/debug/LectureTranscribeNative"
+        )
+        for dev_binary in "${DEV_BINARY_CANDIDATES[@]}"; do
+          if [[ -x "$dev_binary" ]]; then
+            exec "$dev_binary" "$@"
+          fi
+        done
+      fi
+    fi
+  done
+fi
+
+# Default mode: use prebuilt dev binary when present.
+if [[ "${TRANSCRIBE_PREFER_DEV_BINARY:-auto}" == "1" || "${TRANSCRIBE_PREFER_DEV_BINARY:-auto}" == "auto" ]]; then
   DEV_BINARY_CANDIDATES=()
   if [[ -n "${TRANSCRIBE_DEV_BINARY:-}" ]]; then
     DEV_BINARY_CANDIDATES+=("${TRANSCRIBE_DEV_BINARY}")
@@ -223,24 +252,7 @@ if [[ "${TRANSCRIBE_PREFER_DEV_BINARY:-1}" == "1" ]]; then
   done
 fi
 
-# Optional source mode for local debugging only. Default is bundled binary for reliability.
-if [[ "${TRANSCRIBE_PREFER_SOURCE:-0}" == "1" ]] && command -v swift >/dev/null 2>&1; then
-  DEV_CANDIDATES=()
-  if [[ -n "${TRANSCRIBE_DEV_PROJECT_DIR:-}" ]]; then
-    DEV_CANDIDATES+=("${TRANSCRIBE_DEV_PROJECT_DIR}")
-  fi
-  DEV_CANDIDATES+=("${HOME}/Documents/transcribe")
-  DEV_CANDIDATES+=("$(cd "$SCRIPT_DIR/../../.." && pwd)")
-
-  for dev_root in "${DEV_CANDIDATES[@]}"; do
-    [[ -n "$dev_root" ]] || continue
-    if [[ -f "$dev_root/Package.swift" && -d "$dev_root/Sources/LectureTranscribeNative" ]]; then
-      exec /usr/bin/env swift run --package-path "$dev_root" LectureTranscribeNative "$@"
-    fi
-  done
-fi
-
-exec "$SCRIPT_DIR/LectureTranscribeNative" "$@"
+exec "$BUNDLED_BINARY" "$@"
 LAUNCHER
   chmod 755 "$app_path/Contents/MacOS/launcher"
 }

@@ -16,5 +16,7 @@ DerivedData/
 
 # Runtime/generated files
 /__pycache__
+**/__pycache__/
+*.pyc
 /chunks
 /converted_inputs

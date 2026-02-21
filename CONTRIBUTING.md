@@ -9,9 +9,9 @@
   - `swift build`
 
 ## Test the project
-- There is no automated test suite yet.
-- Minimum validation for UI/backend changes:
-  - `swift build` succeeds.
+- Run the regression guardrail first:
+  - `./scripts/regression_check.sh`
+- Minimum manual validation for UI/backend changes:
   - Start one transcription from the app and confirm progress/status updates and output file creation.
 
 ## Conventions
@@ -19,6 +19,7 @@
 - Follow the existing SwiftUI + view model structure.
 - Prefer small, explicit changes over new abstractions.
 - Do not add dependencies unless there is a clear need.
+- Preserve existing features unless removal is explicitly requested.
 
 ## Adding new features
 - UI and interaction state go in `Sources/LectureTranscribeNative/`:
@@ -30,3 +31,4 @@
   - `lecture_transcribe.py`
   - `transcription_job.py`
 - Keep bundled Python copies under `Sources/LectureTranscribeNative/Resources/python/` aligned when backend logic changes.
+- Follow `AGENTS.md` invariants and workflow for every change.
