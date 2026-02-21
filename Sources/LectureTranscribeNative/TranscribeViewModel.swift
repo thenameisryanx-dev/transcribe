@@ -35,6 +35,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private var runTask: Task<Void, Never>?
     private var activeHistoryEntryID: UUID?
     private var activeHistoryEntryFinalized = false
+    private var lastHandledHowToGuideRequestToken = 0
 
     @Published private(set) var historyEntries: [TranscriptionHistoryEntry] = []
     @Published var selectedHistoryEntryIDs: Set<UUID> = []
@@ -210,14 +211,11 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             return
         }
 
+        let preferredSelectionID = selectedHistoryEntryIDs.first(where: { !deletableIDs.contains($0) })
         historyEntries.removeAll { entry in
             deletableIDs.contains(entry.id)
         }
-        selectedHistoryEntryIDs.subtract(deletableIDs)
-
-        if selectedHistoryEntryIDs.isEmpty, let firstEntryID = historyEntries.first?.id {
-            selectedHistoryEntryIDs = [firstEntryID]
-        }
+        normalizeHistorySelection(preferredID: preferredSelectionID)
 
         saveHistoryEntries()
 
@@ -229,6 +227,14 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     func requestHowToGuide() {
         selectedPane = .transcribe
         howToGuideRequestToken += 1
+    }
+
+    func consumeHowToGuideRequestIfNeeded() -> Bool {
+        guard howToGuideRequestToken > lastHandledHowToGuideRequestToken else {
+            return false
+        }
+        lastHandledHowToGuideRequestToken = howToGuideRequestToken
+        return true
     }
 
     func startTranscription() {
@@ -356,10 +362,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             }
 
             historyEntries = normalizedEntries.sorted(by: Self.sortHistoryEntriesNewestFirst)
-            selectedHistoryEntryIDs.formIntersection(Set(historyEntries.map(\.id)))
-            if selectedHistoryEntryIDs.isEmpty, let firstEntryID = historyEntries.first?.id {
-                selectedHistoryEntryIDs = [firstEntryID]
-            }
+            normalizeHistorySelection()
             if didMutateInterruptedEntries {
                 saveHistoryEntries()
             }
@@ -375,6 +378,20 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             try historyStore.saveEntries(historyEntries)
         } catch {
             appendLog("Could not save history: \(error.localizedDescription)")
+        }
+    }
+
+    private func normalizeHistorySelection(preferredID: UUID? = nil) {
+        let currentIDs = Set(historyEntries.map(\.id))
+        selectedHistoryEntryIDs.formIntersection(currentIDs)
+
+        if selectedHistoryEntryIDs.isEmpty, let preferredID, currentIDs.contains(preferredID) {
+            selectedHistoryEntryIDs = [preferredID]
+            return
+        }
+
+        if selectedHistoryEntryIDs.isEmpty, let firstEntryID = historyEntries.first?.id {
+            selectedHistoryEntryIDs = [firstEntryID]
         }
     }
 

@@ -25,14 +25,10 @@ struct RootView: View {
     var body: some View {
         NavigationSplitView {
             List(NavigationPane.allCases, selection: $viewModel.selectedPane) { pane in
-                HStack(spacing: 10) {
-                    Image(systemName: pane.systemImage)
-                        .frame(width: 16, alignment: .center)
-                    Text(pane.rawValue)
-                }
-                .foregroundStyle(.primary)
+                Label(pane.rawValue, systemImage: pane.systemImage)
                     .tag(pane)
             }
+            .labelStyle(.titleAndIcon)
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 240)
         } detail: {

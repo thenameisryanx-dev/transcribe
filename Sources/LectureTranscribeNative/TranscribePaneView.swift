@@ -6,7 +6,6 @@ struct TranscribePaneView: View {
 
     @State private var showingHowToGuide = false
     @State private var howToStepIndex = 0
-    @State private var lastHandledHowToGuideRequestToken = 0
 
     private var currentHowToStep: HowToStep {
         Self.howToSteps[howToStepIndex]
@@ -272,8 +271,7 @@ struct TranscribePaneView: View {
     }
 
     private func handleHowToGuideRequestIfNeeded() {
-        guard viewModel.howToGuideRequestToken > lastHandledHowToGuideRequestToken else { return }
-        lastHandledHowToGuideRequestToken = viewModel.howToGuideRequestToken
+        guard viewModel.consumeHowToGuideRequestIfNeeded() else { return }
         startHowToGuide()
     }
 
