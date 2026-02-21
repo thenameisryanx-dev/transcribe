@@ -2,13 +2,57 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
+enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
+    case gpt4oTranscribe = "gpt-4o-transcribe"
+    case gpt4oMiniTranscribe = "gpt-4o-mini-transcribe"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .gpt4oTranscribe:
+            return "GPT-4o Transcribe"
+        case .gpt4oMiniTranscribe:
+            return "GPT-4o Mini Transcribe"
+        }
+    }
+
+    var hoverDescription: String {
+        switch self {
+        case .gpt4oTranscribe:
+            return "Best accuracy and supports speaker diarization."
+        case .gpt4oMiniTranscribe:
+            return "Fast, cost-efficient transcription. Speaker diarization is unavailable."
+        }
+    }
+
+    var supportsDiarization: Bool {
+        self == .gpt4oTranscribe
+    }
+}
+
 @MainActor
 final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published var selectedPane: NavigationPane? = .transcribe
 
     @Published var audioFilePath = ""
     @Published var outputFolderPath: String
-    @Published var diarizeEnabled = false
+    @Published var selectedTranscriptionModel: TranscriptionModel = .gpt4oTranscribe {
+        didSet {
+            if !selectedTranscriptionModel.supportsDiarization && diarizeEnabled {
+                diarizeEnabled = false
+            }
+            guard oldValue != selectedTranscriptionModel else { return }
+            UserDefaults.standard.set(selectedTranscriptionModel.rawValue, forKey: Self.selectedModelDefaultsKey)
+        }
+    }
+    @Published var diarizeEnabled = false {
+        didSet {
+            if diarizeEnabled && !selectedTranscriptionModel.supportsDiarization {
+                diarizeEnabled = false
+            }
+        }
+    }
 
     @Published var apiKeyStatusText = "API key: checking..."
     @Published var statusText = "Ready"
@@ -31,6 +75,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private let backend = BackendClient()
     private let historyStore = TranscriptionHistoryStore()
     private let maxHistoryEntries = 200
+    private static let selectedModelDefaultsKey = "selectedTranscriptionModel"
     private let defaultOutputFolderPath: String
     private var runTask: Task<Void, Never>?
     private var activeHistoryEntryID: UUID?
@@ -44,6 +89,11 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         defaultOutputFolderPath = downloads?.path ?? NSHomeDirectory()
         outputFolderPath = defaultOutputFolderPath
+        if let rawModel = UserDefaults.standard.string(forKey: Self.selectedModelDefaultsKey),
+           let storedModel = TranscriptionModel(rawValue: rawModel)
+        {
+            selectedTranscriptionModel = storedModel
+        }
         loadHistoryEntries()
         refreshAPIKeyStatus()
     }
@@ -54,6 +104,10 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
     var progressLabel: String {
         "\(Int(progressValue.rounded()))%"
+    }
+
+    var isDiarizationAvailable: Bool {
+        selectedTranscriptionModel.supportsDiarization
     }
 
     var selectedHistoryEntry: TranscriptionHistoryEntry? {
@@ -258,7 +312,11 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         canOpenOutputFolder = false
         canCreateNewTranscript = false
         isRunning = true
-        beginHistoryEntry(inputPath: trimmedPath, outputDirectory: outputFolderPath, diarize: diarizeEnabled)
+        let shouldDiarize = diarizeEnabled && selectedTranscriptionModel.supportsDiarization
+        if diarizeEnabled != shouldDiarize {
+            diarizeEnabled = shouldDiarize
+        }
+        beginHistoryEntry(inputPath: trimmedPath, outputDirectory: outputFolderPath, diarize: shouldDiarize)
 
         runTask = Task { [weak self] in
             guard let self else { return }
@@ -267,7 +325,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
                 try await backend.startTranscription(
                     inputPath: trimmedPath,
                     outputDirectory: outputFolderPath,
-                    diarize: diarizeEnabled
+                    diarize: shouldDiarize,
+                    model: selectedTranscriptionModel.rawValue
                 ) { [weak self] event in
                     Task { @MainActor in
                         self?.apply(event: event)

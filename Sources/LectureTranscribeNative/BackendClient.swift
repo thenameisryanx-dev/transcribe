@@ -113,9 +113,11 @@ struct BackendClient {
         inputPath: String,
         outputDirectory: String,
         diarize: Bool,
+        model: String,
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
     ) async throws {
         var args = ["run", "--input", inputPath, "--output", outputDirectory]
+        args.append(contentsOf: ["--model", model])
         if diarize {
             args.append("--diarize")
         }

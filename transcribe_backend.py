@@ -13,6 +13,10 @@ from lecture_transcribe import (
 )
 from transcription_job import run_transcription_job
 
+MODEL_GPT4O_TRANSCRIBE = "gpt-4o-transcribe"
+MODEL_GPT4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
+SUPPORTED_TRANSCRIPTION_MODELS = [MODEL_GPT4O_TRANSCRIBE, MODEL_GPT4O_MINI_TRANSCRIBE]
+
 
 def emit(kind: str, payload) -> None:
     print(json.dumps({"kind": kind, "payload": payload}, ensure_ascii=False), flush=True)
@@ -65,9 +69,18 @@ def command_run(args: argparse.Namespace) -> int:
     input_path = Path(args.input).expanduser()
     output_dir = Path(args.output).expanduser()
     diarize = bool(args.diarize)
+    model = str(args.model or MODEL_GPT4O_TRANSCRIBE).strip()
 
     if not input_path.exists():
         emit("error", f"Input file not found: {input_path}")
+        return 2
+
+    if diarize and model == MODEL_GPT4O_MINI_TRANSCRIBE:
+        emit(
+            "error",
+            "Speaker diarization is not supported with gpt-4o-mini-transcribe. "
+            "Select gpt-4o-transcribe or disable diarization.",
+        )
         return 2
 
     if resolve_api_key_status() == "required":
@@ -82,6 +95,7 @@ def command_run(args: argparse.Namespace) -> int:
             input_path=input_path,
             diarize=diarize,
             output_dir=output_dir,
+            transcription_model=model,
             push_event=push_event,
         )
         emit("done", str(out_path.resolve()))
@@ -108,6 +122,12 @@ def parse_args() -> argparse.Namespace:
     run.add_argument("--input", required=True, help="Input media file path.")
     run.add_argument("--output", required=True, help="Output directory path.")
     run.add_argument("--diarize", action="store_true", help="Enable speaker diarization.")
+    run.add_argument(
+        "--model",
+        default=MODEL_GPT4O_TRANSCRIBE,
+        choices=SUPPORTED_TRANSCRIPTION_MODELS,
+        help="Transcription model for non-diarized chunks.",
+    )
 
     return parser.parse_args()
 

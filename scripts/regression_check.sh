@@ -20,6 +20,19 @@ rg -q "struct TranscriptionHistoryStore" Sources/LectureTranscribeNative/Transcr
 rg -q "loadHistoryEntries\\(\\)" Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "saveHistoryEntries\\(\\)" Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "normalizeHistorySelection\\(" Sources/LectureTranscribeNative/TranscribeViewModel.swift
+rg -q "GroupBox\\(\"Output\"\\)" Sources/LectureTranscribeNative/RootView.swift
+rg -q "Button\\(\"Open Output Folder\"\\)" Sources/LectureTranscribeNative/RootView.swift
+rg -q "Transcription Model" Sources/LectureTranscribeNative/TranscribePaneView.swift
+rg -q "\\.popover\\(isPresented:" Sources/LectureTranscribeNative/TranscribePaneView.swift
+rg -q "ModelSelectionPopoverButton" Sources/LectureTranscribeNative/TranscribePaneView.swift
+rg -q "selectedModel.displayName" Sources/LectureTranscribeNative/TranscribePaneView.swift
+rg -q "selectedTranscriptionModel" Sources/LectureTranscribeNative/TranscribeViewModel.swift
+rg -q "isDiarizationAvailable" Sources/LectureTranscribeNative/TranscribeViewModel.swift
+rg -q "Unavailable for" Sources/LectureTranscribeNative/TranscribePaneView.swift
+rg -q -- "--model" Sources/LectureTranscribeNative/BackendClient.swift
+rg -q -- "--model" transcribe_backend.py
+rg -q "MODEL_MINI" transcription_job.py
+rg -q "Speaker diarization is not supported with gpt-4o-mini-transcribe" transcription_job.py
 rg -U -q 'func requestHowToGuide\(\) \{\n\s*howToGuideRequestToken \+= 1\n\s*selectedPane = \.transcribe' Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "if handleHowToGuideRequestIfNeeded\\(\\) \\{" Sources/LectureTranscribeNative/TranscribePaneView.swift
 

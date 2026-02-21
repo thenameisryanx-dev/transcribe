@@ -21,7 +21,9 @@ LANGUAGE: str | None = None
 
 # Best-quality transcription (no speaker labels)
 MODEL_NORMAL = "gpt-4o-transcribe"
+MODEL_MINI = "gpt-4o-mini-transcribe"
 NORMAL_CHUNK_SECONDS = 10 * 60  # 10 minutes (reliable for 60+ min)
+MINI_CHUNK_SECONDS = 5 * 60     # smaller chunks give faster visible progress on mini
 
 # Diarization model + constraints
 MODEL_DIARIZE = "gpt-4o-transcribe-diarize"
@@ -54,6 +56,7 @@ KEYRING_SERVICE = "lecture-transcribe"
 KEYRING_USERNAME = "openai_api_key"
 BUNDLED_FFMPEG_DIR_NAME = "ffmpeg_bin"
 MEDIA_TOOL_CHECK_TIMEOUT_SECONDS = 6
+MEDIA_PROCESS_TIMEOUT_SECONDS = 30 * 60
 _MEDIA_TOOL_CACHE: dict[str, str] = {}
 _LAST_KEYCHAIN_ERROR = ""
 # =======================
@@ -512,6 +515,7 @@ def get_duration_seconds(path: Path) -> float:
         r = subprocess.run(
             [
                 *ffprobe_cmd_prefix(),
+                "-nostdin",
                 "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=nk=1:nw=1",
@@ -520,6 +524,7 @@ def get_duration_seconds(path: Path) -> float:
             check=True,
             capture_output=True,
             text=True,
+            timeout=30,
         )
         return float(r.stdout.strip())
     except Exception:
@@ -538,6 +543,7 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
 
     copy_cmd = [
         *ffmpeg_cmd_prefix(),
+        "-nostdin",
         "-hide_banner",
         "-loglevel", "error",
         "-i", str(input_path),
@@ -550,7 +556,7 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
         str(run_chunks_dir / "part_%03d.m4a"),
     ]
     try:
-        subprocess.run(copy_cmd, check=True)
+        subprocess.run(copy_cmd, check=True, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
     except Exception:
         pass
 
@@ -563,6 +569,7 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
 
     reencode_cmd = [
         *ffmpeg_cmd_prefix(),
+        "-nostdin",
         "-hide_banner",
         "-loglevel", "error",
         "-i", str(input_path),
@@ -575,7 +582,13 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
         "-b:a", AUDIO_BITRATE,
         str(run_chunks_dir / "part_%03d.m4a"),
     ]
-    subprocess.run(reencode_cmd, check=True)
+    try:
+        subprocess.run(reencode_cmd, check=True, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            "Chunking audio timed out while running ffmpeg. "
+            "Try a shorter file or check local ffmpeg health."
+        ) from None
 
     parts = sorted(run_chunks_dir.glob("part_*.m4a"))
     if not parts:
@@ -592,8 +605,9 @@ def convert_qta_to_m4a_copy(input_path: Path, run_id: str) -> Path:
     if out_path.exists():
         out_path.unlink()
 
-    cmd = [
+    copy_cmd = [
         *ffmpeg_cmd_prefix(),
+        "-nostdin",
         "-hide_banner",
         "-loglevel", "error",
         "-f", "mov",
@@ -603,7 +617,32 @@ def convert_qta_to_m4a_copy(input_path: Path, run_id: str) -> Path:
         "-c:a", "copy",
         str(out_path),
     ]
-    subprocess.run(cmd, check=True)
+
+    try:
+        subprocess.run(copy_cmd, check=True, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
+    except Exception:
+        if out_path.exists():
+            out_path.unlink()
+        reencode_cmd = [
+            *ffmpeg_cmd_prefix(),
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-f", "mov",
+            "-i", str(input_path),
+            "-vn",
+            "-map", "0:a:0",
+            "-c:a", "aac",
+            "-b:a", AUDIO_BITRATE,
+            str(out_path),
+        ]
+        try:
+            subprocess.run(reencode_cmd, check=True, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise SystemExit(
+                "Timed out converting .qta to .m4a. "
+                "Please verify the file opens normally in QuickTime."
+            ) from None
 
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise SystemExit("Failed to convert .qta to .m4a.")
@@ -744,13 +783,14 @@ def transcribe_chunk_text(
     client: OpenAI,
     chunk_path: Path,
     *,
+    model: str = MODEL_NORMAL,
     chunk_idx: int | None = None,
     progress: ChunkProgressTracker | None = None,
 ) -> str:
     text = create_transcription_with_retry(
         client,
         chunk_path,
-        model=MODEL_NORMAL,
+        model=model,
         response_format="text",
         chunk_idx=chunk_idx,
         progress=progress,

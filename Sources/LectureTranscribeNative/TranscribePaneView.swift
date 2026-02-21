@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct TranscribePaneView: View {
@@ -62,9 +63,16 @@ struct TranscribePaneView: View {
                     .howToTarget(.inputOutput)
 
                     GroupBox("Options") {
-                        Toggle("Add speaker labels (diarize)", isOn: $viewModel.diarizeEnabled)
-                            .disabled(viewModel.isRunning)
-                            .accessibilityLabel("Add speaker labels")
+                        VStack(alignment: .leading, spacing: 6) {
+                            Toggle("Add speaker labels (diarize)", isOn: $viewModel.diarizeEnabled)
+                                .disabled(viewModel.isRunning || !viewModel.isDiarizationAvailable)
+                                .accessibilityLabel("Add speaker labels")
+                            if !viewModel.isDiarizationAvailable {
+                                Text("Unavailable for \(viewModel.selectedTranscriptionModel.displayName).")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                     .howToTarget(.options)
 
@@ -104,11 +112,10 @@ struct TranscribePaneView: View {
                 .accessibilityLabel(viewModel.canCreateNewTranscript ? "Start a new transcription" : "Start transcription")
                 .howToTarget(.startButton)
 
-                Button("Open Output Folder") {
-                    viewModel.openOutputFolder()
-                }
-                .buttonStyle(.bordered)
-                .disabled(!viewModel.canOpenOutputFolder)
+                ModelSelectionPopoverButton(
+                    selectedModel: $viewModel.selectedTranscriptionModel,
+                    isDisabled: viewModel.isRunning
+                )
 
                 Spacer(minLength: 18)
 
@@ -309,6 +316,111 @@ struct TranscribePaneView: View {
             message: "Watch progress and logs here. Use Open Output Folder to quickly access your generated transcript."
         ),
     ]
+}
+
+private struct ModelSelectionPopoverButton: View {
+    @Binding var selectedModel: TranscriptionModel
+    let isDisabled: Bool
+
+    @State private var showingPopover = false
+    @State private var isButtonHovered = false
+    @State private var hoveredModelInPopover: TranscriptionModel?
+
+    var body: some View {
+        Button {
+            showingPopover.toggle()
+        } label: {
+            HStack(spacing: 8) {
+                Text(selectedModel.displayName)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.footnote.weight(.semibold))
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(
+                isButtonHovered || showingPopover
+                    ? Color.accentColor
+                    : Color.primary
+            )
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(
+                        isButtonHovered || showingPopover
+                            ? Color.accentColor.opacity(0.18)
+                            : Color.secondary.opacity(0.12)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .disabled(isDisabled)
+        .onHover { isHovering in
+            isButtonHovered = isHovering
+            if isHovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Transcription Model")
+                    .font(.headline)
+                    .padding(.bottom, 2)
+
+                ForEach(TranscriptionModel.allCases) { model in
+                    Button {
+                        selectedModel = model
+                        showingPopover = false
+                    } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(model.displayName)
+                                    .foregroundStyle(.primary)
+                                Text(model.hoverDescription)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 10)
+                            if selectedModel == model {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(
+                                    {
+                                        if selectedModel == model {
+                                            return hoveredModelInPopover == model
+                                                ? Color.accentColor.opacity(0.20)
+                                                : Color.accentColor.opacity(0.14)
+                                        }
+                                        return hoveredModelInPopover == model
+                                            ? Color.secondary.opacity(0.14)
+                                            : Color.clear
+                                    }()
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { isHovering in
+                        if isHovering {
+                            hoveredModelInPopover = model
+                        } else if hoveredModelInPopover == model {
+                            hoveredModelInPopover = nil
+                        }
+                    }
+                }
+            }
+            .frame(width: 320, alignment: .leading)
+            .padding(12)
+        }
+    }
 }
 
 private struct APIKeySheetView: View {

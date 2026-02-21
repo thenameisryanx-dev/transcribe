@@ -63,6 +63,18 @@ private struct SettingsPaneView: View {
                     .foregroundStyle(.secondary)
             }
 
+            GroupBox("Output") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Open the output location from your latest completed transcription.")
+                        .foregroundStyle(.secondary)
+                    Button("Open Output Folder") {
+                        viewModel.openOutputFolder()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!viewModel.canOpenOutputFolder)
+                }
+            }
+
             GroupBox("Help") {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("New to the app? Start the guided walkthrough.")
