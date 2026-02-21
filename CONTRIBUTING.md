@@ -1,0 +1,32 @@
+# Contributing
+
+## Run the project
+- Requirements: macOS 13+, Swift 6.2 toolchain, and `python3` on `PATH`.
+- Launch the native app from source:
+  - `swift run LectureTranscribeNative`
+  - or `./Open\ Lecture\ Transcribe\ Native.command`
+- Build only:
+  - `swift build`
+
+## Test the project
+- There is no automated test suite yet.
+- Minimum validation for UI/backend changes:
+  - `swift build` succeeds.
+  - Start one transcription from the app and confirm progress/status updates and output file creation.
+
+## Conventions
+- Keep changes focused and avoid unrelated reformatting.
+- Follow the existing SwiftUI + view model structure.
+- Prefer small, explicit changes over new abstractions.
+- Do not add dependencies unless there is a clear need.
+
+## Adding new features
+- UI and interaction state go in `Sources/LectureTranscribeNative/`:
+  - Views in `*View.swift`
+  - App state and orchestration in `TranscribeViewModel.swift`
+  - Python process bridge in `BackendClient.swift`
+- Backend behavior is implemented in root Python scripts (for source runs):
+  - `transcribe_backend.py`
+  - `lecture_transcribe.py`
+  - `transcription_job.py`
+- Keep bundled Python copies under `Sources/LectureTranscribeNative/Resources/python/` aligned when backend logic changes.

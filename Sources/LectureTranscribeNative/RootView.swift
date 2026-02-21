@@ -1,0 +1,79 @@
+import SwiftUI
+
+enum NavigationPane: String, CaseIterable, Identifiable {
+    case transcribe = "Transcribe"
+    case runs = "Runs"
+    case settings = "Settings"
+
+    var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .transcribe:
+            return "waveform.badge.mic"
+        case .runs:
+            return "clock.arrow.circlepath"
+        case .settings:
+            return "gearshape"
+        }
+    }
+}
+
+struct RootView: View {
+    @EnvironmentObject private var viewModel: TranscribeViewModel
+
+    var body: some View {
+        NavigationSplitView {
+            List(NavigationPane.allCases, selection: $viewModel.selectedPane) { pane in
+                Label(pane.rawValue, systemImage: pane.systemImage)
+                    .tag(pane)
+            }
+            .labelStyle(.titleAndIcon)
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 240)
+        } detail: {
+            switch viewModel.selectedPane {
+            case .none:
+                TranscribePaneView()
+            case .transcribe:
+                TranscribePaneView()
+            case .runs:
+                RunsPaneView()
+            case .settings:
+                SettingsPaneView()
+            }
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+}
+
+private struct SettingsPaneView: View {
+    @EnvironmentObject private var viewModel: TranscribeViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Settings")
+                    .font(.title2.weight(.semibold))
+                Text("Help and app-level preferences.")
+                    .foregroundStyle(.secondary)
+            }
+
+            GroupBox("Help") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("New to the app? Start the guided walkthrough.")
+                        .foregroundStyle(.secondary)
+                    Button("How to Use") {
+                        viewModel.requestHowToGuide()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: 760, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 20)
+    }
+}
