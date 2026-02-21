@@ -225,8 +225,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     }
 
     func requestHowToGuide() {
-        selectedPane = .transcribe
         howToGuideRequestToken += 1
+        selectedPane = .transcribe
     }
 
     func consumeHowToGuideRequestIfNeeded() -> Bool {

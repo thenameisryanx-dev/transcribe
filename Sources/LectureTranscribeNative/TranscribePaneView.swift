@@ -159,13 +159,18 @@ struct TranscribePaneView: View {
             Text(viewModel.errorMessage)
         }
         .onAppear {
-            handleHowToGuideRequestIfNeeded()
+            if handleHowToGuideRequestIfNeeded() {
+                hasSeenHowToGuide = true
+                return
+            }
             guard !hasSeenHowToGuide else { return }
             hasSeenHowToGuide = true
             startHowToGuide()
         }
         .onChange(of: viewModel.howToGuideRequestToken) { _ in
-            handleHowToGuideRequestIfNeeded()
+            if handleHowToGuideRequestIfNeeded() {
+                hasSeenHowToGuide = true
+            }
         }
     }
 
@@ -270,9 +275,11 @@ struct TranscribePaneView: View {
         showingHowToGuide = false
     }
 
-    private func handleHowToGuideRequestIfNeeded() {
-        guard viewModel.consumeHowToGuideRequestIfNeeded() else { return }
+    @discardableResult
+    private func handleHowToGuideRequestIfNeeded() -> Bool {
+        guard viewModel.consumeHowToGuideRequestIfNeeded() else { return false }
         startHowToGuide()
+        return true
     }
 
     private static let howToSteps: [HowToStep] = [
