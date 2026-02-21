@@ -199,12 +199,9 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     }
 
     func openOutputFolder() {
-        let targetPath: String
-        if let latestOutputPath {
-            targetPath = URL(fileURLWithPath: latestOutputPath).deletingLastPathComponent().path
-        } else {
-            targetPath = outputFolderPath
-        }
+        let targetPath = outputFolderPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? defaultOutputFolderPath
+            : outputFolderPath
         NSWorkspace.shared.open(URL(fileURLWithPath: targetPath))
     }
 

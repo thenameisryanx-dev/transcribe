@@ -22,6 +22,10 @@ rg -q "saveHistoryEntries\\(\\)" Sources/LectureTranscribeNative/TranscribeViewM
 rg -q "normalizeHistorySelection\\(" Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "GroupBox\\(\"Output\"\\)" Sources/LectureTranscribeNative/RootView.swift
 rg -q "Button\\(\"Open Output Folder\"\\)" Sources/LectureTranscribeNative/RootView.swift
+rg -q "Button\\(\"Change Folder…\"\\)" Sources/LectureTranscribeNative/RootView.swift
+! rg -q "\\.disabled\\(!viewModel\\.canOpenOutputFolder\\)" Sources/LectureTranscribeNative/RootView.swift
+rg -q "downloadsDirectory" Sources/LectureTranscribeNative/TranscribeViewModel.swift
+rg -q "defaultOutputFolderPath = downloads\\?\\.path \\?\\? NSHomeDirectory\\(\\)" Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "Transcription Model" Sources/LectureTranscribeNative/TranscribePaneView.swift
 rg -q "\\.popover\\(isPresented:" Sources/LectureTranscribeNative/TranscribePaneView.swift
 rg -q "ModelSelectionPopoverButton" Sources/LectureTranscribeNative/TranscribePaneView.swift
