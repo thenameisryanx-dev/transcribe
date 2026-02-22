@@ -28,6 +28,13 @@ DATE_TAG="$(date +%Y%m%d)"
 DMG_PATH="$DIST_DIR/Lecture-Transcribe-${DATE_TAG}-${ARCH}.dmg"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 USE_CREATE_DMG="${USE_CREATE_DMG:-1}"
+DMG_WINDOW_WIDTH=760
+DMG_WINDOW_HEIGHT=460
+DMG_ICON_SIZE=128
+DMG_TEXT_SIZE=13
+DMG_APP_ICON_X=190
+DMG_APPS_ICON_X=570
+DMG_ICON_Y=170
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This script builds a macOS .dmg and must run on macOS."
@@ -353,10 +360,10 @@ create_dmg_with_finder_layout() {
   local -a create_dmg_cmd=(
     create-dmg
     --volname "$APP_NAME"
-    --window-size 760 460
-    --icon-size 128
-    --icon "$APP_NAME.app" 190 170
-    --app-drop-link 570 170
+    --window-size "$DMG_WINDOW_WIDTH" "$DMG_WINDOW_HEIGHT"
+    --icon-size "$DMG_ICON_SIZE"
+    --icon "$APP_NAME.app" "$DMG_APP_ICON_X" "$DMG_ICON_Y"
+    --app-drop-link "$DMG_APPS_ICON_X" "$DMG_ICON_Y"
     --hide-extension "$APP_NAME.app"
     --no-internet-enable
   )
@@ -375,12 +382,22 @@ create_dmg_with_native_layout() {
   local attach_output=""
   local device=""
   local mount_point=""
+  local disk_name=""
   local background_line=""
+  local expected_app_pos="${DMG_APP_ICON_X},${DMG_ICON_Y}"
+  local expected_apps_pos="${DMG_APPS_ICON_X},${DMG_ICON_Y}"
+  local layout_pos_out=""
+  local app_pos=""
+  local apps_pos=""
+  local layout_attempt=1
+  local layout_verified=0
 
   rm -f "$rw_dmg"
   COPYFILE_DISABLE=1 hdiutil create \
     -volname "$APP_NAME" \
     -srcfolder "$STAGING_DIR" \
+    -fs HFS+ \
+    -fsargs "-c c=64,a=16,e=16" \
     -ov \
     -format UDRW \
     "$rw_dmg" >/dev/null
@@ -388,7 +405,8 @@ create_dmg_with_native_layout() {
   attach_output="$(hdiutil attach -readwrite -noverify -noautoopen "$rw_dmg")"
   device="$(printf "%s\n" "$attach_output" | awk '/^\/dev\// {print $1; exit}')"
   mount_point="$(printf "%s\n" "$attach_output" | awk -F'\t' '/\/Volumes\// {print $NF; exit}')"
-  if [[ -z "$device" || -z "$mount_point" ]]; then
+  disk_name="$(basename "$mount_point")"
+  if [[ -z "$device" || -z "$mount_point" || -z "$disk_name" ]]; then
     echo "warning: failed to attach rw DMG for Finder layout; falling back to plain hdiutil DMG." >&2
     rm -f "$rw_dmg"
     return 1
@@ -400,30 +418,82 @@ create_dmg_with_native_layout() {
     background_line='set background picture of viewOptions to file ".background:background.png"'
   fi
 
-  osascript >/dev/null <<APPLESCRIPT || true
+  while [[ "$layout_attempt" -le 2 ]]; do
+    if ! osascript >/dev/null <<APPLESCRIPT
 tell application "Finder"
-  tell disk "$APP_NAME"
+  tell disk "$disk_name"
     open
     delay 1
     set current view of container window to icon view
     set toolbar visible of container window to false
     set statusbar visible of container window to false
-    set bounds of container window to {120, 120, 880, 580}
+    set bounds of container window to {120, 120, 120 + $DMG_WINDOW_WIDTH, 120 + $DMG_WINDOW_HEIGHT}
     set viewOptions to the icon view options of container window
     set arrangement of viewOptions to not arranged
-    set icon size of viewOptions to 128
-    set text size of viewOptions to 13
+    set icon size of viewOptions to $DMG_ICON_SIZE
+    set text size of viewOptions to $DMG_TEXT_SIZE
     ${background_line}
-    set position of item "$APP_NAME.app" of container window to {190, 170}
-    set position of item "Applications" of container window to {570, 170}
+    set position of item "$APP_NAME.app" of container window to {$DMG_APP_ICON_X, $DMG_ICON_Y}
+    set position of item "Applications" of container window to {$DMG_APPS_ICON_X, $DMG_ICON_Y}
     update without registering applications
-    delay 1
+    delay 2
     close
   end tell
 end tell
 APPLESCRIPT
+    then
+      echo "warning: Finder layout automation failed on attempt $layout_attempt." >&2
+      layout_attempt=$((layout_attempt + 1))
+      continue
+    fi
 
-  hdiutil detach "$device" >/dev/null
+    sleep 1
+    layout_pos_out="$(osascript <<APPPOS
+tell application "Finder"
+  tell disk "$disk_name"
+    open
+    delay 1
+    tell container window
+      set appPos to position of item "$APP_NAME.app"
+      set appsPos to position of item "Applications"
+    end tell
+    close
+  end tell
+end tell
+set appX to item 1 of appPos
+set appY to item 2 of appPos
+set appsX to item 1 of appsPos
+set appsY to item 2 of appsPos
+return (appX as string) & "," & (appY as string) & "|" & (appsX as string) & "," & (appsY as string)
+APPPOS
+)"
+    app_pos="${layout_pos_out%%|*}"
+    apps_pos="${layout_pos_out##*|}"
+    if [[ "$app_pos" == "$expected_app_pos" && "$apps_pos" == "$expected_apps_pos" ]]; then
+      layout_verified=1
+      break
+    fi
+
+    echo "warning: Finder icon positions mismatch on attempt $layout_attempt (app=$app_pos applications=$apps_pos)." >&2
+    layout_attempt=$((layout_attempt + 1))
+  done
+
+  if [[ "$layout_verified" -ne 1 ]]; then
+    echo "warning: Finder icon positions did not persist as expected after retries." >&2
+    if ! hdiutil detach "$device" >/dev/null; then
+      echo "warning: failed to detach $device after layout verification failure." >&2
+    fi
+    rm -f "$rw_dmg"
+    return 1
+  fi
+
+  bless --folder "$mount_point" --openfolder "$mount_point" >/dev/null 2>&1 || true
+  sync
+  if ! hdiutil detach "$device" >/dev/null; then
+    echo "warning: failed to detach $device after setting Finder layout." >&2
+    rm -f "$rw_dmg"
+    return 1
+  fi
   hdiutil convert "$rw_dmg" -ov -format UDZO -o "$DMG_PATH" >/dev/null
   rm -f "$rw_dmg"
 }
