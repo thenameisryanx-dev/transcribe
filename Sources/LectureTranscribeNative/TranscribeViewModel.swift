@@ -62,7 +62,6 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published var isRunning = false
     @Published var canOpenOutputFolder = false
     @Published var latestOutputPath: String?
-    @Published var canCreateNewTranscript = false
 
     @Published var showingAPIKeySheet = false
     @Published var pendingAPIKey = ""
@@ -70,6 +69,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
     @Published var showingErrorAlert = false
     @Published var errorMessage = ""
+    @Published var showingClearDraftConfirmation = false
     @Published var howToGuideRequestToken = 0
 
     private let backend = BackendClient()
@@ -100,6 +100,13 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
     var canStart: Bool {
         !isRunning && !audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var canClearDraft: Bool {
+        guard !isRunning else { return false }
+        let hasAudioPath = !audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasRunState = progressValue > 0 || !logText.isEmpty || statusText != "Ready" || latestOutputPath != nil || canOpenOutputFolder
+        return hasAudioPath || hasRunState
     }
 
     var progressLabel: String {
@@ -307,7 +314,6 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         logText = ""
         latestOutputPath = nil
         canOpenOutputFolder = false
-        canCreateNewTranscript = false
         isRunning = true
         let shouldDiarize = diarizeEnabled && selectedTranscriptionModel.supportsDiarization
         if diarizeEnabled != shouldDiarize {
@@ -359,8 +365,6 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             statusText = "Done"
             latestOutputPath = path
             canOpenOutputFolder = true
-            // Show a single clear action after success so users can quickly start over.
-            canCreateNewTranscript = true
             appendLog("Done. Wrote: \(path)")
             finalizeActiveHistoryEntry(status: .success, outputPath: path, errorMessage: nil)
         case let .error(message):
@@ -384,21 +388,24 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         showingErrorAlert = true
     }
 
-    func createNewTranscript() {
+    func requestClearDraft() {
+        guard canClearDraft else { return }
+        showingClearDraftConfirmation = true
+    }
+
+    func clearDraft() {
         guard !isRunning else { return }
 
-        // Reset run-scoped fields while preserving API key state and saved history.
+        // Reset run-scoped fields while preserving API key state, options, and history.
         audioFilePath = ""
-        outputFolderPath = defaultOutputFolderPath
-        diarizeEnabled = false
         statusText = "Ready"
         progressValue = 0
         logText = ""
         latestOutputPath = nil
         canOpenOutputFolder = false
-        canCreateNewTranscript = false
         showingErrorAlert = false
         errorMessage = ""
+        showingClearDraftConfirmation = false
     }
 
     private func loadHistoryEntries() {

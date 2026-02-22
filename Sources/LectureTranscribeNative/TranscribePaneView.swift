@@ -99,18 +99,23 @@ struct TranscribePaneView: View {
             Divider()
 
             HStack(alignment: .center, spacing: 12) {
-                Button(viewModel.canCreateNewTranscript ? "New Transcription" : "Start Transcription") {
-                    if viewModel.canCreateNewTranscript {
-                        viewModel.createNewTranscript()
-                    } else {
-                        viewModel.startTranscription()
-                    }
+                Button("Start Transcribing") {
+                    viewModel.startTranscription()
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(viewModel.canCreateNewTranscript ? viewModel.isRunning : !viewModel.canStart)
-                .accessibilityLabel(viewModel.canCreateNewTranscript ? "Start a new transcription" : "Start transcription")
+                .disabled(!viewModel.canStart)
+                .accessibilityLabel("Start transcribing")
                 .howToTarget(.startButton)
+
+                Button {
+                    viewModel.requestClearDraft()
+                } label: {
+                    Label("Clear Draft", systemImage: "xmark.circle")
+                }
+                .buttonStyle(.bordered)
+                .disabled(!viewModel.canClearDraft)
+                .help("Clears selected audio, progress, and run log. Keeps run history.")
 
                 ModelSelectionPopoverButton(
                     selectedModel: $viewModel.selectedTranscriptionModel,
@@ -164,6 +169,18 @@ struct TranscribePaneView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(viewModel.errorMessage)
+        }
+        .confirmationDialog(
+            "Clear current draft?",
+            isPresented: $viewModel.showingClearDraftConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Clear Draft") {
+                viewModel.clearDraft()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This clears the selected audio file, progress, and run log. It does not remove any run history.")
         }
         .onAppear {
             if handleHowToGuideRequestIfNeeded() {
@@ -308,7 +325,7 @@ struct TranscribePaneView: View {
         HowToStep(
             target: .startButton,
             title: "4) Start transcription",
-            message: "Click Start Transcription to run. After a successful run, this button changes to New Transcription."
+            message: "Click Start Transcribing to run the selected audio file with your current options."
         ),
         HowToStep(
             target: .runLog,

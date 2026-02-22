@@ -39,6 +39,14 @@ rg -q "MODEL_MINI" transcription_job.py
 rg -q "Speaker diarization is not supported with gpt-4o-mini-transcribe" transcription_job.py
 rg -U -q 'func requestHowToGuide\(\) \{\n\s*howToGuideRequestToken \+= 1\n\s*selectedPane = \.transcribe' Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "if handleHowToGuideRequestIfNeeded\\(\\) \\{" Sources/LectureTranscribeNative/TranscribePaneView.swift
+rg -F -q 'Button("Start Transcribing")' Sources/LectureTranscribeNative/TranscribePaneView.swift
+rg -F -q 'Label("Clear Draft", systemImage: "xmark.circle")' Sources/LectureTranscribeNative/TranscribePaneView.swift
+rg -F -q 'func requestClearDraft()' Sources/LectureTranscribeNative/TranscribeViewModel.swift
+rg -F -q 'func clearDraft()' Sources/LectureTranscribeNative/TranscribeViewModel.swift
+rg -F -q 'showingClearDraftConfirmation' Sources/LectureTranscribeNative/TranscribeViewModel.swift
+rg -F -q 'This clears the selected audio file, progress, and run log. It does not remove any run history.' Sources/LectureTranscribeNative/TranscribePaneView.swift
+! rg -q 'canCreateNewTranscript' Sources/LectureTranscribeNative/TranscribeViewModel.swift
+! rg -q 'New Transcription' Sources/LectureTranscribeNative/TranscribePaneView.swift
 
 echo "[3/3] Verifying launcher entry points..."
 [[ -f "Open Lecture Transcribe.command" ]]
