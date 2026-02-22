@@ -13,6 +13,26 @@ Output DMG will be in `dist/`:
 
 `Lecture-Transcribe-YYYYMMDD-<arch>.dmg`
 
+By default, the script now builds the standard macOS drag-to-Applications layout with only:
+
+- `Lecture Transcribe.app`
+- `Applications` alias
+
+It will use `create-dmg` when available, otherwise it uses built-in Finder automation for the same layout.
+
+Optional arrow-style background image paths:
+
+- `Resources/dmg-background.png`
+- `dmg-background.png`
+
+If no background image is found, the script auto-generates a default arrow-style background.
+
+Disable `create-dmg` layout and force plain `hdiutil` output:
+
+```bash
+USE_CREATE_DMG=0 ./build_macos_dmg.sh
+```
+
 If you already have a local app bundle and only want to re-wrap it into a DMG:
 
 ```bash

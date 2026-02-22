@@ -22,9 +22,12 @@ APP_ICON_ICONSET_ALT_PATH="$PROJECT_DIR/AppIcon.iconset"
 APP_ICON_PNG_ALT_PATH="$PROJECT_DIR/AppIcon.png"
 APP_ICON_PNG_LEGACY_PATH="$PROJECT_DIR/Icon.png"
 APP_ICON_PNG_LEGACY_RESOURCE_PATH="$PROJECT_DIR/Resources/Icon.png"
+DMG_BACKGROUND_PATH="$PROJECT_DIR/Resources/dmg-background.png"
+DMG_BACKGROUND_ALT_PATH="$PROJECT_DIR/dmg-background.png"
 DATE_TAG="$(date +%Y%m%d)"
 DMG_PATH="$DIST_DIR/Lecture-Transcribe-${DATE_TAG}-${ARCH}.dmg"
 SKIP_BUILD="${SKIP_BUILD:-0}"
+USE_CREATE_DMG="${USE_CREATE_DMG:-1}"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This script builds a macOS .dmg and must run on macOS."
@@ -178,7 +181,7 @@ prepare_app_icon() {
     sips -z 256 256 "$png_path" --out "$iconset_dir/icon_256x256.png" >/dev/null
     sips -z 512 512 "$png_path" --out "$iconset_dir/icon_256x256@2x.png" >/dev/null
     sips -z 512 512 "$png_path" --out "$iconset_dir/icon_512x512.png" >/dev/null
-    cp "$png_path" "$iconset_dir/icon_512x512@2x.png"
+    sips -z 1024 1024 "$png_path" --out "$iconset_dir/icon_512x512@2x.png" >/dev/null
     iconutil -c icns "$iconset_dir" -o "$generated_icns"
 
     echo "$generated_icns"
@@ -270,6 +273,203 @@ build_native_binary() {
   echo "$binary_path"
 }
 
+find_dmg_background() {
+  local bg_path
+  for bg_path in "$DMG_BACKGROUND_PATH" "$DMG_BACKGROUND_ALT_PATH"; do
+    if [[ -f "$bg_path" ]]; then
+      echo "$bg_path"
+      return 0
+    fi
+  done
+
+  local generated_bg="$DIST_DIR/.dmg-background-${DATE_TAG}.png"
+  if generate_default_dmg_background "$generated_bg"; then
+    echo "$generated_bg"
+    return 0
+  fi
+
+  return 1
+}
+
+generate_default_dmg_background() {
+  local output_path="$1"
+  /usr/bin/env swift - "$output_path" <<'SWIFT' >/dev/null 2>&1
+import AppKit
+
+let outputPath = CommandLine.arguments[1]
+let size = NSSize(width: 760, height: 460)
+
+guard let rep = NSBitmapImageRep(
+  bitmapDataPlanes: nil,
+  pixelsWide: Int(size.width),
+  pixelsHigh: Int(size.height),
+  bitsPerSample: 8,
+  samplesPerPixel: 4,
+  hasAlpha: true,
+  isPlanar: false,
+  colorSpaceName: .deviceRGB,
+  bitmapFormat: [],
+  bytesPerRow: 0,
+  bitsPerPixel: 0
+) else {
+  exit(1)
+}
+
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+
+let canvas = NSRect(origin: .zero, size: size)
+NSColor(calibratedWhite: 0.96, alpha: 1.0).setFill()
+canvas.fill()
+
+let arrow = NSBezierPath()
+arrow.move(to: NSPoint(x: 305, y: 350))
+arrow.line(to: NSPoint(x: 495, y: 350))
+arrow.line(to: NSPoint(x: 495, y: 380))
+arrow.line(to: NSPoint(x: 620, y: 320))
+arrow.line(to: NSPoint(x: 495, y: 260))
+arrow.line(to: NSPoint(x: 495, y: 290))
+arrow.line(to: NSPoint(x: 305, y: 290))
+arrow.close()
+NSColor(calibratedWhite: 0.73, alpha: 0.32).setFill()
+arrow.fill()
+
+NSGraphicsContext.restoreGraphicsState()
+
+guard let pngData = rep.representation(using: .png, properties: [:]) else {
+  exit(1)
+}
+
+do {
+  try pngData.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
+} catch {
+  exit(1)
+}
+SWIFT
+}
+
+create_dmg_with_finder_layout() {
+  local dmg_background="${1:-}"
+  local -a create_dmg_cmd=(
+    create-dmg
+    --volname "$APP_NAME"
+    --window-size 760 460
+    --icon-size 128
+    --icon "$APP_NAME.app" 190 170
+    --app-drop-link 570 170
+    --hide-extension "$APP_NAME.app"
+    --no-internet-enable
+  )
+
+  if [[ -n "$dmg_background" ]]; then
+    create_dmg_cmd+=(--background "$dmg_background")
+  fi
+
+  create_dmg_cmd+=("$DMG_PATH" "$STAGING_DIR")
+  "${create_dmg_cmd[@]}"
+}
+
+create_dmg_with_native_layout() {
+  local dmg_background="${1:-}"
+  local rw_dmg="$DIST_DIR/.Lecture-Transcribe-${DATE_TAG}-${ARCH}-rw.dmg"
+  local attach_output=""
+  local device=""
+  local mount_point=""
+  local background_line=""
+
+  rm -f "$rw_dmg"
+  COPYFILE_DISABLE=1 hdiutil create \
+    -volname "$APP_NAME" \
+    -srcfolder "$STAGING_DIR" \
+    -ov \
+    -format UDRW \
+    "$rw_dmg" >/dev/null
+
+  attach_output="$(hdiutil attach -readwrite -noverify -noautoopen "$rw_dmg")"
+  device="$(printf "%s\n" "$attach_output" | awk '/^\/dev\// {print $1; exit}')"
+  mount_point="$(printf "%s\n" "$attach_output" | awk -F'\t' '/\/Volumes\// {print $NF; exit}')"
+  if [[ -z "$device" || -z "$mount_point" ]]; then
+    echo "warning: failed to attach rw DMG for Finder layout; falling back to plain hdiutil DMG." >&2
+    rm -f "$rw_dmg"
+    return 1
+  fi
+
+  if [[ -n "$dmg_background" && -f "$dmg_background" ]]; then
+    mkdir -p "$mount_point/.background"
+    cp "$dmg_background" "$mount_point/.background/background.png"
+    background_line='set background picture of viewOptions to file ".background:background.png"'
+  fi
+
+  osascript >/dev/null <<APPLESCRIPT || true
+tell application "Finder"
+  tell disk "$APP_NAME"
+    open
+    delay 1
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set bounds of container window to {120, 120, 880, 580}
+    set viewOptions to the icon view options of container window
+    set arrangement of viewOptions to not arranged
+    set icon size of viewOptions to 128
+    set text size of viewOptions to 13
+    ${background_line}
+    set position of item "$APP_NAME.app" of container window to {190, 170}
+    set position of item "Applications" of container window to {570, 170}
+    update without registering applications
+    delay 1
+    close
+  end tell
+end tell
+APPLESCRIPT
+
+  hdiutil detach "$device" >/dev/null
+  hdiutil convert "$rw_dmg" -ov -format UDZO -o "$DMG_PATH" >/dev/null
+  rm -f "$rw_dmg"
+}
+
+create_distribution_dmg() {
+  local dmg_background=""
+  if dmg_background="$(find_dmg_background)"; then
+    echo "Using DMG background:"
+    echo "  $dmg_background"
+  else
+    echo "No DMG background available; continuing without background image."
+  fi
+
+  if [[ "$USE_CREATE_DMG" != "0" ]] && command -v create-dmg >/dev/null 2>&1; then
+    echo "Creating DMG with create-dmg drag-to-Applications layout."
+    if create_dmg_with_finder_layout "$dmg_background"; then
+      return
+    fi
+
+    echo "warning: create-dmg failed, trying native Finder layout DMG." >&2
+    rm -f "$DMG_PATH"
+  fi
+
+  echo "Creating DMG with native Finder layout automation."
+  if create_dmg_with_native_layout "$dmg_background"; then
+    return
+  fi
+
+  if [[ "$USE_CREATE_DMG" == "0" ]]; then
+    echo "warning: USE_CREATE_DMG=0 and native layout unavailable; creating plain hdiutil DMG."
+  else
+    if ! command -v create-dmg >/dev/null 2>&1; then
+      echo "warning: create-dmg not found and native layout unavailable; creating plain hdiutil DMG."
+    else
+      echo "warning: both create-dmg and native layout failed; creating plain hdiutil DMG."
+    fi
+  fi
+
+  COPYFILE_DISABLE=1 hdiutil create \
+    -volname "$APP_NAME" \
+    -srcfolder "$STAGING_DIR" \
+    -ov \
+    -format UDZO \
+    "$DMG_PATH" >/dev/null
+}
+
 assemble_native_app_bundle() {
   local app_path="$1"
   local native_binary_path="$2"
@@ -346,34 +546,8 @@ mkdir -p "$STAGING_DIR"
 ditto --norsrc "$APP_PATH" "$STAGING_DIR/$APP_NAME.app"
 ln -s /Applications "$STAGING_DIR/Applications"
 
-cat > "$STAGING_DIR/README.txt" <<'README'
-Lecture Transcribe
-
-Install:
-1. Drag "Lecture Transcribe.app" into Applications.
-2. Open the app.
-3. If macOS warns because the app is not notarized, right-click the app and choose Open.
-
-First run:
-- Enter your OpenAI API key when prompted.
-- Choose an audio file and transcribe.
-
-Requirements:
-- This native app requires a working `python3` interpreter on your Mac.
-
-Media tools:
-- This build bundles ffmpeg + ffprobe inside app resources.
-- If ffmpeg fallback is needed, install:
-  brew install ffmpeg
-README
-
 echo "Creating DMG..."
-COPYFILE_DISABLE=1 hdiutil create \
-  -volname "$APP_NAME" \
-  -srcfolder "$STAGING_DIR" \
-  -ov \
-  -format UDZO \
-  "$DMG_PATH" >/dev/null
+create_distribution_dmg
 
 echo
 echo "Done."
