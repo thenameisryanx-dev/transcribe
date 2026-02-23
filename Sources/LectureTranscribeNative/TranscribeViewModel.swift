@@ -82,6 +82,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private var activeHistoryEntryID: UUID?
     private var activeHistoryEntryFinalized = false
     private var lastHandledHowToGuideRequestToken = 0
+    private var selectedAudioURL: URL?
+    private var isAccessingSelectedAudioSecurityScope = false
 
     @Published private(set) var historyEntries: [TranscriptionHistoryEntry] = []
     @Published var selectedHistoryEntryIDs: Set<UUID> = []
@@ -191,8 +193,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             .quickTimeMovie,
         ]
 
-        if panel.runModal() == .OK, let path = panel.url?.path {
-            audioFilePath = path
+        if panel.runModal() == .OK, let selectedURL = panel.url {
+            applySelectedAudioURL(selectedURL)
         }
     }
 
@@ -246,6 +248,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     }
 
     func rerunHistoryEntry(_ entry: TranscriptionHistoryEntry) {
+        clearSelectedAudioURLAccess()
         audioFilePath = entry.inputPath
         outputFolderPath = entry.outputDirectory
         diarizeEnabled = entry.diarize
@@ -422,6 +425,22 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         showingErrorAlert = true
     }
 
+    private func applySelectedAudioURL(_ url: URL) {
+        clearSelectedAudioURLAccess()
+        selectedAudioURL = url
+        isAccessingSelectedAudioSecurityScope = url.startAccessingSecurityScopedResource()
+        audioFilePath = url.path
+    }
+
+    private func clearSelectedAudioURLAccess() {
+        guard let selectedAudioURL else { return }
+        if isAccessingSelectedAudioSecurityScope {
+            selectedAudioURL.stopAccessingSecurityScopedResource()
+        }
+        self.selectedAudioURL = nil
+        isAccessingSelectedAudioSecurityScope = false
+    }
+
     func requestClearDraft() {
         guard canClearDraft else { return }
         showingClearDraftConfirmation = true
@@ -432,6 +451,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
         // Reset run-scoped fields while preserving API key state, options, and history.
         cancellationRequested = false
+        clearSelectedAudioURLAccess()
         audioFilePath = ""
         statusText = "Ready"
         progressValue = 0
