@@ -86,8 +86,8 @@ struct TranscribePaneView: View {
                                 .padding(.vertical, 4)
                         }
                         .frame(minHeight: 220)
+                        .howToTarget(.runLog)
                     }
-                    .howToTarget(.runLog)
                 }
                 .frame(maxWidth: 760, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -237,13 +237,47 @@ struct TranscribePaneView: View {
 
         let padding: CGFloat
         switch target {
+        case .runLog:
+            padding = 2
         case .options, .startButton:
             padding = 6
         default:
             padding = 10
         }
 
-        rawRect = proxy[anchor].insetBy(dx: -padding, dy: -padding)
+        let anchoredRect = proxy[anchor].insetBy(dx: -padding, dy: -padding)
+        if target == .runLog {
+            // GroupBox styling can include the section label/header in bounds;
+            // trim to keep spotlight focused on the log content viewport.
+            let horizontalTrim: CGFloat = 2
+            let topTrim: CGFloat = 24
+            let bottomTrim: CGFloat = 4
+            let sideExpansion: CGFloat = 8
+            let bottomExpansion: CGFloat = 8
+            let baseHeight = max(120, anchoredRect.height - topTrim - bottomTrim)
+            let topLift = baseHeight / 4
+            let topEdge = anchoredRect.minY + topTrim - topLift
+            rawRect = CGRect(
+                x: anchoredRect.minX + horizontalTrim - sideExpansion,
+                y: topEdge,
+                width: max(120, anchoredRect.width - (horizontalTrim * 2) + (sideExpansion * 2)),
+                height: baseHeight + topLift + bottomExpansion
+            )
+        } else if target == .startButton {
+            // Keep left/bottom fixed and nudge top/right inward.
+            let rightInset: CGFloat = 2
+            let topInset: CGFloat = 4
+            let adjustedWidth = max(88, anchoredRect.width - rightInset)
+            let adjustedHeight = max(30, anchoredRect.height - topInset)
+            rawRect = CGRect(
+                x: anchoredRect.minX,
+                y: anchoredRect.maxY - adjustedHeight,
+                width: adjustedWidth,
+                height: adjustedHeight
+            )
+        } else {
+            rawRect = anchoredRect
+        }
         return clampedSpotlightRect(rawRect, in: proxy.size, for: target)
     }
 
@@ -253,15 +287,26 @@ struct TranscribePaneView: View {
         case .options:
             minimumSize = CGSize(width: 160, height: 60)
         case .startButton:
-            minimumSize = CGSize(width: 140, height: 44)
+            minimumSize = CGSize(width: 88, height: 30)
         default:
             minimumSize = CGSize(width: 140, height: 100)
         }
 
         let availableWidth = max(80, size.width - 32)
         let availableHeight = max(60, size.height - 32)
-        let width = min(max(rect.width.isFinite ? rect.width : 220, minimumSize.width), availableWidth)
-        let height = min(max(rect.height.isFinite ? rect.height : 120, minimumSize.height), availableHeight)
+        let maximumSize: CGSize
+        switch target {
+        case .runLog:
+            maximumSize = CGSize(
+                width: min(780, availableWidth),
+                height: min(252, availableHeight)
+            )
+        default:
+            maximumSize = CGSize(width: availableWidth, height: availableHeight)
+        }
+
+        let width = min(max(rect.width.isFinite ? rect.width : 220, minimumSize.width), maximumSize.width)
+        let height = min(max(rect.height.isFinite ? rect.height : 120, minimumSize.height), maximumSize.height)
 
         let minX: CGFloat = 16
         let maxX = max(minX, size.width - width - 16)
