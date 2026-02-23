@@ -21,5 +21,9 @@ let package = Package(
                 .copy("Resources/python"),
             ]
         ),
+        .testTarget(
+            name: "LectureTranscribeNativeTests",
+            dependencies: ["LectureTranscribeNative"]
+        ),
     ]
 )

@@ -8,7 +8,7 @@ enum BackendStreamEvent: Sendable {
     case error(String)
 }
 
-struct BackendClient {
+final class BackendClient: @unchecked Sendable {
     private enum BackendError: Error, LocalizedError {
         case invalidResponse(String)
         case commandFailed(String)
@@ -30,6 +30,8 @@ struct BackendClient {
         .deletingLastPathComponent() // BackendClient.swift
         .deletingLastPathComponent() // LectureTranscribeNative
         .deletingLastPathComponent() // Sources
+    private let activeProcessLock = NSLock()
+    private var activeProcess: Process?
 
     private var executableURL: URL {
         let path = CommandLine.arguments.first ?? ProcessInfo.processInfo.arguments.first ?? ""
@@ -125,6 +127,15 @@ struct BackendClient {
         try await runStreamCommand(args: args, onEvent: onEvent)
     }
 
+    func cancelActiveRun() {
+        withActiveProcessLock {
+            guard let process = activeProcess else { return }
+            guard process.isRunning else { return }
+            process.interrupt()
+            process.terminate()
+        }
+    }
+
     private func runSimpleCommand(_ args: [String]) throws -> [String: Any] {
         let backendScriptURL = try resolveBackendScriptURL()
         let process = Process()
@@ -166,7 +177,7 @@ struct BackendClient {
         let backendScriptURL = try resolveBackendScriptURL()
         let pythonProgram = self.pythonProgram
 
-        try await Task.detached(priority: .userInitiated) {
+        let streamTask = Task.detached(priority: .userInitiated) { [self] in
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
@@ -204,10 +215,25 @@ struct BackendClient {
             process.standardError = stderrPipe
 
             try process.run()
+            setActiveProcess(process)
+            defer {
+                setActiveProcess(nil)
+            }
+
+            let stderrReader = Task.detached(priority: .utility) {
+                String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            }
 
             let stdout = stdoutPipe.fileHandleForReading
             var textBuffer = ""
             while true {
+                if Task.isCancelled {
+                    if process.isRunning {
+                        process.terminate()
+                    }
+                    throw CancellationError()
+                }
+
                 let data = stdout.availableData
                 if data.isEmpty {
                     break
@@ -230,14 +256,35 @@ struct BackendClient {
             }
 
             process.waitUntilExit()
-            let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let stderr = await stderrReader.value
             if process.terminationStatus != 0 {
+                if Task.isCancelled {
+                    throw CancellationError()
+                }
                 let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? "Transcription command failed."
                     : stderr.trimmingCharacters(in: .whitespacesAndNewlines)
                 throw BackendError.commandFailed(message)
             }
         }
-        .value
+
+        try await withTaskCancellationHandler {
+            try await streamTask.value
+        } onCancel: {
+            streamTask.cancel()
+            cancelActiveRun()
+        }
+    }
+
+    private func setActiveProcess(_ process: Process?) {
+        withActiveProcessLock {
+            activeProcess = process
+        }
+    }
+
+    private func withActiveProcessLock<T>(_ body: () -> T) -> T {
+        activeProcessLock.lock()
+        defer { activeProcessLock.unlock() }
+        return body()
     }
 }

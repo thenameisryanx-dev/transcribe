@@ -41,14 +41,19 @@ struct TranscriptionHistoryStore {
     private let fileManager: FileManager
     private let historyFileURL: URL
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, historyFileURL: URL? = nil) {
         self.fileManager = fileManager
+
+        if let historyFileURL {
+            self.historyFileURL = historyFileURL
+            return
+        }
 
         let applicationSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support", isDirectory: true)
 
         let containerURL = applicationSupportURL.appendingPathComponent("LectureTranscribe", isDirectory: true)
-        historyFileURL = containerURL.appendingPathComponent("history.json", isDirectory: false)
+        self.historyFileURL = containerURL.appendingPathComponent("history.json", isDirectory: false)
     }
 
     func loadEntries() throws -> [TranscriptionHistoryEntry] {

@@ -108,6 +108,14 @@ struct TranscribePaneView: View {
                 .accessibilityLabel("Start transcribing")
                 .howToTarget(.startButton)
 
+                Button("Cancel Run") {
+                    viewModel.cancelTranscription()
+                }
+                .buttonStyle(.bordered)
+                .keyboardShortcut(.cancelAction)
+                .disabled(!viewModel.canCancel)
+                .help("Stops the active transcription run.")
+
                 Button {
                     viewModel.requestClearDraft()
                 } label: {

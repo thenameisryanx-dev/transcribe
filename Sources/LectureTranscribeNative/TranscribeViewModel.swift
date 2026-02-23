@@ -78,6 +78,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private static let selectedModelDefaultsKey = "selectedTranscriptionModel"
     private let defaultOutputFolderPath: String
     private var runTask: Task<Void, Never>?
+    private var cancellationRequested = false
     private var activeHistoryEntryID: UUID?
     private var activeHistoryEntryFinalized = false
     private var lastHandledHowToGuideRequestToken = 0
@@ -107,6 +108,10 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         let hasAudioPath = !audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasRunState = progressValue > 0 || !logText.isEmpty || statusText != "Ready" || latestOutputPath != nil || canOpenOutputFolder
         return hasAudioPath || hasRunState
+    }
+
+    var canCancel: Bool {
+        isRunning
     }
 
     var progressLabel: String {
@@ -309,6 +314,13 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             return
         }
 
+        let normalizedOutputDirectory = normalizeOutputDirectoryPath(outputFolderPath)
+        guard ensureOutputDirectoryAvailable(at: normalizedOutputDirectory) else {
+            return
+        }
+
+        outputFolderPath = normalizedOutputDirectory
+        cancellationRequested = false
         progressValue = 0
         statusText = "Starting..."
         logText = ""
@@ -319,7 +331,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         if diarizeEnabled != shouldDiarize {
             diarizeEnabled = shouldDiarize
         }
-        beginHistoryEntry(inputPath: trimmedPath, outputDirectory: outputFolderPath, diarize: shouldDiarize)
+        beginHistoryEntry(inputPath: trimmedPath, outputDirectory: normalizedOutputDirectory, diarize: shouldDiarize)
 
         runTask = Task { [weak self] in
             guard let self else { return }
@@ -327,7 +339,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             do {
                 try await backend.startTranscription(
                     inputPath: trimmedPath,
-                    outputDirectory: outputFolderPath,
+                    outputDirectory: normalizedOutputDirectory,
                     diarize: shouldDiarize,
                     model: selectedTranscriptionModel.rawValue
                 ) { [weak self] event in
@@ -337,18 +349,36 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
                 }
             } catch is CancellationError {
                 statusText = "Cancelled"
+                appendLog("Run cancelled.")
                 finalizeActiveHistoryEntry(status: .cancelled, errorMessage: "Run cancelled.")
             } catch {
-                statusText = "Failed"
-                appendLog("Error: \(error.localizedDescription)")
-                showError(error.localizedDescription)
-                finalizeActiveHistoryEntry(status: .failed, errorMessage: error.localizedDescription)
+                if cancellationRequested {
+                    statusText = "Cancelled"
+                    appendLog("Run cancelled.")
+                    finalizeActiveHistoryEntry(status: .cancelled, errorMessage: "Run cancelled.")
+                } else {
+                    statusText = "Failed"
+                    appendLog("Error: \(error.localizedDescription)")
+                    showError(error.localizedDescription)
+                    finalizeActiveHistoryEntry(status: .failed, errorMessage: error.localizedDescription)
+                }
             }
 
             isRunning = false
+            cancellationRequested = false
             runTask = nil
             clearActiveHistoryTracking()
         }
+    }
+
+    func cancelTranscription() {
+        guard isRunning else { return }
+        guard !cancellationRequested else { return }
+        cancellationRequested = true
+        statusText = "Cancelling..."
+        appendLog("Cancelling run...")
+        runTask?.cancel()
+        backend.cancelActiveRun()
     }
 
     private func apply(event: BackendStreamEvent) {
@@ -368,6 +398,10 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             appendLog("Done. Wrote: \(path)")
             finalizeActiveHistoryEntry(status: .success, outputPath: path, errorMessage: nil)
         case let .error(message):
+            if cancellationRequested {
+                appendLog("Run cancellation completed.")
+                return
+            }
             statusText = "Failed"
             appendLog("Error: \(message)")
             showError(message)
@@ -397,6 +431,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         guard !isRunning else { return }
 
         // Reset run-scoped fields while preserving API key state, options, and history.
+        cancellationRequested = false
         audioFilePath = ""
         statusText = "Ready"
         progressValue = 0
@@ -406,6 +441,39 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         showingErrorAlert = false
         errorMessage = ""
         showingClearDraftConfirmation = false
+    }
+
+    private func normalizeOutputDirectoryPath(_ path: String) -> String {
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackPath = defaultOutputFolderPath
+        let candidatePath = trimmedPath.isEmpty ? fallbackPath : trimmedPath
+        return (candidatePath as NSString).expandingTildeInPath
+    }
+
+    private func ensureOutputDirectoryAvailable(at path: String) -> Bool {
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
+
+        if fileManager.fileExists(atPath: path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue else {
+                showError("Output path is a file:\n\(path)\n\nChoose a folder instead.")
+                return false
+            }
+        } else {
+            do {
+                try fileManager.createDirectory(atPath: path, withIntermediateDirectories: true)
+            } catch {
+                showError("Could not create output folder:\n\(path)\n\n\(error.localizedDescription)")
+                return false
+            }
+        }
+
+        guard fileManager.isWritableFile(atPath: path) else {
+            showError("Output folder is not writable:\n\(path)")
+            return false
+        }
+
+        return true
     }
 
     private func loadHistoryEntries() {

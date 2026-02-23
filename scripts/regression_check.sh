@@ -4,10 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "[1/3] Building Swift app..."
+echo "[1/4] Building Swift app..."
 swift build >/dev/null
 
-echo "[2/3] Verifying required UI and history features..."
+echo "[2/4] Running Swift unit tests..."
+swift test >/dev/null
+
+echo "[3/4] Verifying required UI and history features..."
 rg -q 'case transcribe = "Transcribe"' Sources/LectureTranscribeNative/RootView.swift
 rg -q 'case runs = "Runs"' Sources/LectureTranscribeNative/RootView.swift
 rg -q 'case settings = "Settings"' Sources/LectureTranscribeNative/RootView.swift
@@ -48,7 +51,7 @@ rg -F -q 'This clears the selected audio file, progress, and run log. It does no
 ! rg -q 'canCreateNewTranscript' Sources/LectureTranscribeNative/TranscribeViewModel.swift
 ! rg -q 'New Transcription' Sources/LectureTranscribeNative/TranscribePaneView.swift
 
-echo "[3/3] Verifying launcher entry points..."
+echo "[4/4] Verifying launcher entry points..."
 [[ -f "Open Lecture Transcribe.command" ]]
 [[ -f "Open Lecture Transcribe Native.command" ]]
 zsh -n "Open Lecture Transcribe.command"
@@ -56,9 +59,10 @@ zsh -n "Open Lecture Transcribe Native.command"
 rg -q 'TRANSCRIBE_PREFER_SOURCE=1 TRANSCRIBE_DEV_PROJECT_DIR="\$PROJECT_DIR" exec' "Open Lecture Transcribe Native.command"
 if [[ -f "Lecture Transcribe.app/Contents/MacOS/launcher" ]]; then
   zsh -n "Lecture Transcribe.app/Contents/MacOS/launcher"
-  rg -q 'COLOCATED_DEV_ROOT=' "Lecture Transcribe.app/Contents/MacOS/launcher"
-  rg -q 'if \[\[ "\$\{TRANSCRIBE_PREFER_SOURCE:-auto\}" != "0" \]\]' "Lecture Transcribe.app/Contents/MacOS/launcher"
-  rg -q 'if \[\[ "\$\{TRANSCRIBE_PREFER_DEV_BINARY:-0\}" == "1" \]\]; then' "Lecture Transcribe.app/Contents/MacOS/launcher"
+  rg -q 'BUNDLED_BINARY=' "Lecture Transcribe.app/Contents/MacOS/launcher"
+  rg -q 'TRANSCRIBE_PREFER_SOURCE:-0' "Lecture Transcribe.app/Contents/MacOS/launcher"
+  rg -q 'TRANSCRIBE_PREFER_DEV_BINARY:-auto' "Lecture Transcribe.app/Contents/MacOS/launcher"
+  rg -q 'exec "\$BUNDLED_BINARY" "\$@"' "Lecture Transcribe.app/Contents/MacOS/launcher"
 fi
 
 echo "Regression checks passed."
