@@ -3,9 +3,43 @@ import SwiftUI
 
 final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     var shouldTerminateAfterLastWindowClosed: (() -> Bool)?
+    private var windowWillCloseObserver: NSObjectProtocol?
+
+    override init() {
+        super.init()
+        windowWillCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.terminateIfIdleWithoutPrimaryWindows()
+        }
+    }
+
+    deinit {
+        if let windowWillCloseObserver {
+            NotificationCenter.default.removeObserver(windowWillCloseObserver)
+        }
+    }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         shouldTerminateAfterLastWindowClosed?() ?? true
+    }
+
+    private func terminateIfIdleWithoutPrimaryWindows() {
+        guard shouldTerminateAfterLastWindowClosed?() ?? true else {
+            return
+        }
+
+        DispatchQueue.main.async {
+            let hasVisiblePrimaryWindow = NSApplication.shared.windows.contains { window in
+                window.isVisible && window.canBecomeMain
+            }
+
+            if !hasVisiblePrimaryWindow {
+                NSApplication.shared.terminate(nil)
+            }
+        }
     }
 }
 
