@@ -13,6 +13,7 @@ VENDOR_DIR="$PROJECT_DIR/vendor"
 FFMPEG_VENDOR_DIR="$VENDOR_DIR/ffmpeg/$ARCH"
 FFMPEG_BIN_PATH="$FFMPEG_VENDOR_DIR/ffmpeg"
 FFPROBE_BIN_PATH="$FFMPEG_VENDOR_DIR/ffprobe"
+FFMPEG_LIB_DIR="$FFMPEG_VENDOR_DIR/lib"
 PYTHON_RESOURCE_DIR="$PROJECT_DIR"
 APP_ICON_ICNS_PATH="$PROJECT_DIR/Resources/AppIcon.icns"
 APP_ICON_ICONSET_PATH="$PROJECT_DIR/Resources/AppIcon.iconset"
@@ -44,14 +45,146 @@ fi
 cd "$PROJECT_DIR"
 mkdir -p "$DIST_DIR"
 
+binary_supports_arch() {
+  local binary_path="$1"
+  local required_arch="$2"
+
+  if [[ ! -f "$binary_path" ]]; then
+    return 1
+  fi
+  if ! command -v lipo >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local archs
+  archs="$(lipo -archs "$binary_path" 2>/dev/null || true)"
+  [[ -n "$archs" ]] || return 1
+  [[ " $archs " == *" $required_arch "* ]]
+}
+
+media_tools_match_host_arch() {
+  binary_supports_arch "$FFMPEG_BIN_PATH" "$ARCH" && binary_supports_arch "$FFPROBE_BIN_PATH" "$ARCH"
+}
+
+list_non_system_dylibs() {
+  local binary_path="$1"
+  otool -L "$binary_path" | awk 'NR>1 {print $1}' | while IFS= read -r dep; do
+    case "$dep" in
+      /opt/homebrew/*|/usr/local/*)
+        [[ -f "$dep" ]] && echo "$dep"
+        ;;
+      *)
+        ;;
+    esac
+  done
+}
+
+bundle_macos_dylib_closure() {
+  mkdir -p "$FFMPEG_LIB_DIR"
+
+  local changed=1
+  while [[ "$changed" -eq 1 ]]; do
+    changed=0
+
+    local -a sources=("$FFMPEG_BIN_PATH" "$FFPROBE_BIN_PATH")
+    while IFS= read -r existing_lib; do
+      [[ -n "$existing_lib" ]] && sources+=("$existing_lib")
+    done < <(find "$FFMPEG_LIB_DIR" -maxdepth 1 -type f -name '*.dylib' | sort)
+
+    local source dep dep_base dep_dest
+    for source in "${sources[@]}"; do
+      [[ -f "$source" ]] || continue
+      while IFS= read -r dep; do
+        [[ -n "$dep" ]] || continue
+        dep_base="$(basename "$dep")"
+        dep_dest="$FFMPEG_LIB_DIR/$dep_base"
+        if [[ ! -f "$dep_dest" ]]; then
+          install -m 755 "$dep" "$dep_dest"
+          changed=1
+        fi
+      done < <(list_non_system_dylibs "$source")
+    done
+  done
+}
+
+rewrite_macos_dylib_links() {
+  local target="$1"
+  local local_dep_prefix="@loader_path"
+  if [[ "$target" == "$FFMPEG_BIN_PATH" || "$target" == "$FFPROBE_BIN_PATH" ]]; then
+    local_dep_prefix="@loader_path/lib"
+  fi
+
+  local dep dep_base dep_rewrite
+  while IFS= read -r dep; do
+    [[ -n "$dep" ]] || continue
+    dep_base="$(basename "$dep")"
+    dep_rewrite="$local_dep_prefix/$dep_base"
+    install_name_tool -change "$dep" "$dep_rewrite" "$target"
+  done < <(list_non_system_dylibs "$target")
+
+  if [[ "$target" == "$FFMPEG_LIB_DIR/"*".dylib" ]]; then
+    install_name_tool -id "@loader_path/$(basename "$target")" "$target" || true
+  fi
+}
+
+prepare_local_arm64_ffmpeg_bundle() {
+  if [[ "$ARCH" != "arm64" ]]; then
+    return 1
+  fi
+
+  local local_ffmpeg local_ffprobe
+  local_ffmpeg="$(command -v ffmpeg || true)"
+  local_ffprobe="$(command -v ffprobe || true)"
+  if [[ -z "$local_ffmpeg" || -z "$local_ffprobe" ]]; then
+    return 1
+  fi
+
+  if ! binary_supports_arch "$local_ffmpeg" "arm64"; then
+    return 1
+  fi
+  if ! binary_supports_arch "$local_ffprobe" "arm64"; then
+    return 1
+  fi
+
+  install -m 755 "$local_ffmpeg" "$FFMPEG_BIN_PATH"
+  install -m 755 "$local_ffprobe" "$FFPROBE_BIN_PATH"
+  rm -rf "$FFMPEG_LIB_DIR"
+  bundle_macos_dylib_closure
+
+  rewrite_macos_dylib_links "$FFMPEG_BIN_PATH"
+  rewrite_macos_dylib_links "$FFPROBE_BIN_PATH"
+  local lib
+  while IFS= read -r lib; do
+    rewrite_macos_dylib_links "$lib"
+  done < <(find "$FFMPEG_LIB_DIR" -maxdepth 1 -type f -name '*.dylib' | sort)
+
+  media_tools_match_host_arch
+}
+
 ensure_bundled_ffmpeg() {
   mkdir -p "$FFMPEG_VENDOR_DIR"
 
   if [[ -x "$FFMPEG_BIN_PATH" && -x "$FFPROBE_BIN_PATH" ]]; then
-    echo "Using cached bundled media tools:"
-    echo "  $FFMPEG_BIN_PATH"
-    echo "  $FFPROBE_BIN_PATH"
-    return
+    if media_tools_match_host_arch; then
+      echo "Using cached bundled media tools:"
+      echo "  $FFMPEG_BIN_PATH"
+      echo "  $FFPROBE_BIN_PATH"
+      return
+    fi
+    echo "Cached bundled media tools are not native for $ARCH. Rebuilding bundle."
+    rm -f "$FFMPEG_BIN_PATH" "$FFPROBE_BIN_PATH"
+    rm -rf "$FFMPEG_LIB_DIR"
+  fi
+
+  if [[ "$ARCH" == "arm64" ]]; then
+    if prepare_local_arm64_ffmpeg_bundle; then
+      echo "Bundled media tools prepared from local arm64 ffmpeg:"
+      echo "  $FFMPEG_BIN_PATH"
+      echo "  $FFPROBE_BIN_PATH"
+      echo "  $FFMPEG_LIB_DIR"
+      return
+    fi
+    echo "Local arm64 ffmpeg bundle unavailable. Trying downloaded binaries."
   fi
 
   if ! command -v curl >/dev/null 2>&1; then
@@ -85,9 +218,28 @@ ensure_bundled_ffmpeg() {
   install -m 755 "$ffprobe_src" "$FFPROBE_BIN_PATH"
   rm -rf "$tmpdir"
 
+  if ! media_tools_match_host_arch; then
+    if [[ "$ARCH" == "arm64" ]]; then
+      echo "Downloaded ffmpeg binaries are not arm64. Building a native arm64 bundle from local ffmpeg."
+      rm -f "$FFMPEG_BIN_PATH" "$FFPROBE_BIN_PATH"
+      rm -rf "$FFMPEG_LIB_DIR"
+      if ! prepare_local_arm64_ffmpeg_bundle; then
+        echo "Could not create an arm64 ffmpeg bundle automatically."
+        echo "Install arm64 ffmpeg locally (brew install ffmpeg), then rerun this script."
+        exit 1
+      fi
+    else
+      echo "Downloaded ffmpeg binaries do not match host architecture: $ARCH"
+      exit 1
+    fi
+  fi
+
   echo "Bundled media tools prepared:"
   echo "  $FFMPEG_BIN_PATH"
   echo "  $FFPROBE_BIN_PATH"
+  if [[ -d "$FFMPEG_LIB_DIR" ]]; then
+    echo "  $FFMPEG_LIB_DIR"
+  fi
 }
 
 write_info_plist() {
@@ -563,6 +715,10 @@ assemble_native_app_bundle() {
   install -m 644 "$PYTHON_RESOURCE_DIR/transcription_job.py" "$app_path/Contents/Resources/python/transcription_job.py"
   install -m 755 "$FFMPEG_BIN_PATH" "$app_path/Contents/Resources/python/ffmpeg_bin/ffmpeg"
   install -m 755 "$FFPROBE_BIN_PATH" "$app_path/Contents/Resources/python/ffmpeg_bin/ffprobe"
+  if [[ -d "$FFMPEG_LIB_DIR" ]]; then
+    mkdir -p "$app_path/Contents/Resources/python/ffmpeg_bin/lib"
+    ditto "$FFMPEG_LIB_DIR" "$app_path/Contents/Resources/python/ffmpeg_bin/lib"
+  fi
 }
 
 echo "Cleaning previous artifacts..."

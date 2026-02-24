@@ -45,7 +45,7 @@ SKIP_BUILD=1 ./build_macos_dmg.sh
 2. Drag `Lecture Transcribe.app` to `Applications`.
 3. Open app (right-click -> Open on first launch if macOS blocks unsigned app).
 4. Ensure `python3` is available in PATH.
-5. Install `ffmpeg` only if fallback is needed:
+5. Install `ffmpeg` only if bundled media tools are missing:
 
 ```bash
 brew install ffmpeg
@@ -55,5 +55,6 @@ brew install ffmpeg
 
 - The generated app is architecture-specific (`arm64` or `x86_64`).
 - Standard builds bundle `ffmpeg` + `ffprobe` automatically in app resources.
+- Apple Silicon builds now require and validate native `arm64` media tools; x86_64-only binaries are rejected.
 - The distribution bundle now packages the native SwiftUI executable (`LectureTranscribeNative`), not the legacy PyInstaller/Tk app.
 - For clean one-click installs without warnings, add Developer ID signing + Apple notarization.

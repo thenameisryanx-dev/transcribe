@@ -215,15 +215,15 @@ def _candidate_tool_paths(tool_name: str) -> list[Path]:
     if env_path:
         candidates.append(Path(env_path).expanduser())
 
-    which_path = shutil.which(tool_name)
-    if which_path:
-        candidates.append(Path(which_path))
-
     if getattr(sys, "_MEIPASS", None):
         candidates.append(Path(str(sys._MEIPASS)) / BUNDLED_FFMPEG_DIR_NAME / tool_name)
 
     script_dir = Path(__file__).resolve().parent
     candidates.append(script_dir / BUNDLED_FFMPEG_DIR_NAME / tool_name)
+
+    which_path = shutil.which(tool_name)
+    if which_path:
+        candidates.append(Path(which_path))
 
     deduped: list[Path] = []
     seen: set[str] = set()
@@ -250,17 +250,50 @@ def _is_runnable_media_tool(path: Path) -> bool:
         return False
 
 
+def _binary_architectures(path: Path) -> set[str]:
+    try:
+        result = subprocess.run(
+            ["/usr/bin/lipo", "-archs", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=MEDIA_TOOL_CHECK_TIMEOUT_SECONDS,
+        )
+        return {part.strip() for part in result.stdout.split() if part.strip()}
+    except Exception:
+        return set()
+
+
+def _supports_host_arch(path: Path) -> bool:
+    host_arch = platform.machine()
+    binary_archs = _binary_architectures(path)
+    if not binary_archs:
+        return True
+
+    if host_arch == "arm64":
+        return "arm64" in binary_archs
+    if host_arch in {"x86_64", "amd64"}:
+        return "x86_64" in binary_archs
+    return True
+
+
 def find_media_tool(tool_name: str) -> str | None:
     cached = _MEDIA_TOOL_CACHE.get(tool_name)
     if cached:
         p = Path(cached)
-        if p.exists() and p.is_file() and os.access(p, os.X_OK):
+        if p.exists() and p.is_file() and os.access(p, os.X_OK) and _supports_host_arch(p):
             return cached
         _MEDIA_TOOL_CACHE.pop(tool_name, None)
 
     for p in _candidate_tool_paths(tool_name):
         try:
-            if p.exists() and p.is_file() and os.access(p, os.X_OK) and _is_runnable_media_tool(p):
+            if (
+                p.exists()
+                and p.is_file()
+                and os.access(p, os.X_OK)
+                and _supports_host_arch(p)
+                and _is_runnable_media_tool(p)
+            ):
                 resolved = str(p)
                 _MEDIA_TOOL_CACHE[tool_name] = resolved
                 return resolved
@@ -271,26 +304,8 @@ def find_media_tool(tool_name: str) -> str | None:
 
 def _tool_invocation_prefix(path: Path) -> list[str]:
     """
-    On Apple Silicon, Evermeet's binaries are x86_64-only.
-    If that's the case, run through Rosetta when available.
+    Always execute media tools natively.
     """
-    if platform.machine() != "arm64":
-        return [str(path)]
-
-    try:
-        r = subprocess.run(
-            ["/usr/bin/lipo", "-archs", str(path)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=MEDIA_TOOL_CHECK_TIMEOUT_SECONDS,
-        )
-        archs = set(r.stdout.strip().split())
-        if "x86_64" in archs and "arm64" not in archs:
-            return ["/usr/bin/arch", "-x86_64", str(path)]
-    except Exception:
-        pass
-
     return [str(path)]
 
 
@@ -310,6 +325,12 @@ def ffmpeg_bin() -> str:
     path = find_media_tool("ffmpeg")
     if path:
         return path
+    if platform.machine() == "arm64":
+        raise SystemExit(
+            "ffmpeg not found for native Apple Silicon execution. "
+            "Reinstall the latest app build with bundled arm64 ffmpeg, "
+            "or install arm64 system ffmpeg with: brew install ffmpeg"
+        )
     raise SystemExit(
         "ffmpeg not found. Reinstall the latest app build (bundled ffmpeg), "
         "or install system ffmpeg with: brew install ffmpeg"
@@ -320,6 +341,12 @@ def ffprobe_bin() -> str:
     path = find_media_tool("ffprobe")
     if path:
         return path
+    if platform.machine() == "arm64":
+        raise SystemExit(
+            "ffprobe not found for native Apple Silicon execution. "
+            "Reinstall the latest app build with bundled arm64 ffprobe, "
+            "or install arm64 system ffmpeg with: brew install ffmpeg"
+        )
     raise SystemExit(
         "ffprobe not found. Reinstall the latest app build (bundled ffprobe), "
         "or install system ffmpeg with: brew install ffmpeg"

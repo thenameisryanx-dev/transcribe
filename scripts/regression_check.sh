@@ -40,6 +40,9 @@ rg -q -- "--model" Sources/LectureTranscribeNative/BackendClient.swift
 rg -q -- "--model" transcribe_backend.py
 rg -q "MODEL_MINI" transcription_job.py
 rg -q "Speaker diarization is not supported with gpt-4o-mini-transcribe" transcription_job.py
+rg -q "def _supports_host_arch" lecture_transcribe.py
+! rg -q '"/usr/bin/arch", "-x86_64"' lecture_transcribe.py
+cmp -s lecture_transcribe.py Sources/LectureTranscribeNative/Resources/python/lecture_transcribe.py
 rg -U -q 'func requestHowToGuide\(\) \{\n\s*howToGuideRequestToken \+= 1\n\s*selectedPane = \.transcribe' Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "if handleHowToGuideRequestIfNeeded\\(\\) \\{" Sources/LectureTranscribeNative/TranscribePaneView.swift
 rg -F -q 'Button("Start Transcribing")' Sources/LectureTranscribeNative/TranscribePaneView.swift
