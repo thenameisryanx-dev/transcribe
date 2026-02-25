@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TranscribePaneView: View {
     @EnvironmentObject private var viewModel: TranscribeViewModel
@@ -7,6 +8,7 @@ struct TranscribePaneView: View {
 
     @State private var showingHowToGuide = false
     @State private var howToStepIndex = 0
+    @State private var isInputDropTargeted = false
 
     private var currentHowToStep: HowToStep {
         Self.howToSteps[howToStepIndex]
@@ -46,8 +48,8 @@ struct TranscribePaneView: View {
                     GroupBox("Input & Output") {
                         VStack(alignment: .leading, spacing: 14) {
                             labeledInputRow(
-                                title: "Audio File",
-                                placeholder: "Choose an audio file",
+                                title: "Input File",
+                                placeholder: "Choose or drop an audio/video file",
                                 text: $viewModel.audioFilePath,
                                 action: viewModel.browseAudioFile
                             )
@@ -190,6 +192,18 @@ struct TranscribePaneView: View {
         } message: {
             Text("This clears the selected audio file, progress, and run log. It does not remove any run history.")
         }
+        .onDrop(of: [.fileURL], isTargeted: $isInputDropTargeted, perform: handleFileDrop)
+        .overlay(alignment: .top) {
+            if isInputDropTargeted {
+                Text("Drop audio/video file to use as input")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.top, 14)
+                    .allowsHitTesting(false)
+            }
+        }
         .onAppear {
             if handleHowToGuideRequestIfNeeded() {
                 hasSeenHowToGuide = true
@@ -329,6 +343,42 @@ struct TranscribePaneView: View {
         return CGRect(x: x, y: y, width: width, height: height)
     }
 
+    @discardableResult
+    private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
+            return false
+        }
+
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+            guard let droppedURL = Self.resolveDroppedFileURL(from: item) else { return }
+            Task { @MainActor in
+                viewModel.selectDroppedInputFile(droppedURL)
+            }
+        }
+        return true
+    }
+
+    nonisolated private static func resolveDroppedFileURL(from item: NSSecureCoding?) -> URL? {
+        if let url = item as? URL, url.isFileURL {
+            return url.standardizedFileURL
+        }
+
+        if let data = item as? Data {
+            if let url = URL(dataRepresentation: data, relativeTo: nil), url.isFileURL {
+                return url.standardizedFileURL
+            }
+        }
+
+        if let value = item as? String,
+           let url = URL(string: value),
+           url.isFileURL
+        {
+            return url.standardizedFileURL
+        }
+
+        return nil
+    }
+
     private func startHowToGuide() {
         howToStepIndex = 0
         showingHowToGuide = true
@@ -368,7 +418,7 @@ struct TranscribePaneView: View {
         HowToStep(
             target: .inputOutput,
             title: "2) Select audio and output",
-            message: "Pick the lecture audio file and choose where transcript files should be written."
+            message: "Pick or drag a lecture audio/video file, then choose where transcript files should be written."
         ),
         HowToStep(
             target: .options,
@@ -378,7 +428,7 @@ struct TranscribePaneView: View {
         HowToStep(
             target: .startButton,
             title: "4) Start transcription",
-            message: "Click Start Transcribing to run the selected audio file with your current options."
+            message: "Click Start Transcribing to run the selected input file with your current options."
         ),
         HowToStep(
             target: .runLog,

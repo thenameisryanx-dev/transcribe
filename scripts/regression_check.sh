@@ -36,6 +36,10 @@ rg -q "selectedModel.displayName" Sources/LectureTranscribeNative/TranscribePane
 rg -q "selectedTranscriptionModel" Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "isDiarizationAvailable" Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "Unavailable for" Sources/LectureTranscribeNative/TranscribePaneView.swift
+rg -q 'onDrop\(of: \[\.fileURL\]' Sources/LectureTranscribeNative/RootView.swift
+rg -q 'Drop audio/video file to use as input' Sources/LectureTranscribeNative/RootView.swift
+rg -q 'onDrop\(of: \[\.fileURL\]' Sources/LectureTranscribeNative/TranscribePaneView.swift
+rg -q "func selectDroppedInputFile\\(_ url: URL\\)" Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q -- "--model" Sources/LectureTranscribeNative/BackendClient.swift
 rg -q -- "--model" transcribe_backend.py
 rg -q "MODEL_MINI" transcription_job.py

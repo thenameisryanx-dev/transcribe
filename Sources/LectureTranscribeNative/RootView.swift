@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum NavigationPane: String, CaseIterable, Identifiable {
     case transcribe = "Transcribe"
@@ -21,6 +22,7 @@ enum NavigationPane: String, CaseIterable, Identifiable {
 
 struct RootView: View {
     @EnvironmentObject private var viewModel: TranscribeViewModel
+    @State private var isGlobalInputDropTargeted = false
 
     var body: some View {
         NavigationSplitView {
@@ -48,6 +50,54 @@ struct RootView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
+        .onDrop(of: [.fileURL], isTargeted: $isGlobalInputDropTargeted, perform: handleFileDrop)
+        .overlay(alignment: .top) {
+            if isGlobalInputDropTargeted {
+                Text("Drop audio/video file to use as input")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.top, 14)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    @discardableResult
+    private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
+            return false
+        }
+
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+            guard let droppedURL = Self.resolveDroppedFileURL(from: item) else { return }
+            Task { @MainActor in
+                viewModel.selectDroppedInputFile(droppedURL)
+            }
+        }
+        return true
+    }
+
+    nonisolated private static func resolveDroppedFileURL(from item: NSSecureCoding?) -> URL? {
+        if let url = item as? URL, url.isFileURL {
+            return url.standardizedFileURL
+        }
+
+        if let data = item as? Data {
+            if let url = URL(dataRepresentation: data, relativeTo: nil), url.isFileURL {
+                return url.standardizedFileURL
+            }
+        }
+
+        if let value = item as? String,
+           let url = URL(string: value),
+           url.isFileURL
+        {
+            return url.standardizedFileURL
+        }
+
+        return nil
     }
 }
 

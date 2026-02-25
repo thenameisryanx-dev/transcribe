@@ -76,6 +76,12 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private let historyStore = TranscriptionHistoryStore()
     private let maxHistoryEntries = 200
     private static let selectedModelDefaultsKey = "selectedTranscriptionModel"
+    private static let supportedInputContentTypes: [UTType] = [
+        .audio,
+        .mpeg4Movie,
+        .movie,
+        .quickTimeMovie,
+    ]
     private let defaultOutputFolderPath: String
     private var runTask: Task<Void, Never>?
     private var cancellationRequested = false
@@ -184,16 +190,35 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [
-            .audio,
-            .mpeg4Movie,
-            .movie,
-            .quickTimeMovie,
-        ]
+        panel.allowedContentTypes = Self.supportedInputContentTypes
 
         if panel.runModal() == .OK, let path = panel.url?.path {
             audioFilePath = path
         }
+    }
+
+    func selectDroppedInputFile(_ url: URL) {
+        let fileURL = url.standardizedFileURL
+        guard fileURL.isFileURL else {
+            showError("Dropped item is not a local file.")
+            return
+        }
+
+        let path = fileURL.path
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            showError("Dropped item is not a file:\n\(path)")
+            return
+        }
+
+        guard Self.isSupportedInputFileType(at: fileURL) else {
+            showError("Unsupported file type. Drop an audio file or a video file with audio.")
+            return
+        }
+
+        audioFilePath = path
+        selectedPane = .transcribe
+        appendLog("Selected input file: \(path)")
     }
 
     func browseOutputFolder() {
@@ -441,6 +466,13 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         showingErrorAlert = false
         errorMessage = ""
         showingClearDraftConfirmation = false
+    }
+
+    private static func isSupportedInputFileType(at fileURL: URL) -> Bool {
+        let resourceValues = try? fileURL.resourceValues(forKeys: [.contentTypeKey])
+        let contentType = resourceValues?.contentType ?? UTType(filenameExtension: fileURL.pathExtension)
+        guard let contentType else { return false }
+        return supportedInputContentTypes.contains { contentType.conforms(to: $0) }
     }
 
     private func normalizeOutputDirectoryPath(_ path: String) -> String {
