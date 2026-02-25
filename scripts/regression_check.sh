@@ -59,7 +59,7 @@ echo "[4/4] Verifying launcher entry points..."
 [[ -f "Open Lecture Transcribe Native.command" ]]
 zsh -n "Open Lecture Transcribe.command"
 zsh -n "Open Lecture Transcribe Native.command"
-rg -q 'TRANSCRIBE_PREFER_SOURCE=1 TRANSCRIBE_DEV_PROJECT_DIR="\$PROJECT_DIR" exec' "Open Lecture Transcribe Native.command"
+rg -q 'TRANSCRIBE_PREFER_SOURCE=0 TRANSCRIBE_PREFER_DEV_BINARY=0 exec' "Open Lecture Transcribe Native.command"
 if [[ -f "Lecture Transcribe.app/Contents/MacOS/launcher" ]]; then
   zsh -n "Lecture Transcribe.app/Contents/MacOS/launcher"
   rg -q 'BUNDLED_BINARY=' "Lecture Transcribe.app/Contents/MacOS/launcher"
