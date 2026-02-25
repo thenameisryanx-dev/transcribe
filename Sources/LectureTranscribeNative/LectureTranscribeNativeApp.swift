@@ -60,7 +60,7 @@ struct LectureTranscribeNativeApp: App {
         WindowGroup("Lecture Transcribe") {
             RootView()
                 .environmentObject(viewModel)
-                .frame(minWidth: 920, minHeight: 640)
+                .frame(minWidth: 1120, minHeight: 760)
         }
         .windowResizability(.contentSize)
 

@@ -428,11 +428,6 @@ private struct ModelSelectionPopoverButton: View {
         .disabled(isDisabled)
         .onHover { isHovering in
             isButtonHovered = isHovering
-            if isHovering {
-                NSCursor.pointingHand.set()
-            } else {
-                NSCursor.arrow.set()
-            }
         }
         .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 8) {

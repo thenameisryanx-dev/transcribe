@@ -20,6 +20,7 @@ rg -q "\\.foregroundStyle\\(\\.primary\\)" Sources/LectureTranscribeNative/RootV
 rg -q "RunsPaneView\\(\\)" Sources/LectureTranscribeNative/RootView.swift
 rg -q "struct RunsPaneView" Sources/LectureTranscribeNative/RunsPaneView.swift
 rg -q "struct TranscriptionHistoryStore" Sources/LectureTranscribeNative/TranscriptionHistory.swift
+rg -q "frame\\(minWidth: 1120, minHeight: 760\\)" Sources/LectureTranscribeNative/LectureTranscribeNativeApp.swift
 rg -q "loadHistoryEntries\\(\\)" Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "saveHistoryEntries\\(\\)" Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "normalizeHistorySelection\\(" Sources/LectureTranscribeNative/TranscribeViewModel.swift
