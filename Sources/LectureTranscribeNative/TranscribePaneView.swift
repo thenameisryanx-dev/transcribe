@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TranscribePaneView: View {
     @EnvironmentObject private var viewModel: TranscribeViewModel
@@ -7,6 +8,7 @@ struct TranscribePaneView: View {
 
     @State private var showingHowToGuide = false
     @State private var howToStepIndex = 0
+    @State private var isAudioFileDropTargeted = false
 
     private var currentHowToStep: HowToStep {
         Self.howToSteps[howToStepIndex]
@@ -148,6 +150,12 @@ struct TranscribePaneView: View {
             .padding(.vertical, 12)
             .background(.bar)
         }
+        .contentShape(Rectangle())
+        .onDrop(
+            of: [UTType.fileURL.identifier],
+            isTargeted: $isAudioFileDropTargeted,
+            perform: handleAudioFileDrop(providers:)
+        )
         .overlayPreferenceValue(HowToTargetPreferenceKey.self) { anchors in
             GeometryReader { proxy in
                 if showingHowToGuide, proxy.size.width > 120, proxy.size.height > 120 {
@@ -386,6 +394,60 @@ struct TranscribePaneView: View {
             message: "Watch progress and logs here. Use Open Output Folder to quickly access your generated transcript."
         ),
     ]
+
+    private func handleAudioFileDrop(providers: [NSItemProvider]) -> Bool {
+        guard !viewModel.isRunning else { return false }
+        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
+            return false
+        }
+
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+            if let error {
+                Task { @MainActor in
+                    viewModel.reportDroppedAudioFileReadFailure(details: error.localizedDescription)
+                }
+                return
+            }
+
+            guard let droppedURL = Self.droppedFileURL(from: item) else {
+                Task { @MainActor in
+                    viewModel.reportDroppedAudioFileReadFailure()
+                }
+                return
+            }
+
+            Task { @MainActor in
+                viewModel.loadDroppedAudioFile(droppedURL)
+            }
+        }
+
+        return true
+    }
+
+    nonisolated private static func droppedFileURL(from item: NSSecureCoding?) -> URL? {
+        if let url = item as? URL {
+            return url
+        }
+
+        if let data = item as? Data {
+            if let url = URL(dataRepresentation: data, relativeTo: nil) {
+                return url
+            }
+            if let text = String(data: data, encoding: .utf8) {
+                return URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+
+        if let text = item as? String {
+            return URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        if let text = item as? NSString {
+            return URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        return nil
+    }
 }
 
 private struct ModelSelectionPopoverButton: View {

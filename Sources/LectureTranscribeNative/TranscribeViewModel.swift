@@ -196,6 +196,36 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         }
     }
 
+    func loadDroppedAudioFile(_ url: URL) {
+        guard !isRunning else { return }
+        guard url.isFileURL else {
+            showError("Dropped item is not a local file.")
+            return
+        }
+
+        let path = url.path
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
+            showError("Dropped file no longer exists:\n\(path)")
+            return
+        }
+
+        guard !isDirectory.boolValue else {
+            showError("Drop an audio/video file, not a folder.")
+            return
+        }
+
+        audioFilePath = path
+    }
+
+    func reportDroppedAudioFileReadFailure(details: String? = nil) {
+        if let details, !details.isEmpty {
+            showError("Could not read the dropped file: \(details)")
+        } else {
+            showError("Could not read the dropped file. Please try dropping it again.")
+        }
+    }
+
     func browseOutputFolder() {
         let panel = NSOpenPanel()
         panel.title = "Select output folder"
