@@ -3,7 +3,9 @@ import SwiftUI
 
 final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     var shouldTerminateAfterLastWindowClosed: (() -> Bool)?
+    var bringPrimaryWindowToFront: (() -> Void)?
     private var windowWillCloseObserver: NSObjectProtocol?
+    private var didBecomeActiveObserver: NSObjectProtocol?
 
     override init() {
         super.init()
@@ -14,16 +16,35 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             self?.terminateIfIdleWithoutPrimaryWindows()
         }
+        didBecomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.bringPrimaryWindowToFront?()
+        }
     }
 
     deinit {
         if let windowWillCloseObserver {
             NotificationCenter.default.removeObserver(windowWillCloseObserver)
         }
+        if let didBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(didBecomeActiveObserver)
+        }
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         shouldTerminateAfterLastWindowClosed?() ?? true
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        bringPrimaryWindowToFront?()
+        return true
     }
 
     private func terminateIfIdleWithoutPrimaryWindows() {
@@ -52,6 +73,29 @@ struct LectureTranscribeNativeApp: App {
         appDelegate.shouldTerminateAfterLastWindowClosed = { [viewModel] in
             !viewModel.isRunning
         }
+        appDelegate.bringPrimaryWindowToFront = activateAndBringPrimaryWindowToFront
+    }
+
+    private func activateAndBringPrimaryWindowToFront() {
+        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        DispatchQueue.main.async {
+            let primaryWindows = NSApp.windows.filter { $0.canBecomeMain }
+            guard !primaryWindows.isEmpty else {
+                return
+            }
+
+            for window in primaryWindows where window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+
+            for window in primaryWindows {
+                window.orderFrontRegardless()
+            }
+
+            if let candidateWindow = primaryWindows.first(where: \.isVisible) ?? primaryWindows.first {
+                candidateWindow.makeKeyAndOrderFront(nil)
+            }
+        }
     }
 
     var body: some Scene {
@@ -75,7 +119,7 @@ struct LectureTranscribeNativeApp: App {
                     .foregroundStyle(.secondary)
                 Divider()
                 Button("Open Lecture Transcribe") {
-                    NSApp.activate(ignoringOtherApps: true)
+                    activateAndBringPrimaryWindowToFront()
                 }
                 Button("Quit Lecture Transcribe") {
                     NSApplication.shared.terminate(nil)
