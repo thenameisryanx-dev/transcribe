@@ -4,34 +4,21 @@ import SwiftUI
 final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     var shouldTerminateAfterLastWindowClosed: (() -> Bool)?
     var bringPrimaryWindowToFront: (() -> Void)?
-    private var windowWillCloseObserver: NSObjectProtocol?
-    private var didBecomeActiveObserver: NSObjectProtocol?
 
     override init() {
         super.init()
-        windowWillCloseObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.terminateIfIdleWithoutPrimaryWindows()
-        }
-        didBecomeActiveObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.bringPrimaryWindowToFront?()
-        }
-    }
-
-    deinit {
-        if let windowWillCloseObserver {
-            NotificationCenter.default.removeObserver(windowWillCloseObserver)
-        }
-        if let didBecomeActiveObserver {
-            NotificationCenter.default.removeObserver(didBecomeActiveObserver)
-        }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWindowWillClose),
+            name: NSWindow.willCloseNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleDidBecomeActive),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -45,6 +32,14 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         bringPrimaryWindowToFront?()
         return true
+    }
+
+    @objc private func handleWindowWillClose(_ notification: Notification) {
+        terminateIfIdleWithoutPrimaryWindows()
+    }
+
+    @objc private func handleDidBecomeActive(_ notification: Notification) {
+        bringPrimaryWindowToFront?()
     }
 
     private func terminateIfIdleWithoutPrimaryWindows() {
