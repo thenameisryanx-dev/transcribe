@@ -15,6 +15,8 @@ FFMPEG_BIN_PATH="$FFMPEG_VENDOR_DIR/ffmpeg"
 FFPROBE_BIN_PATH="$FFMPEG_VENDOR_DIR/ffprobe"
 FFMPEG_LIB_DIR="$FFMPEG_VENDOR_DIR/lib"
 PYTHON_RESOURCE_DIR="$PROJECT_DIR"
+PYTHON_RELEASE_REQUIREMENTS_PATH="$PROJECT_DIR/python_release_requirements.txt"
+BUNDLED_PYTHON_FRAMEWORK_NAME="Python3.framework"
 APP_ICON_ICNS_PATH="$PROJECT_DIR/Resources/AppIcon.icns"
 APP_ICON_ICONSET_PATH="$PROJECT_DIR/Resources/AppIcon.iconset"
 APP_ICON_PNG_PATH="$PROJECT_DIR/Resources/AppIcon.png"
@@ -36,6 +38,14 @@ DMG_TEXT_SIZE=13
 DMG_APP_ICON_X=190
 DMG_APPS_ICON_X=570
 DMG_ICON_Y=170
+
+if [[ "$ARCH" == "arm64" ]]; then
+  FFMPEG_DOWNLOAD_URL="https://ffmpeg.martin-riedl.de/download/macos/arm64/1756401489_8.0/ffmpeg.zip"
+  FFPROBE_DOWNLOAD_URL="https://ffmpeg.martin-riedl.de/download/macos/arm64/1756401489_8.0/ffprobe.zip"
+else
+  FFMPEG_DOWNLOAD_URL="https://evermeet.cx/ffmpeg/getrelease/zip"
+  FFPROBE_DOWNLOAD_URL="https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
+fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This script builds a macOS .dmg and must run on macOS."
@@ -64,6 +74,18 @@ binary_supports_arch() {
 
 media_tools_match_host_arch() {
   binary_supports_arch "$FFMPEG_BIN_PATH" "$ARCH" && binary_supports_arch "$FFPROBE_BIN_PATH" "$ARCH"
+}
+
+media_tool_responds() {
+  local tool_path="$1"
+  python3 -c '
+import subprocess, sys
+subprocess.run([sys.argv[1], "-version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
+' "$tool_path" >/dev/null 2>&1
+}
+
+bundled_media_tools_ready() {
+  media_tools_match_host_arch && media_tool_responds "$FFMPEG_BIN_PATH" && media_tool_responds "$FFPROBE_BIN_PATH"
 }
 
 list_non_system_dylibs() {
@@ -165,13 +187,13 @@ ensure_bundled_ffmpeg() {
   mkdir -p "$FFMPEG_VENDOR_DIR"
 
   if [[ -x "$FFMPEG_BIN_PATH" && -x "$FFPROBE_BIN_PATH" ]]; then
-    if media_tools_match_host_arch; then
+    if bundled_media_tools_ready; then
       echo "Using cached bundled media tools:"
       echo "  $FFMPEG_BIN_PATH"
       echo "  $FFPROBE_BIN_PATH"
       return
     fi
-    echo "Cached bundled media tools are not native for $ARCH. Rebuilding bundle."
+    echo "Cached bundled media tools are missing, mismatched, or not runnable for $ARCH. Rebuilding bundle."
     rm -f "$FFMPEG_BIN_PATH" "$FFPROBE_BIN_PATH"
     rm -rf "$FFMPEG_LIB_DIR"
   fi
@@ -199,8 +221,8 @@ ensure_bundled_ffmpeg() {
   local tmpdir
   tmpdir="$(mktemp -d)"
   echo "Downloading static ffmpeg/ffprobe binaries..."
-  curl -fL "https://evermeet.cx/ffmpeg/getrelease/zip" -o "$tmpdir/ffmpeg.zip"
-  curl -fL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o "$tmpdir/ffprobe.zip"
+  curl -fL "$FFMPEG_DOWNLOAD_URL" -o "$tmpdir/ffmpeg.zip"
+  curl -fL "$FFPROBE_DOWNLOAD_URL" -o "$tmpdir/ffprobe.zip"
   unzip -qo "$tmpdir/ffmpeg.zip" -d "$tmpdir/ffmpeg"
   unzip -qo "$tmpdir/ffprobe.zip" -d "$tmpdir/ffprobe"
 
@@ -218,9 +240,9 @@ ensure_bundled_ffmpeg() {
   install -m 755 "$ffprobe_src" "$FFPROBE_BIN_PATH"
   rm -rf "$tmpdir"
 
-  if ! media_tools_match_host_arch; then
+  if ! bundled_media_tools_ready; then
     if [[ "$ARCH" == "arm64" ]]; then
-      echo "Downloaded ffmpeg binaries are not arm64. Building a native arm64 bundle from local ffmpeg."
+      echo "Downloaded ffmpeg binaries are not usable for arm64. Building a native arm64 bundle from local ffmpeg."
       rm -f "$FFMPEG_BIN_PATH" "$FFPROBE_BIN_PATH"
       rm -rf "$FFMPEG_LIB_DIR"
       if ! prepare_local_arm64_ffmpeg_bundle; then
@@ -240,6 +262,48 @@ ensure_bundled_ffmpeg() {
   if [[ -d "$FFMPEG_LIB_DIR" ]]; then
     echo "  $FFMPEG_LIB_DIR"
   fi
+}
+
+resolve_python_framework_root() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required to bundle the embedded Python runtime."
+    exit 1
+  fi
+
+  local framework_root
+  framework_root="$(python3 -c 'import sys; from pathlib import Path; print(Path(sys.prefix).resolve().parents[1])')"
+  if [[ -z "$framework_root" || ! -d "$framework_root" ]]; then
+    echo "Could not locate the Python framework for $(command -v python3)."
+    exit 1
+  fi
+
+  if [[ ! -x "$framework_root/Versions/Current/bin/python3" ]]; then
+    echo "Python framework at $framework_root does not expose Versions/Current/bin/python3."
+    exit 1
+  fi
+
+  echo "$framework_root"
+}
+
+install_bundled_python_dependencies() {
+  local target_dir="$1"
+
+  if [[ ! -f "$PYTHON_RELEASE_REQUIREMENTS_PATH" ]]; then
+    echo "Missing Python release requirements file:"
+    echo "  $PYTHON_RELEASE_REQUIREMENTS_PATH"
+    exit 1
+  fi
+
+  rm -rf "$target_dir"
+  mkdir -p "$target_dir"
+
+  echo "Installing bundled Python dependencies..."
+  python3 -m pip install \
+    --disable-pip-version-check \
+    --no-compile \
+    --upgrade \
+    --target "$target_dir" \
+    -r "$PYTHON_RELEASE_REQUIREMENTS_PATH"
 }
 
 write_info_plist() {
@@ -359,9 +423,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 BUNDLED_BINARY="$SCRIPT_DIR/LectureTranscribeNative"
+BUNDLED_PYTHON_HOME="$SCRIPT_DIR/../Frameworks/Python3.framework/Versions/Current"
+BUNDLED_PYTHON="$BUNDLED_PYTHON_HOME/bin/python3"
+BUNDLED_SITE_PACKAGES="$SCRIPT_DIR/../Resources/python/site-packages"
 
 if [[ -z "${TRANSCRIBE_PYTHON:-}" ]]; then
-  if command -v python3 >/dev/null 2>&1; then
+  if [[ -x "$BUNDLED_PYTHON" ]]; then
+    export TRANSCRIBE_PYTHON="$BUNDLED_PYTHON"
+    export PYTHONHOME="$BUNDLED_PYTHON_HOME"
+    export PYTHONNOUSERSITE=1
+    if [[ -d "$BUNDLED_SITE_PACKAGES" ]]; then
+      export PYTHONPATH="$BUNDLED_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
+    fi
+  elif command -v python3 >/dev/null 2>&1; then
     export TRANSCRIBE_PYTHON="$(command -v python3)"
   elif [[ -x "/usr/bin/python3" ]]; then
     export TRANSCRIBE_PYTHON="/usr/bin/python3"
@@ -396,8 +470,8 @@ if [[ "${TRANSCRIBE_PREFER_SOURCE:-0}" == "1" ]] && command -v swift >/dev/null 
   done
 fi
 
-# Default mode: use prebuilt dev binary when present.
-if [[ "${TRANSCRIBE_PREFER_DEV_BINARY:-auto}" == "1" || "${TRANSCRIBE_PREFER_DEV_BINARY:-auto}" == "auto" ]]; then
+# Optional dev-binary override for debugging only.
+if [[ "${TRANSCRIBE_PREFER_DEV_BINARY:-0}" == "1" ]]; then
   DEV_BINARY_CANDIDATES=()
   if [[ -n "${TRANSCRIBE_DEV_BINARY:-}" ]]; then
     DEV_BINARY_CANDIDATES+=("${TRANSCRIBE_DEV_BINARY}")
@@ -696,9 +770,11 @@ assemble_native_app_bundle() {
   local app_path="$1"
   local native_binary_path="$2"
   local icon_source_path="${3:-}"
+  local python_framework_root="$4"
 
   rm -rf "$app_path"
   mkdir -p "$app_path/Contents/MacOS"
+  mkdir -p "$app_path/Contents/Frameworks"
   mkdir -p "$app_path/Contents/Resources/python/ffmpeg_bin"
 
   install -m 755 "$native_binary_path" "$app_path/Contents/MacOS/$NATIVE_BINARY_NAME"
@@ -713,6 +789,8 @@ assemble_native_app_bundle() {
   install -m 644 "$PYTHON_RESOURCE_DIR/transcribe_backend.py" "$app_path/Contents/Resources/python/transcribe_backend.py"
   install -m 644 "$PYTHON_RESOURCE_DIR/lecture_transcribe.py" "$app_path/Contents/Resources/python/lecture_transcribe.py"
   install -m 644 "$PYTHON_RESOURCE_DIR/transcription_job.py" "$app_path/Contents/Resources/python/transcription_job.py"
+  ditto "$python_framework_root" "$app_path/Contents/Frameworks/$BUNDLED_PYTHON_FRAMEWORK_NAME"
+  install_bundled_python_dependencies "$app_path/Contents/Resources/python/site-packages"
   install -m 755 "$FFMPEG_BIN_PATH" "$app_path/Contents/Resources/python/ffmpeg_bin/ffmpeg"
   install -m 755 "$FFPROBE_BIN_PATH" "$app_path/Contents/Resources/python/ffmpeg_bin/ffprobe"
   if [[ -d "$FFMPEG_LIB_DIR" ]]; then
@@ -737,6 +815,7 @@ if [[ "$SKIP_BUILD" == "1" ]]; then
   echo "  $APP_PATH"
 else
   ensure_bundled_ffmpeg
+  PYTHON_FRAMEWORK_ROOT="$(resolve_python_framework_root)"
 
   NATIVE_BINARY_PATH="$(build_native_binary)"
   APP_ICON_SOURCE_PATH=""
@@ -755,7 +834,7 @@ else
     echo "  $APP_ICON_PNG_LEGACY_RESOURCE_PATH"
   fi
   echo "Assembling standalone native app bundle..."
-  assemble_native_app_bundle "$APP_PATH" "$NATIVE_BINARY_PATH" "$APP_ICON_SOURCE_PATH"
+  assemble_native_app_bundle "$APP_PATH" "$NATIVE_BINARY_PATH" "$APP_ICON_SOURCE_PATH" "$PYTHON_FRAMEWORK_ROOT"
 fi
 
 echo "Preparing distributable app..."

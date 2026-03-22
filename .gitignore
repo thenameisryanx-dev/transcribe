@@ -20,3 +20,4 @@ DerivedData/
 *.pyc
 /chunks
 /converted_inputs
+/.venv

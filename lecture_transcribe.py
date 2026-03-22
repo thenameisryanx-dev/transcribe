@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import re
 import sys
@@ -558,6 +560,32 @@ def get_duration_seconds(path: Path) -> float:
         return -1.0
 
 
+def _copied_m4a_chunk_is_transcribable(path: Path) -> bool:
+    """
+    Stream-copying into .m4a is only safe when the resulting audio stream is AAC.
+    """
+    try:
+        r = subprocess.run(
+            [
+                *ffprobe_cmd_prefix(),
+                "-nostdin",
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "default=nk=1:nw=1",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        codec_name = str(r.stdout or "").strip().lower()
+        return codec_name == "aac"
+    except Exception:
+        return False
+
+
 def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds: int) -> list[Path]:
     """
     Split input into chunk_seconds pieces.
@@ -588,7 +616,7 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
         pass
 
     parts = sorted(run_chunks_dir.glob("part_*.m4a"))
-    if parts:
+    if parts and all(_copied_m4a_chunk_is_transcribable(p) for p in parts[: min(2, len(parts))]):
         return parts
 
     for old in run_chunks_dir.glob("part_*.m4a"):
@@ -674,6 +702,39 @@ def convert_qta_to_m4a_copy(input_path: Path, run_id: str) -> Path:
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise SystemExit("Failed to convert .qta to .m4a.")
     return out_path
+
+
+def repair_audio_for_api(input_path: Path) -> Path:
+    """
+    Re-encode an audio chunk to AAC .m4a if the API rejects the original bytes.
+    """
+    repaired_path = input_path.with_name(f"{input_path.stem}_repaired.m4a")
+    if repaired_path.exists():
+        repaired_path.unlink()
+
+    reencode_cmd = [
+        *ffmpeg_cmd_prefix(),
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", str(input_path),
+        "-vn",
+        "-c:a", "aac",
+        "-b:a", AUDIO_BITRATE,
+        str(repaired_path),
+    ]
+    try:
+        subprocess.run(reencode_cmd, check=True, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            "Timed out re-encoding audio after the API rejected the original file."
+        ) from None
+    except Exception as exc:
+        raise SystemExit(f"Could not repair audio for transcription: {exc}") from None
+
+    if not repaired_path.exists() or repaired_path.stat().st_size == 0:
+        raise SystemExit("Audio repair failed to produce a usable file.")
+    return repaired_path
 
 
 def cleanup_dir(dir_path: Path) -> None:
@@ -841,6 +902,16 @@ def is_retryable_transcription_error(exc: Exception) -> bool:
     return False
 
 
+def is_invalid_audio_file_error(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    msg = str(exc).lower()
+    return (
+        status == 400
+        and "audio file might be corrupted or unsupported" in msg
+        and "invalid_value" in msg
+    )
+
+
 def _stop_progress_thread(
     stop_event: threading.Event | None,
     progress_thread: threading.Thread | None,
@@ -866,59 +937,80 @@ def create_transcription_with_retry(
         and progress.enabled
         and chunk_idx is not None
     )
+    active_audio_path = audio_path
+    repaired_audio_path: Path | None = None
 
-    for attempt in range(1, MAX_TRANSCRIBE_RETRIES + 1):
-        if use_progress:
-            progress.start_attempt(chunk_idx, attempt, MAX_TRANSCRIBE_RETRIES)
+    try:
+        for attempt in range(1, MAX_TRANSCRIBE_RETRIES + 1):
+            if use_progress:
+                progress.start_attempt(chunk_idx, attempt, MAX_TRANSCRIBE_RETRIES)
 
-        progress_thread = None
-        stop_event = None
-        if use_progress:
-            stop_event = threading.Event()
-            progress_thread = threading.Thread(
-                target=run_estimated_progress,
-                args=(stop_event, lambda frac: progress.update_progress(chunk_idx, frac)),
-                daemon=True,
-            )
-            progress_thread.start()
+            progress_thread = None
+            stop_event = None
+            if use_progress:
+                stop_event = threading.Event()
+                progress_thread = threading.Thread(
+                    target=run_estimated_progress,
+                    args=(stop_event, lambda frac: progress.update_progress(chunk_idx, frac)),
+                    daemon=True,
+                )
+                progress_thread.start()
 
-        with audio_path.open("rb") as f:
-            kwargs = {
-                "model": model,
-                "file": f,
-                "response_format": response_format,
-                "timeout": API_TIMEOUT_SECONDS,
-            }
-            if LANGUAGE:
-                kwargs["language"] = LANGUAGE
-            if chunking_strategy is not None:
-                kwargs["chunking_strategy"] = chunking_strategy
+            with active_audio_path.open("rb") as f:
+                kwargs = {
+                    "model": model,
+                    "file": f,
+                    "response_format": response_format,
+                    "timeout": API_TIMEOUT_SECONDS,
+                }
+                if LANGUAGE:
+                    kwargs["language"] = LANGUAGE
+                if chunking_strategy is not None:
+                    kwargs["chunking_strategy"] = chunking_strategy
 
-            try:
-                result = client.audio.transcriptions.create(**kwargs)
-                if use_progress:
-                    progress.mark_done(chunk_idx)
-                return result
-            except Exception as e:
-                _stop_progress_thread(stop_event, progress_thread)
-
-                if attempt == MAX_TRANSCRIBE_RETRIES or not is_retryable_transcription_error(e):
+                try:
+                    result = client.audio.transcriptions.create(**kwargs)
                     if use_progress:
-                        progress.mark_failed(chunk_idx, e)
-                    raise
+                        progress.mark_done(chunk_idx)
+                    return result
+                except Exception as e:
+                    _stop_progress_thread(stop_event, progress_thread)
 
-                delay = RETRY_BASE_SECONDS * (2 ** (attempt - 1))
-                if use_progress:
-                    progress.mark_retry(chunk_idx, attempt, MAX_TRANSCRIBE_RETRIES, delay)
-                else:
-                    print(
-                        f"Transient transcription error on {audio_path.name} "
-                        f"(attempt {attempt}/{MAX_TRANSCRIBE_RETRIES}): {e}"
-                    )
-                    print(f"Retrying in {delay}s...")
-                time.sleep(delay)
-            finally:
-                _stop_progress_thread(stop_event, progress_thread)
+                    if repaired_audio_path is None and is_invalid_audio_file_error(e):
+                        if use_progress:
+                            progress.update_progress(chunk_idx, 0.05, note="repairing audio and retrying")
+                        else:
+                            print(
+                                f"API rejected {active_audio_path.name} as unsupported. "
+                                "Re-encoding once and retrying..."
+                            )
+                        repaired_audio_path = repair_audio_for_api(audio_path)
+                        active_audio_path = repaired_audio_path
+                        continue
+
+                    if attempt == MAX_TRANSCRIBE_RETRIES or not is_retryable_transcription_error(e):
+                        if use_progress:
+                            progress.mark_failed(chunk_idx, e)
+                        raise
+
+                    delay = RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+                    if use_progress:
+                        progress.mark_retry(chunk_idx, attempt, MAX_TRANSCRIBE_RETRIES, delay)
+                    else:
+                        print(
+                            f"Transient transcription error on {active_audio_path.name} "
+                            f"(attempt {attempt}/{MAX_TRANSCRIBE_RETRIES}): {e}"
+                        )
+                        print(f"Retrying in {delay}s...")
+                    time.sleep(delay)
+                finally:
+                    _stop_progress_thread(stop_event, progress_thread)
+    finally:
+        if repaired_audio_path and repaired_audio_path.exists():
+            try:
+                repaired_audio_path.unlink()
+            except Exception:
+                pass
 
 
 def diarize_whole_file(client: OpenAI, input_path: Path) -> str:

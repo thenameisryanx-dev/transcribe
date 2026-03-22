@@ -32,23 +32,75 @@ final class BackendClient: @unchecked Sendable {
         .deletingLastPathComponent() // Sources
     private let activeProcessLock = NSLock()
     private var activeProcess: Process?
+    private let fileManager = FileManager.default
 
     private var executableURL: URL {
         let path = CommandLine.arguments.first ?? ProcessInfo.processInfo.arguments.first ?? ""
         if path.isEmpty {
-            return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            return URL(fileURLWithPath: fileManager.currentDirectoryPath)
         }
         return URL(fileURLWithPath: path).resolvingSymlinksInPath()
+    }
+
+    private var bundledPythonHomeURL: URL? {
+        let bundledHome = executableURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Frameworks/Python3.framework/Versions/Current", isDirectory: true)
+        let bundledBinary = bundledHome.appendingPathComponent("bin/python3")
+        guard fileManager.isExecutableFile(atPath: bundledBinary.path) else {
+            return nil
+        }
+        return bundledHome
+    }
+
+    private var bundledPythonProgram: String? {
+        guard let bundledHome = bundledPythonHomeURL else { return nil }
+        return bundledHome.appendingPathComponent("bin/python3").path
+    }
+
+    private var bundledPythonSitePackagesURL: URL? {
+        let sitePackages = executableURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/python/site-packages", isDirectory: true)
+        guard fileManager.fileExists(atPath: sitePackages.path) else {
+            return nil
+        }
+        return sitePackages
     }
 
     private var pythonProgram: String {
         let env = ProcessInfo.processInfo.environment
         let override = env["TRANSCRIBE_PYTHON"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return override.isEmpty ? "python3" : override
+        if !override.isEmpty {
+            return override
+        }
+        return bundledPythonProgram ?? "python3"
+    }
+
+    private var pythonEnvironment: [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let override = env["TRANSCRIBE_PYTHON"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard override.isEmpty, let bundledHome = bundledPythonHomeURL, let bundledProgram = bundledPythonProgram else {
+            return env
+        }
+
+        env["TRANSCRIBE_PYTHON"] = bundledProgram
+        env["PYTHONHOME"] = bundledHome.path
+        env["PYTHONNOUSERSITE"] = "1"
+
+        if let sitePackages = bundledPythonSitePackagesURL {
+            let existing = env["PYTHONPATH"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            env["PYTHONPATH"] = existing.isEmpty
+                ? sitePackages.path
+                : "\(sitePackages.path):\(existing)"
+        }
+
+        return env
     }
 
     private func resolveBackendScriptURL() throws -> URL {
-        let fileManager = FileManager.default
         let executableDirectory = executableURL.deletingLastPathComponent()
         let appResourcesDirectory = executableDirectory
             .deletingLastPathComponent()
@@ -145,6 +197,7 @@ final class BackendClient: @unchecked Sendable {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [pythonProgram, backendScriptURL.path] + args
         process.currentDirectoryURL = backendScriptURL.deletingLastPathComponent()
+        process.environment = pythonEnvironment
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
@@ -211,6 +264,7 @@ final class BackendClient: @unchecked Sendable {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             process.arguments = [pythonProgram, backendScriptURL.path] + args
             process.currentDirectoryURL = backendScriptURL.deletingLastPathComponent()
+            process.environment = pythonEnvironment
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
 

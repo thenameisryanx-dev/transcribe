@@ -1,10 +1,11 @@
 # Contributing
 
 ## Run the project
-- Requirements: macOS 13+, Swift 6.2 toolchain, and `python3` on `PATH`.
+- Requirements: macOS 13+, Swift 6.2 toolchain, and `python3` available for the first dev launcher bootstrap.
 - Launch the native app from source:
   - `swift run LectureTranscribeNative`
   - or `./Open\ Lecture\ Transcribe\ Native.command`
+- `Open Lecture Transcribe Native.command` bootstraps a repo-local `.venv` and uses it for backend Python dependencies.
 - Build only:
   - `swift build`
 

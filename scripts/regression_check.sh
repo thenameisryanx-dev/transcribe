@@ -44,6 +44,8 @@ rg -q "Speaker diarization is not supported with gpt-4o-mini-transcribe" transcr
 rg -q "def _supports_host_arch" lecture_transcribe.py
 ! rg -q '"/usr/bin/arch", "-x86_64"' lecture_transcribe.py
 cmp -s lecture_transcribe.py Sources/LectureTranscribeNative/Resources/python/lecture_transcribe.py
+cmp -s transcription_job.py Sources/LectureTranscribeNative/Resources/python/transcription_job.py
+cmp -s transcribe_backend.py Sources/LectureTranscribeNative/Resources/python/transcribe_backend.py
 rg -U -q 'func requestHowToGuide\(\) \{\n\s*howToGuideRequestToken \+= 1\n\s*selectedPane = \.transcribe' Sources/LectureTranscribeNative/TranscribeViewModel.swift
 rg -q "if handleHowToGuideRequestIfNeeded\\(\\) \\{" Sources/LectureTranscribeNative/TranscribePaneView.swift
 rg -F -q 'Button("Start Transcribing")' Sources/LectureTranscribeNative/TranscribePaneView.swift
@@ -58,8 +60,19 @@ rg -F -q 'This clears the selected audio file, progress, and run log. It does no
 echo "[4/4] Verifying launcher entry points..."
 [[ -f "Open Lecture Transcribe.command" ]]
 [[ -f "Open Lecture Transcribe Native.command" ]]
+[[ -f "scripts/ensure_dev_python.sh" ]]
+[[ -f "scripts/ensure_dev_media_tools.sh" ]]
 zsh -n "Open Lecture Transcribe.command"
 zsh -n "Open Lecture Transcribe Native.command"
+zsh -n "scripts/ensure_dev_python.sh"
+zsh -n "scripts/ensure_dev_media_tools.sh"
+rg -q 'DEV_PYTHON_SETUP=' "Open Lecture Transcribe Native.command"
+rg -q '"\$DEV_PYTHON_SETUP"' "Open Lecture Transcribe Native.command"
+rg -q 'DEV_MEDIA_SETUP=' "Open Lecture Transcribe Native.command"
+rg -q '"\$DEV_MEDIA_SETUP"' "Open Lecture Transcribe Native.command"
+rg -q 'export TRANSCRIBE_PYTHON="\$PROJECT_DIR/.venv/bin/python3"' "Open Lecture Transcribe Native.command"
+rg -q 'export FFMPEG_BIN="\$PROJECT_DIR/vendor/ffmpeg/\$\(uname -m\)/ffmpeg"' "Open Lecture Transcribe Native.command"
+rg -q 'export FFPROBE_BIN="\$PROJECT_DIR/vendor/ffmpeg/\$\(uname -m\)/ffprobe"' "Open Lecture Transcribe Native.command"
 rg -q 'exec /usr/bin/env swift run --package-path "\$PROJECT_DIR" LectureTranscribeNative "\$@"' "Open Lecture Transcribe Native.command"
 ! rg -q 'TRANSCRIBE_PREFER_SOURCE=0 TRANSCRIBE_PREFER_DEV_BINARY=0 exec' "Open Lecture Transcribe Native.command"
 rg -q 'exec "/Users/ryanxu/Documents/transcribe/Open Lecture Transcribe Native.command" "\$@"' "Open Lecture Transcribe.command"
@@ -67,7 +80,7 @@ if [[ -f "Lecture Transcribe.app/Contents/MacOS/launcher" ]]; then
   zsh -n "Lecture Transcribe.app/Contents/MacOS/launcher"
   rg -q 'BUNDLED_BINARY=' "Lecture Transcribe.app/Contents/MacOS/launcher"
   rg -q 'TRANSCRIBE_PREFER_SOURCE:-0' "Lecture Transcribe.app/Contents/MacOS/launcher"
-  rg -q 'TRANSCRIBE_PREFER_DEV_BINARY:-auto' "Lecture Transcribe.app/Contents/MacOS/launcher"
+  rg -q 'TRANSCRIBE_PREFER_DEV_BINARY:-0' "Lecture Transcribe.app/Contents/MacOS/launcher"
   rg -q 'exec "\$BUNDLED_BINARY" "\$@"' "Lecture Transcribe.app/Contents/MacOS/launcher"
 fi
 
