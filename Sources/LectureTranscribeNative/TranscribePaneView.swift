@@ -63,7 +63,7 @@ struct TranscribePaneView: View {
         .navigationSubtitle(windowSubtitle)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                ModelSelectionPopoverButton(
+                ModelSelectionMenu(
                     selectedModel: $viewModel.selectedTranscriptionModel,
                     isDisabled: viewModel.isRunning
                 )
@@ -538,83 +538,34 @@ struct TranscribePaneView: View {
     }
 }
 
-private struct ModelSelectionPopoverButton: View {
+private struct ModelSelectionMenu: View {
     @Binding var selectedModel: TranscriptionModel
     let isDisabled: Bool
 
-    @State private var showingPopover = false
-    @State private var hoveredModelInPopover: TranscriptionModel?
-
     var body: some View {
-        Button {
-            showingPopover.toggle()
-        } label: {
-            HStack(spacing: 6) {
-                Text(selectedModel.displayName)
-                    .lineLimit(1)
-                Image(systemName: "chevron.up.chevron.down")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
+        Menu {
+            // Toggles render as native checkmark items; the second Text becomes the
+            // menu item's subtitle on macOS 14+.
+            ForEach(TranscriptionModel.allCases) { model in
+                Toggle(isOn: Binding(
+                    get: { selectedModel == model },
+                    set: { isOn in
+                        if isOn {
+                            selectedModel = model
+                        }
+                    }
+                )) {
+                    Text(model.displayName)
+                    Text(model.menuSubtitle)
+                }
+                .help(model.hoverDescription)
             }
+        } label: {
+            Text(selectedModel.displayName)
         }
+        .accessibilityLabel("Transcription Model")
         .fixedSize()
         .disabled(isDisabled)
-        .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Transcription Model")
-                    .font(.headline)
-                    .padding(.bottom, 2)
-
-                ForEach(TranscriptionModel.allCases) { model in
-                    Button {
-                        selectedModel = model
-                        showingPopover = false
-                    } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(model.displayName)
-                                    .foregroundStyle(.primary)
-                                Text(model.hoverDescription)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer(minLength: 10)
-                            if selectedModel == model {
-                                Image(systemName: "checkmark")
-                                    .foregroundStyle(Color.accentColor)
-                            }
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(
-                                    {
-                                        if selectedModel == model {
-                                            return hoveredModelInPopover == model
-                                                ? Color.accentColor.opacity(0.20)
-                                                : Color.accentColor.opacity(0.14)
-                                        }
-                                        return hoveredModelInPopover == model
-                                            ? Color.secondary.opacity(0.14)
-                                            : Color.clear
-                                    }()
-                                )
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { isHovering in
-                        if isHovering {
-                            hoveredModelInPopover = model
-                        } else if hoveredModelInPopover == model {
-                            hoveredModelInPopover = nil
-                        }
-                    }
-                }
-            }
-            .frame(width: 320, alignment: .leading)
-            .padding(12)
-        }
     }
 }
 

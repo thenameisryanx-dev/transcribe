@@ -31,6 +31,19 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    // Short subtitle shown under the model name in the toolbar menu.
+    // Prices are OpenAI per-minute rates for file transcription; update if they change.
+    var menuSubtitle: String {
+        switch self {
+        case .gptTranscribe:
+            return "Most accurate · $0.0045/min"
+        case .gpt4oTranscribe:
+            return "Previous generation · $0.006/min"
+        case .gpt4oMiniTranscribe:
+            return "Fastest · $0.003/min"
+        }
+    }
+
     // Diarized runs always use gpt-4o-transcribe-diarize; this only gates the toggle.
     var supportsDiarization: Bool {
         self != .gpt4oMiniTranscribe
