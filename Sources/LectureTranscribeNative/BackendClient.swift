@@ -2,6 +2,7 @@ import Foundation
 
 enum BackendStreamEvent: Sendable {
     case log(String)
+    case warning(String)
     case status(String)
     case progress(Double)
     case done(String)
@@ -189,10 +190,14 @@ final class BackendClient: @unchecked Sendable {
         outputDirectory: String,
         diarize: Bool,
         model: String,
+        languages: [String] = [],
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
     ) async throws {
         var args = ["run", "--input", inputPath, "--output", outputDirectory]
         args.append(contentsOf: ["--model", model])
+        if !languages.isEmpty {
+            args.append(contentsOf: ["--languages", languages.joined(separator: ",")])
+        }
         if diarize {
             args.append("--diarize")
         }
@@ -279,6 +284,8 @@ final class BackendClient: @unchecked Sendable {
                 switch kind {
                 case "log":
                     onEvent(.log(String(describing: object["payload"] ?? "")))
+                case "warning":
+                    onEvent(.warning(String(describing: object["payload"] ?? "")))
                 case "status":
                     onEvent(.status(String(describing: object["payload"] ?? "")))
                 case "progress":

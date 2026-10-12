@@ -87,6 +87,22 @@ private struct SettingsPaneView: View {
             }
 
             Section {
+                LabeledContent("Spoken Languages") {
+                    TextField("Spoken Languages", text: $viewModel.spokenLanguages, prompt: Text(SpokenLanguages.defaultValue))
+                        .labelsHidden()
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: 200)
+                        .disabled(viewModel.isRunning)
+                }
+            } header: {
+                Text("Transcription")
+            } footer: {
+                Text(spokenLanguagesFooter)
+                    .font(.footnote)
+                    .foregroundStyle(spokenLanguagesAreValid ? Color.secondary : Color.red)
+            }
+
+            Section {
                 LabeledContent("Output Folder") {
                     Text((viewModel.outputFolderPath as NSString).abbreviatingWithTildeInPath)
                         .foregroundStyle(.secondary)
@@ -125,6 +141,18 @@ private struct SettingsPaneView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Settings")
+    }
+
+    private var spokenLanguagesAreValid: Bool {
+        SpokenLanguages.parse(viewModel.spokenLanguages) != nil
+    }
+
+    private var spokenLanguagesFooter: String {
+        if !spokenLanguagesAreValid {
+            return "Use language codes separated by commas, like en, es, zh."
+        }
+        return "Languages spoken in your recordings, as codes like en, es, zh. GPT Transcribe needs these to transcribe "
+            + "everything; the GPT-4o models detect the language automatically."
     }
 
     private var apiKeyStatus: String {

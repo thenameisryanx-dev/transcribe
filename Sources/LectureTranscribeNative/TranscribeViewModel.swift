@@ -3,6 +3,7 @@ import Foundation
 import UniformTypeIdentifiers
 
 enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
+    case gptTranscribe = "gpt-transcribe"
     case gpt4oTranscribe = "gpt-4o-transcribe"
     case gpt4oMiniTranscribe = "gpt-4o-mini-transcribe"
 
@@ -10,6 +11,8 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
 
     var displayName: String {
         switch self {
+        case .gptTranscribe:
+            return "GPT Transcribe"
         case .gpt4oTranscribe:
             return "GPT-4o Transcribe"
         case .gpt4oMiniTranscribe:
@@ -19,6 +22,8 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
 
     var hoverDescription: String {
         switch self {
+        case .gptTranscribe:
+            return "Newest model. Uses the spoken languages set in Settings. Supports speaker diarization."
         case .gpt4oTranscribe:
             return "Best accuracy and supports speaker diarization."
         case .gpt4oMiniTranscribe:
@@ -26,8 +31,33 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    // Diarized runs always use gpt-4o-transcribe-diarize; this only gates the toggle.
     var supportsDiarization: Bool {
-        self == .gpt4oTranscribe
+        self != .gpt4oMiniTranscribe
+    }
+
+    var usesSpokenLanguages: Bool {
+        self == .gptTranscribe
+    }
+}
+
+enum SpokenLanguages {
+    static let defaultValue = "en"
+
+    /// Mirrors `parse_language_codes` in lecture_transcribe.py. Returns nil when any code is invalid.
+    static func parse(_ raw: String) -> [String]? {
+        var codes: [String] = []
+        let tokens = raw.split(whereSeparator: { $0 == "," || $0.isWhitespace })
+        for token in tokens {
+            let code = token.lowercased()
+            guard (2...3).contains(code.count), code.allSatisfy({ ("a"..."z").contains($0) }) else {
+                return nil
+            }
+            if !codes.contains(code) {
+                codes.append(code)
+            }
+        }
+        return codes
     }
 }
 
@@ -58,6 +88,12 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             UserDefaults.standard.set(selectedTranscriptionModel.rawValue, forKey: Self.selectedModelDefaultsKey)
         }
     }
+    @Published var spokenLanguages: String {
+        didSet {
+            guard oldValue != spokenLanguages else { return }
+            UserDefaults.standard.set(spokenLanguages, forKey: Self.spokenLanguagesDefaultsKey)
+        }
+    }
     @Published var diarizeEnabled = false {
         didSet {
             if diarizeEnabled && !selectedTranscriptionModel.supportsDiarization {
@@ -70,6 +106,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published var statusText = "Ready"
     @Published var progressValue: Double = 0
     @Published var logText = ""
+    /// Warnings from the current run; a run with warnings finished but may be missing part of the transcript.
+    @Published private(set) var runWarnings: [String] = []
 
     @Published var isRunning = false
     @Published var canOpenOutputFolder = false
@@ -91,6 +129,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private let maxHistoryEntries = 200
     private static let selectedModelDefaultsKey = "selectedTranscriptionModel"
     private static let outputFolderDefaultsKey = "outputFolderPath"
+    private static let spokenLanguagesDefaultsKey = "spokenLanguages"
     private let defaultOutputFolderPath: String
     private var runTask: Task<Void, Never>?
     private var cancellationRequested = false
@@ -111,6 +150,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         } else {
             outputFolderPath = defaultOutputFolderPath
         }
+        spokenLanguages = UserDefaults.standard.string(forKey: Self.spokenLanguagesDefaultsKey)
+            ?? SpokenLanguages.defaultValue
         if let rawModel = UserDefaults.standard.string(forKey: Self.selectedModelDefaultsKey),
            let storedModel = TranscriptionModel(rawValue: rawModel)
         {
@@ -143,6 +184,11 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
     var progressLabel: String {
         "\(Int(progressValue.rounded()))%"
+    }
+
+    var spokenLanguagesSummary: String {
+        guard let codes = SpokenLanguages.parse(spokenLanguages) else { return "invalid" }
+        return codes.isEmpty ? SpokenLanguages.defaultValue : codes.joined(separator: ", ")
     }
 
     var isDiarizationAvailable: Bool {
@@ -327,10 +373,11 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         audioFilePath = entry.inputPath
         outputFolderPath = entry.outputDirectory
         // Restore the model before diarization; diarizeEnabled is reset when the model can't diarize.
+        let entryModel = entry.model.flatMap(TranscriptionModel.init(rawValue:))
         if entry.diarize {
-            selectedTranscriptionModel = .gpt4oTranscribe
-        } else if let rawModel = entry.model, let model = TranscriptionModel(rawValue: rawModel) {
-            selectedTranscriptionModel = model
+            selectedTranscriptionModel = entryModel.flatMap { $0.supportsDiarization ? $0 : nil } ?? .gpt4oTranscribe
+        } else if let entryModel {
+            selectedTranscriptionModel = entryModel
         }
         diarizeEnabled = entry.diarize
         selectedPane = .transcribe
@@ -398,6 +445,15 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             return
         }
 
+        var languages: [String] = []
+        if selectedTranscriptionModel.usesSpokenLanguages {
+            guard let parsed = SpokenLanguages.parse(spokenLanguages) else {
+                showError("Spoken languages must be language codes like en, es, zh. Change them in Settings.")
+                return
+            }
+            languages = parsed.isEmpty ? [SpokenLanguages.defaultValue] : parsed
+        }
+
         let normalizedOutputDirectory = normalizeOutputDirectoryPath(outputFolderPath)
         guard ensureOutputDirectoryAvailable(at: normalizedOutputDirectory) else {
             return
@@ -408,6 +464,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         progressValue = 0
         statusText = "Starting..."
         logText = ""
+        runWarnings = []
         latestOutputPath = nil
         completedAudioFilePath = nil
         canOpenOutputFolder = false
@@ -437,7 +494,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
                     inputPath: trimmedPath,
                     outputDirectory: normalizedOutputDirectory,
                     diarize: shouldDiarize,
-                    model: model.rawValue
+                    model: model.rawValue,
+                    languages: languages
                 ) { event in
                     eventContinuation.yield(event)
                 }
@@ -482,6 +540,9 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         switch event {
         case let .log(message):
             appendLog(message)
+        case let .warning(message):
+            runWarnings.append(message)
+            appendLog("WARNING: \(message)")
         case let .status(message):
             statusText = message
             appendLog(message)
@@ -489,7 +550,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             progressValue = min(max(value, 0), 100)
         case let .done(path):
             progressValue = 100
-            statusText = "Done"
+            statusText = runWarnings.isEmpty ? "Done" : "Finished with warnings"
             latestOutputPath = path
             completedAudioFilePath = audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
             canOpenOutputFolder = true
@@ -541,6 +602,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         statusText = "Ready"
         progressValue = 0
         logText = ""
+        runWarnings = []
         latestOutputPath = nil
         completedAudioFilePath = nil
         canOpenOutputFolder = false
@@ -550,6 +612,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     }
 
     private func resetRunResult() {
+        runWarnings = []
         statusText = "Ready"
         progressValue = 0
         latestOutputPath = nil
@@ -684,6 +747,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         historyEntries[index].status = status
         historyEntries[index].finishedAt = Date()
         historyEntries[index].errorMessage = errorMessage
+        historyEntries[index].warnings = runWarnings.isEmpty ? nil : runWarnings
+        historyEntries[index].log = logText.isEmpty ? nil : logText
         if let outputPath {
             historyEntries[index].outputPath = outputPath
         }

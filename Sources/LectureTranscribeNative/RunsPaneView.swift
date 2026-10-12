@@ -4,12 +4,14 @@ private enum RunsFilter: String, CaseIterable, Identifiable {
     case all = "All"
     case running = "Running"
     case success = "Success"
+    case warnings = "Warnings"
     case failed = "Failed"
     case cancelled = "Cancelled"
 
     var id: String { rawValue }
 
-    func includes(_ status: TranscriptionHistoryEntry.Status) -> Bool {
+    func includes(_ entry: TranscriptionHistoryEntry) -> Bool {
+        let status = entry.status
         switch self {
         case .all:
             return true
@@ -17,6 +19,8 @@ private enum RunsFilter: String, CaseIterable, Identifiable {
             return status == .running
         case .success:
             return status == .success
+        case .warnings:
+            return entry.hasWarnings
         case .failed:
             return status == .failed
         case .cancelled:
@@ -38,7 +42,7 @@ struct RunsPaneView: View {
 
         return viewModel.historyEntries
             .filter { entry in
-                selectedFilter.includes(entry.status) && matchesSearchQuery(entry, query: normalizedQuery)
+                selectedFilter.includes(entry) && matchesSearchQuery(entry, query: normalizedQuery)
             }
             .sorted(using: sortOrder)
     }
@@ -101,8 +105,9 @@ struct RunsPaneView: View {
             .width(min: 180, ideal: 320)
 
             TableColumn("Status", value: \.statusName) { entry in
-                Label(entry.status.displayName, systemImage: entry.status.systemImage)
-                    .foregroundStyle(entry.status.badgeColor)
+                Label(entry.statusName, systemImage: entry.statusImage)
+                    .foregroundStyle(entry.statusColor)
+                    .help(entry.warnings?.joined(separator: "\n") ?? "")
             }
             .width(min: 90, ideal: 110, max: 140)
 
@@ -263,8 +268,9 @@ struct RunsPaneView: View {
         let haystack = [
             inputFileName,
             outputFileName,
-            entry.status.displayName,
+            entry.statusName,
             entry.errorMessage ?? "",
+            (entry.warnings ?? []).joined(separator: "\n"),
         ]
         .joined(separator: "\n")
         .lowercased()
@@ -320,7 +326,15 @@ private extension TranscriptionHistoryEntry {
     }
 
     var statusName: String {
-        status.displayName
+        hasWarnings && status == .success ? "Warnings" : status.displayName
+    }
+
+    var statusImage: String {
+        hasWarnings && status == .success ? "exclamationmark.triangle.fill" : status.systemImage
+    }
+
+    var statusColor: Color {
+        hasWarnings && status == .success ? .orange : status.badgeColor
     }
 
     var modelName: String {
@@ -343,6 +357,11 @@ private struct RunDetailView: View {
         FileManager.default.fileExists(atPath: entry.inputPath)
     }
 
+    // A running entry has no saved log yet, so show the live one.
+    private var runLog: String? {
+        entry.status == .running ? viewModel.logText : entry.log
+    }
+
     private var outputExists: Bool {
         guard let outputPath = entry.outputPath else { return false }
         return FileManager.default.fileExists(atPath: outputPath)
@@ -352,8 +371,8 @@ private struct RunDetailView: View {
         Form {
             Section("Run Details") {
                 LabeledContent("Status") {
-                    Label(entry.status.displayName, systemImage: entry.status.systemImage)
-                        .foregroundStyle(entry.status.badgeColor)
+                    Label(entry.statusName, systemImage: entry.statusImage)
+                        .foregroundStyle(entry.statusColor)
                 }
 
                 LabeledContent("Started") {
@@ -398,6 +417,42 @@ private struct RunDetailView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                     }
                     .foregroundStyle(.red)
+                }
+            }
+
+            if let warnings = entry.warnings, !warnings.isEmpty {
+                Section {
+                    ForEach(warnings, id: \.self) { warning in
+                        Label {
+                            Text(warning)
+                                .textSelection(.enabled)
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                        }
+                        .foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text("Warnings")
+                } footer: {
+                    Text("The run finished, but these parts of the transcript may be missing or wrong.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Run Log") {
+                if let log = runLog, !log.isEmpty {
+                    ScrollView {
+                        Text(log)
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 220)
+                } else {
+                    Text("No log was saved for this run. Logs are saved for runs from this version on.")
+                        .foregroundStyle(.secondary)
                 }
             }
 

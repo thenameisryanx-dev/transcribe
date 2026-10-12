@@ -54,6 +54,11 @@ struct TranscribePaneView: View {
                 .padding(.bottom, 16)
                 .howToTarget(.runLog)
         }
+        .onChange(of: viewModel.runWarnings.isEmpty) { noWarnings in
+            if !noWarnings {
+                showsRunLog = true
+            }
+        }
         .navigationTitle("Transcribe")
         .navigationSubtitle(windowSubtitle)
         .toolbar {
@@ -273,13 +278,28 @@ struct TranscribePaneView: View {
 
     private var completedRunSummary: some View {
         VStack(spacing: 12) {
-            Label {
-                Text("Transcription Complete")
-            } icon: {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+            if viewModel.runWarnings.isEmpty {
+                Label {
+                    Text("Transcription Complete")
+                } icon: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
+                .font(.headline)
+            } else {
+                Label {
+                    Text("Finished with Warnings")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+                .font(.headline)
+
+                Text("Part of the transcript may be missing. Details are in the Run Log below.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
-            .font(.headline)
 
             if let latestOutputPath = viewModel.latestOutputPath {
                 Text((latestOutputPath as NSString).abbreviatingWithTildeInPath)
@@ -309,6 +329,10 @@ struct TranscribePaneView: View {
                 .accessibilityLabel("Add speaker labels")
             if !viewModel.isDiarizationAvailable {
                 Text("Unavailable for \(viewModel.selectedTranscriptionModel.displayName).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if viewModel.selectedTranscriptionModel.usesSpokenLanguages && !viewModel.diarizeEnabled {
+                Text("Spoken languages: \(viewModel.spokenLanguagesSummary). Change in Settings.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

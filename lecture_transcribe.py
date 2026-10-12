@@ -19,6 +19,7 @@ from openai import OpenAI
 LANGUAGE: str | None = None
 
 # Best-quality transcription (no speaker labels)
+MODEL_GPT_TRANSCRIBE = "gpt-transcribe"
 MODEL_NORMAL = "gpt-4o-transcribe"
 MODEL_MINI = "gpt-4o-mini-transcribe"
 NORMAL_CHUNK_SECONDS = 10 * 60  # 10 minutes (reliable for 60+ min)
@@ -29,6 +30,12 @@ MODEL_DIARIZE = "gpt-4o-transcribe-diarize"
 DIARIZE_MAX_SECONDS = 1400          # hard cap observed from API error
 DIARIZE_SINGLE_BUFFER = 1300        # be conservative: single request only if <= 1300s
 DIARIZE_CHUNK_SECONDS = 10 * 60     # smaller chunks reduce timeout risk on long recordings
+
+# gpt-transcribe safeguards. Without a `languages` hint it drops speech; even with one it can
+# occasionally return no text (reported as `"languages": []`) or loop on repeated phrases.
+DEFAULT_LANGUAGES = ["en"]
+GPT_TRANSCRIBE_RETRIES = 2           # extra attempts (same model) when a chunk's output fails a check
+MAX_PLAUSIBLE_WORDS_PER_MINUTE = 350 # faster than anyone speaks; more means the model repeated itself
 
 # API request behavior
 API_TIMEOUT_SECONDS = 20 * 60       # per-request timeout (seconds)
@@ -421,6 +428,8 @@ def build_transcript_header(
     chunking_strategy: str | None = None,
     local_chunk_seconds: int | None = None,
     duration_seconds: float | None = None,
+    languages: list[str] | None = None,
+    chunk_warnings: list[str] | None = None,
 ) -> str:
     lines = [
         f"INPUT: {input_path}",
@@ -435,6 +444,10 @@ def build_transcript_header(
         lines.append(f"LOCAL_CHUNK_SECONDS: {local_chunk_seconds}")
     if duration_seconds is not None:
         lines.append(f"DURATION_SECONDS: {duration_seconds:.3f}")
+    if languages:
+        lines.append(f"LANGUAGES: {', '.join(languages)}")
+    for warning in chunk_warnings or []:
+        lines.append(f"WARNING: {warning}")
     return "\n".join(lines) + "\n\n"
 
 
@@ -446,7 +459,6 @@ def get_duration_seconds(path: Path) -> float:
         r = subprocess.run(
             [
                 *ffprobe_cmd_prefix(),
-                "-nostdin",
                 "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=nk=1:nw=1",
@@ -455,6 +467,8 @@ def get_duration_seconds(path: Path) -> float:
             check=True,
             capture_output=True,
             text=True,
+            # ffprobe has no -nostdin flag (it made every call fail); keep it off stdin this way instead.
+            stdin=subprocess.DEVNULL,
             timeout=30,
         )
         return float(r.stdout.strip())
@@ -665,6 +679,74 @@ def cleanup_dir(dir_path: Path) -> None:
         pass
 
 
+def parse_language_codes(raw: str) -> list[str]:
+    """
+    Parse "en, es" style input into unique lowercase ISO 639 codes. Raises ValueError on bad codes.
+    """
+    codes: list[str] = []
+    for token in re.split(r"[\s,]+", raw.strip()):
+        if not token:
+            continue
+        code = token.lower()
+        if not re.fullmatch(r"[a-z]{2,3}", code):
+            raise ValueError(f"'{token}' is not a language code. Use codes like en, es, zh.")
+        if code not in codes:
+            codes.append(code)
+    return codes
+
+
+def _looks_repeated(text: str, duration_seconds: float) -> bool:
+    if duration_seconds <= 0:
+        return False
+    words = len(text.split())
+    # The 50-word allowance keeps very short chunks from tripping the check.
+    return words > max(50.0, MAX_PLAUSIBLE_WORDS_PER_MINUTE * duration_seconds / 60.0)
+
+
+def transcribe_chunk_checked(
+    client: OpenAI,
+    chunk_path: Path,
+    *,
+    model: str,
+    languages: list[str] | None = None,
+    on_log: Callable[[str], None] | None = None,
+) -> tuple[str, str | None]:
+    """
+    Transcribe one chunk and return (text, warning or None). Always uses the selected model.
+    gpt-transcribe output is checked; empty or implausibly long results are retried with gpt-transcribe,
+    and a warning is returned if the last attempt still fails the check.
+    """
+    if model != MODEL_GPT_TRANSCRIBE:
+        return transcribe_chunk_text(client, chunk_path, model=model, on_log=on_log), None
+
+    log = on_log or (lambda _message: None)
+    attempts = 1 + GPT_TRANSCRIBE_RETRIES
+    warning = None
+    text = ""
+    for attempt in range(1, attempts + 1):
+        resp = create_transcription_with_retry(
+            client,
+            chunk_path,
+            model=MODEL_GPT_TRANSCRIBE,
+            response_format="json",
+            languages=languages or DEFAULT_LANGUAGES,
+            on_log=on_log,
+        )
+        text = extract_transcription_text(resp).strip()
+        if not text:
+            warning = f"{chunk_path.name}: {MODEL_GPT_TRANSCRIBE} returned no text"
+        elif _looks_repeated(text, get_duration_seconds(chunk_path)):
+            warning = (
+                f"{chunk_path.name}: {MODEL_GPT_TRANSCRIBE} returned {len(text.split())} words, "
+                "more than could be spoken in this chunk (likely repeated text)"
+            )
+        else:
+            return text, None
+        log(f"{warning} (attempt {attempt}/{attempts}).")
+
+    return text, f"{warning} after {attempts} attempts."
+
+
 def transcribe_chunk_text(
     client: OpenAI,
     chunk_path: Path,
@@ -715,6 +797,7 @@ def create_transcription_with_retry(
     model: str,
     response_format: str,
     chunking_strategy: str | None = None,
+    languages: list[str] | None = None,
     on_log: Callable[[str], None] | None = None,
 ):
     log = on_log or (lambda _message: None)
@@ -730,7 +813,12 @@ def create_transcription_with_retry(
                     "response_format": response_format,
                     "timeout": API_TIMEOUT_SECONDS,
                 }
-                if LANGUAGE:
+                if model == MODEL_GPT_TRANSCRIBE:
+                    # gpt-transcribe takes a `languages` list instead of `language`; the SDK doesn't expose it yet.
+                    hint = languages or ([LANGUAGE] if LANGUAGE else None)
+                    if hint:
+                        kwargs["extra_body"] = {"languages": hint}
+                elif LANGUAGE:
                     kwargs["language"] = LANGUAGE
                 if chunking_strategy is not None:
                     kwargs["chunking_strategy"] = chunking_strategy
