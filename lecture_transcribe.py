@@ -484,7 +484,6 @@ def _copied_m4a_chunk_is_transcribable(path: Path) -> bool:
         r = subprocess.run(
             [
                 *ffprobe_cmd_prefix(),
-                "-nostdin",
                 "-v", "error",
                 "-select_streams", "a:0",
                 "-show_entries", "stream=codec_name",
@@ -494,6 +493,8 @@ def _copied_m4a_chunk_is_transcribable(path: Path) -> bool:
             check=True,
             capture_output=True,
             text=True,
+            # ffprobe has no -nostdin flag (it made every call fail); keep it off stdin this way instead.
+            stdin=subprocess.DEVNULL,
             timeout=30,
         )
         codec_name = str(r.stdout or "").strip().lower()
