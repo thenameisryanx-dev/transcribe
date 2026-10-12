@@ -95,5 +95,39 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         let loaded = try store.loadEntries()
         XCTAssertEqual(loaded.count, 1)
         XCTAssertNil(loaded.first?.model)
+        XCTAssertNil(loaded.first?.warnings)
+        XCTAssertNil(loaded.first?.log)
+        XCTAssertEqual(loaded.first?.hasWarnings, false)
+    }
+
+    func testWarningsAndLogRoundTrip() throws {
+        let fileManager = FileManager.default
+        let tempDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempDirectory) }
+
+        let store = TranscriptionHistoryStore(
+            historyFileURL: tempDirectory.appendingPathComponent("history.json", isDirectory: false)
+        )
+        var entry = TranscriptionHistoryEntry(
+            id: UUID(),
+            startedAt: Date(timeIntervalSince1970: 1_706_000_000),
+            finishedAt: Date(timeIntervalSince1970: 1_706_000_120),
+            inputPath: "/tmp/input.m4a",
+            outputPath: "/tmp/output.txt",
+            outputDirectory: "/tmp",
+            diarize: false,
+            status: .success,
+            errorMessage: nil,
+            model: "gpt-transcribe"
+        )
+        entry.warnings = ["part_002.m4a: gpt-transcribe returned no text after 3 attempts."]
+        entry.log = "Using transcription model: gpt-transcribe\nWARNING: part_002.m4a: ..."
+
+        try store.saveEntries([entry])
+        let loaded = try store.loadEntries()
+        XCTAssertEqual(loaded, [entry])
+        XCTAssertEqual(loaded.first?.hasWarnings, true)
     }
 }

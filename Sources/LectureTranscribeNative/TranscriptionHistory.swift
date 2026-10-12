@@ -32,6 +32,13 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     var errorMessage: String?
     // Optional so history written before models were recorded still decodes.
     var model: String? = nil
+    // Optional so older history still decodes. Warnings mean the run finished but part of the transcript may be missing.
+    var warnings: [String]? = nil
+    var log: String? = nil
+
+    var hasWarnings: Bool {
+        !(warnings ?? []).isEmpty
+    }
 }
 
 private struct TranscriptionHistoryPayload: Codable {

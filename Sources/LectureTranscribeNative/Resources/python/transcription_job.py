@@ -12,6 +12,7 @@ from lecture_transcribe import (
     DIARIZE_CHUNK_SECONDS,
     DIARIZE_SINGLE_BUFFER,
     MODEL_DIARIZE,
+    MODEL_GPT_TRANSCRIBE,
     MODEL_MINI,
     MODEL_NORMAL,
     MINI_CHUNK_SECONDS,
@@ -32,7 +33,7 @@ from lecture_transcribe import (
     safe_stem_from_path,
     sentence_lines,
     split_audio_to_chunks,
-    transcribe_chunk_text,
+    transcribe_chunk_checked,
 )
 
 T = TypeVar("T")
@@ -77,21 +78,25 @@ def run_transcription_job(
     output_dir: Path,
     transcription_model: str,
     push_event,
+    languages: list[str] | None = None,
 ) -> Path:
     require_ffmpeg()
     require_ffprobe()
 
-    if transcription_model not in {MODEL_NORMAL, MODEL_MINI}:
+    if transcription_model not in {MODEL_GPT_TRANSCRIBE, MODEL_NORMAL, MODEL_MINI}:
         push_event("log", f"Unknown model '{transcription_model}'. Falling back to {MODEL_NORMAL}.")
         transcription_model = MODEL_NORMAL
 
     if diarize and transcription_model == MODEL_MINI:
         raise SystemExit(
             "Speaker diarization is not supported with gpt-4o-mini-transcribe. "
-            "Select gpt-4o-transcribe or disable diarization."
+            "Select gpt-transcribe or gpt-4o-transcribe, or disable diarization."
         )
 
     push_event("log", f"Using transcription model: {transcription_model}")
+    chunk_languages = languages if transcription_model == MODEL_GPT_TRANSCRIBE and not diarize else None
+    if chunk_languages:
+        push_event("log", f"Spoken languages: {', '.join(chunk_languages)}")
 
     def log(message: str) -> None:
         push_event("log", message)
@@ -190,14 +195,20 @@ def run_transcription_job(
             parts = split_audio_to_chunks(working_input_path, run_chunks_dir, chunk_seconds)
             push_event("log", f"Prepared {len(parts)} chunk(s) for transcription.")
 
-            chunk_texts = _run_chunks_in_parallel(
+            chunk_results = _run_chunks_in_parallel(
                 parts,
-                lambda p: transcribe_chunk_text(client, p, model=transcription_model, on_log=log),
+                lambda p: transcribe_chunk_checked(
+                    client, p, model=transcription_model, languages=chunk_languages, on_log=log
+                ),
                 push_event,
                 "Transcribing",
             )
         finally:
             cleanup_dir(run_chunks_dir)
+
+        chunk_warnings = [warning for _, warning in chunk_results if warning]
+        for warning in chunk_warnings:
+            push_event("warning", warning)
 
         sections = [
             build_transcript_header(
@@ -205,12 +216,16 @@ def run_transcription_job(
                 working_input_path=working_input_path,
                 model=transcription_model,
                 local_chunk_seconds=chunk_seconds,
+                languages=chunk_languages,
+                chunk_warnings=chunk_warnings,
             )
         ]
-        for i, (p, chunk_text) in enumerate(zip(parts, chunk_texts)):
+        for i, (p, (chunk_text, warning)) in enumerate(zip(parts, chunk_results)):
             start = i * chunk_seconds
             end = start + chunk_seconds
             sections.append(f"\n\n===== {p.name} ({hhmmss(start)}-{hhmmss(end)}) =====\n\n")
+            if warning:
+                sections.append(f"[WARNING: {warning}]\n\n")
             lines = sentence_lines(chunk_text)
             sections.append("\n".join(lines) if lines else str(chunk_text))
         out_path.write_text("".join(sections), encoding="utf-8")

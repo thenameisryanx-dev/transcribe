@@ -9,6 +9,8 @@ import traceback
 from pathlib import Path
 
 from lecture_transcribe import (
+    DEFAULT_LANGUAGES,
+    parse_language_codes,
     get_last_keychain_error,
     is_valid_api_key,
     load_api_key_from_keyring,
@@ -16,9 +18,10 @@ from lecture_transcribe import (
 )
 from transcription_job import run_transcription_job
 
+MODEL_GPT_TRANSCRIBE = "gpt-transcribe"
 MODEL_GPT4O_TRANSCRIBE = "gpt-4o-transcribe"
 MODEL_GPT4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
-SUPPORTED_TRANSCRIPTION_MODELS = [MODEL_GPT4O_TRANSCRIBE, MODEL_GPT4O_MINI_TRANSCRIBE]
+SUPPORTED_TRANSCRIPTION_MODELS = [MODEL_GPT_TRANSCRIBE, MODEL_GPT4O_TRANSCRIBE, MODEL_GPT4O_MINI_TRANSCRIBE]
 
 
 _EMIT_LOCK = threading.Lock()
@@ -100,8 +103,14 @@ def command_run(args: argparse.Namespace) -> int:
         emit(
             "error",
             "Speaker diarization is not supported with gpt-4o-mini-transcribe. "
-            "Select gpt-4o-transcribe or disable diarization.",
+            "Select gpt-transcribe or gpt-4o-transcribe, or disable diarization.",
         )
+        return 2
+
+    try:
+        languages = parse_language_codes(args.languages or "") or list(DEFAULT_LANGUAGES)
+    except ValueError as exc:
+        emit("error", f"Invalid spoken languages: {exc}")
         return 2
 
     if resolve_api_key_status() == "required":
@@ -118,6 +127,7 @@ def command_run(args: argparse.Namespace) -> int:
             output_dir=output_dir,
             transcription_model=model,
             push_event=push_event,
+            languages=languages,
         )
         emit("done", str(out_path.resolve()))
         return 0
@@ -150,6 +160,11 @@ def parse_args() -> argparse.Namespace:
         default=MODEL_GPT4O_TRANSCRIBE,
         choices=SUPPORTED_TRANSCRIPTION_MODELS,
         help="Transcription model for non-diarized chunks.",
+    )
+    run.add_argument(
+        "--languages",
+        default=",".join(DEFAULT_LANGUAGES),
+        help="Comma-separated spoken language codes (e.g. en,es). Used by gpt-transcribe.",
     )
 
     return parser.parse_args()
