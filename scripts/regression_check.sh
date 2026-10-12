@@ -40,8 +40,8 @@ lacks_fixed '.disabled(!viewModel.canOpenOutputFolder)' Sources/LectureTranscrib
 has 'downloadsDirectory' Sources/LectureTranscribeNative/TranscribeViewModel.swift
 has_fixed 'defaultOutputFolderPath = downloads?.path ?? NSHomeDirectory()' Sources/LectureTranscribeNative/TranscribeViewModel.swift
 has 'Transcription Model' Sources/LectureTranscribeNative/TranscribePaneView.swift
-has_fixed '.popover(isPresented:' Sources/LectureTranscribeNative/TranscribePaneView.swift
-has 'ModelSelectionPopoverButton' Sources/LectureTranscribeNative/TranscribePaneView.swift
+has 'ModelSelectionMenu' Sources/LectureTranscribeNative/TranscribePaneView.swift
+has_fixed 'model.menuSubtitle' Sources/LectureTranscribeNative/TranscribePaneView.swift
 has_fixed 'selectedModel.displayName' Sources/LectureTranscribeNative/TranscribePaneView.swift
 has 'selectedTranscriptionModel' Sources/LectureTranscribeNative/TranscribeViewModel.swift
 has 'isDiarizationAvailable' Sources/LectureTranscribeNative/TranscribeViewModel.swift
