@@ -23,7 +23,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
     var hoverDescription: String {
         switch self {
         case .gptTranscribe:
-            return "Newest model. Uses the spoken languages set in Settings. Supports speaker diarization."
+            return "Newest model. Uses the spoken language set in Settings (English if auto-detect). Supports speaker diarization."
         case .gpt4oTranscribe:
             return "Best accuracy and supports speaker diarization."
         case .gpt4oMiniTranscribe:
@@ -49,28 +49,49 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
         self != .gpt4oMiniTranscribe
     }
 
-    var usesSpokenLanguages: Bool {
+    /// GPT Transcribe drops speech without a language list, so it falls back to English when none is set.
+    /// The other models auto-detect when no language is set.
+    var requiresSpokenLanguages: Bool {
         self == .gptTranscribe
     }
 }
 
-enum SpokenLanguages {
-    static let defaultValue = "en"
+struct SpokenLanguage: Identifiable, Hashable {
+    /// ISO-639-1 code sent to the backend; empty means auto-detect.
+    let code: String
 
-    /// Mirrors `parse_language_codes` in lecture_transcribe.py. Returns nil when any code is invalid.
-    static func parse(_ raw: String) -> [String]? {
-        var codes: [String] = []
-        let tokens = raw.split(whereSeparator: { $0 == "," || $0.isWhitespace })
-        for token in tokens {
-            let code = token.lowercased()
-            guard (2...3).contains(code.count), code.allSatisfy({ ("a"..."z").contains($0) }) else {
-                return nil
-            }
-            if !codes.contains(code) {
-                codes.append(code)
-            }
-        }
-        return codes
+    var id: String { code }
+
+    var displayName: String {
+        if code.isEmpty { return "Auto-detect" }
+        return Locale.current.localizedString(forLanguageCode: code)?.capitalized ?? code
+    }
+
+    static let autoDetect = SpokenLanguage(code: "")
+    /// GPT Transcribe drops speech without a language, so it falls back to this when auto-detect is chosen.
+    static let fallbackCode = "en"
+
+    /// Auto-detect first, then languages sorted by name.
+    static let all: [SpokenLanguage] = [autoDetect] + [
+        "ar", "zh", "cs", "da", "nl", "en", "fi", "fr", "de", "el", "he", "hi", "hu", "id", "it", "ja",
+        "ko", "ms", "no", "fa", "pl", "pt", "ro", "ru", "es", "sv", "tl", "th", "tr", "uk", "ur", "vi",
+    ]
+    .map(SpokenLanguage.init(code:))
+    .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+
+    /// Maps a stored setting (possibly an older comma-separated list) to a supported code, or "" for auto-detect.
+    static func normalizedCode(_ stored: String?) -> String {
+        let first = stored?
+            .split(whereSeparator: { $0 == "," || $0.isWhitespace })
+            .first
+            .map { $0.lowercased() } ?? ""
+        return all.contains { $0.code == first } ? first : ""
+    }
+
+    /// Codes sent to the backend for `model`.
+    static func backendCodes(for code: String, model: TranscriptionModel) -> [String] {
+        if !code.isEmpty { return [code] }
+        return model.requiresSpokenLanguages ? [fallbackCode] : []
     }
 }
 
@@ -101,10 +122,11 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             UserDefaults.standard.set(selectedTranscriptionModel.rawValue, forKey: Self.selectedModelDefaultsKey)
         }
     }
-    @Published var spokenLanguages: String {
+    /// ISO-639-1 code of the spoken language; empty means auto-detect.
+    @Published var spokenLanguage: String {
         didSet {
-            guard oldValue != spokenLanguages else { return }
-            UserDefaults.standard.set(spokenLanguages, forKey: Self.spokenLanguagesDefaultsKey)
+            guard oldValue != spokenLanguage else { return }
+            UserDefaults.standard.set(spokenLanguage, forKey: Self.spokenLanguageDefaultsKey)
         }
     }
     @Published var diarizeEnabled = false {
@@ -142,7 +164,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private let maxHistoryEntries = 200
     private static let selectedModelDefaultsKey = "selectedTranscriptionModel"
     private static let outputFolderDefaultsKey = "outputFolderPath"
-    private static let spokenLanguagesDefaultsKey = "spokenLanguages"
+    // Keeps the older key so a language chosen before the dropdown carries over.
+    private static let spokenLanguageDefaultsKey = "spokenLanguages"
     private let defaultOutputFolderPath: String
     private var runTask: Task<Void, Never>?
     private var cancellationRequested = false
@@ -163,8 +186,9 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         } else {
             outputFolderPath = defaultOutputFolderPath
         }
-        spokenLanguages = UserDefaults.standard.string(forKey: Self.spokenLanguagesDefaultsKey)
-            ?? SpokenLanguages.defaultValue
+        spokenLanguage = SpokenLanguage.normalizedCode(
+            UserDefaults.standard.string(forKey: Self.spokenLanguageDefaultsKey)
+        )
         if let rawModel = UserDefaults.standard.string(forKey: Self.selectedModelDefaultsKey),
            let storedModel = TranscriptionModel(rawValue: rawModel)
         {
@@ -199,9 +223,19 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         "\(Int(progressValue.rounded()))%"
     }
 
-    var spokenLanguagesSummary: String {
-        guard let codes = SpokenLanguages.parse(spokenLanguages) else { return "invalid" }
-        return codes.isEmpty ? SpokenLanguages.defaultValue : codes.joined(separator: ", ")
+    /// The language the selected model will use. Auto-detect becomes English for GPT Transcribe, but the
+    /// stored choice stays auto-detect so switching back to a GPT-4o model restores it.
+    var effectiveSpokenLanguage: String {
+        get { SpokenLanguage.backendCodes(for: spokenLanguage, model: selectedTranscriptionModel).first ?? "" }
+        set { spokenLanguage = newValue }
+    }
+
+    var isAutoDetectAvailable: Bool {
+        !selectedTranscriptionModel.requiresSpokenLanguages
+    }
+
+    var spokenLanguageSummary: String {
+        SpokenLanguage(code: effectiveSpokenLanguage).displayName
     }
 
     var isDiarizationAvailable: Bool {
@@ -458,14 +492,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             return
         }
 
-        var languages: [String] = []
-        if selectedTranscriptionModel.usesSpokenLanguages {
-            guard let parsed = SpokenLanguages.parse(spokenLanguages) else {
-                showError("Spoken languages must be language codes like en, es, zh. Change them in Settings.")
-                return
-            }
-            languages = parsed.isEmpty ? [SpokenLanguages.defaultValue] : parsed
-        }
+        let languages = SpokenLanguage.backendCodes(for: spokenLanguage, model: selectedTranscriptionModel)
 
         let normalizedOutputDirectory = normalizeOutputDirectoryPath(outputFolderPath)
         guard ensureOutputDirectoryAvailable(at: normalizedOutputDirectory) else {

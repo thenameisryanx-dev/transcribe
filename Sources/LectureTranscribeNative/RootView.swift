@@ -87,19 +87,20 @@ private struct SettingsPaneView: View {
             }
 
             Section {
-                LabeledContent("Spoken Languages") {
-                    TextField("Spoken Languages", text: $viewModel.spokenLanguages, prompt: Text(SpokenLanguages.defaultValue))
-                        .labelsHidden()
-                        .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: 200)
-                        .disabled(viewModel.isRunning)
+                Picker("Spoken Language", selection: $viewModel.effectiveSpokenLanguage) {
+                    ForEach(SpokenLanguage.all) { language in
+                        Text(language.displayName)
+                            .tag(language.code)
+                            .unselectable(language == .autoDetect && !viewModel.isAutoDetectAvailable)
+                    }
                 }
+                .disabled(viewModel.isRunning)
             } header: {
                 Text("Transcription")
             } footer: {
-                Text(spokenLanguagesFooter)
+                Text(spokenLanguageFooter)
                     .font(.footnote)
-                    .foregroundStyle(spokenLanguagesAreValid ? Color.secondary : Color.red)
+                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -143,16 +144,13 @@ private struct SettingsPaneView: View {
         .navigationTitle("Settings")
     }
 
-    private var spokenLanguagesAreValid: Bool {
-        SpokenLanguages.parse(viewModel.spokenLanguages) != nil
-    }
-
-    private var spokenLanguagesFooter: String {
-        if !spokenLanguagesAreValid {
-            return "Use language codes separated by commas, like en, es, zh."
+    private var spokenLanguageFooter: String {
+        if viewModel.isAutoDetectAvailable {
+            return "The language spoken in your recordings. \(viewModel.selectedTranscriptionModel.displayName) "
+                + "can detect it automatically."
         }
-        return "Languages spoken in your recordings, as codes like en, es, zh. GPT Transcribe needs these to transcribe "
-            + "everything; the GPT-4o models detect the language automatically."
+        return "The language spoken in your recordings. \(viewModel.selectedTranscriptionModel.displayName) "
+            + "can't auto-detect, so it uses English unless you pick another language."
     }
 
     private var apiKeyStatus: String {
@@ -161,5 +159,17 @@ private struct SettingsPaneView: View {
         guard text.hasPrefix(prefix) else { return text }
         let status = text.dropFirst(prefix.count)
         return status.prefix(1).uppercased() + status.dropFirst()
+    }
+}
+
+private extension View {
+    /// Greys out a picker option. `.disabled` has no effect on items in a macOS menu picker.
+    @ViewBuilder
+    func unselectable(_ isUnselectable: Bool) -> some View {
+        if #available(macOS 14.0, *) {
+            selectionDisabled(isUnselectable)
+        } else {
+            disabled(isUnselectable)
+        }
     }
 }

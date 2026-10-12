@@ -9,6 +9,7 @@ from openai import OpenAI
 
 from lecture_transcribe import (
     CHUNKS_ROOT_DIR,
+    DEFAULT_LANGUAGES,
     DIARIZE_CHUNK_SECONDS,
     DIARIZE_SINGLE_BUFFER,
     MODEL_DIARIZE,
@@ -32,6 +33,7 @@ from lecture_transcribe import (
     require_ffprobe,
     safe_stem_from_path,
     sentence_lines,
+    single_language_hint,
     split_audio_to_chunks,
     transcribe_chunk_checked,
 )
@@ -106,9 +108,13 @@ def run_transcription_job(
         )
 
     push_event("log", f"Using transcription model: {transcription_model}")
-    chunk_languages = languages if transcription_model == MODEL_GPT_TRANSCRIBE and not diarize else None
-    if chunk_languages:
+    # gpt-transcribe takes the whole list; the GPT-4o and diarize models take at most one `language`.
+    if transcription_model == MODEL_GPT_TRANSCRIBE and not diarize:
+        chunk_languages = languages or list(DEFAULT_LANGUAGES)
         push_event("log", f"Spoken languages: {', '.join(chunk_languages)}")
+    else:
+        chunk_languages = languages or None
+        push_event("log", f"Spoken language: {single_language_hint(chunk_languages) or 'auto-detect'}")
 
     def log(message: str) -> None:
         push_event("log", message)
@@ -138,7 +144,9 @@ def run_transcription_job(
             dur = get_duration_seconds(working_input_path)
             if 0 < dur <= DIARIZE_SINGLE_BUFFER:
                 push_event("status", "Diarizing (single request)...")
-                content = diarize_whole_file(client, working_input_path, on_log=log)
+                content = diarize_whole_file(
+                    client, working_input_path, languages=chunk_languages, on_log=log
+                )
                 header = build_transcript_header(
                     input_path=input_path,
                     working_input_path=working_input_path,
@@ -165,7 +173,7 @@ def run_transcription_job(
 
                 responses = _run_chunks_in_parallel(
                     parts,
-                    lambda p: diarize_chunk(client, p, on_log=log),
+                    lambda p: diarize_chunk(client, p, languages=chunk_languages, on_log=log),
                     push_event,
                     "Diarizing",
                 )
