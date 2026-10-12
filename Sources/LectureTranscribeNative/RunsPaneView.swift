@@ -25,33 +25,22 @@ private enum RunsFilter: String, CaseIterable, Identifiable {
     }
 }
 
-private enum RunsSortOrder: String, CaseIterable, Identifiable {
-    case newestFirst = "Newest"
-    case oldestFirst = "Oldest"
-
-    var id: String { rawValue }
-}
-
 struct RunsPaneView: View {
     @EnvironmentObject private var viewModel: TranscribeViewModel
 
     @State private var selectedFilter: RunsFilter = .all
-    @State private var sortOrder: RunsSortOrder = .newestFirst
+    @State private var sortOrder = [KeyPathComparator(\TranscriptionHistoryEntry.startedAt, order: .reverse)]
     @State private var searchQuery = ""
+    @AppStorage("showsRunInspector") private var showsInspector = true
 
     private var filteredHistoryEntries: [TranscriptionHistoryEntry] {
         let normalizedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        let filtered = viewModel.historyEntries.filter { entry in
-            selectedFilter.includes(entry.status) && matchesSearchQuery(entry, query: normalizedQuery)
-        }
-
-        switch sortOrder {
-        case .newestFirst:
-            return filtered.sorted { $0.startedAt > $1.startedAt }
-        case .oldestFirst:
-            return filtered.sorted { $0.startedAt < $1.startedAt }
-        }
+        return viewModel.historyEntries
+            .filter { entry in
+                selectedFilter.includes(entry.status) && matchesSearchQuery(entry, query: normalizedQuery)
+            }
+            .sorted(using: sortOrder)
     }
 
     private var selectedVisibleEntry: TranscriptionHistoryEntry? {
@@ -61,62 +50,29 @@ struct RunsPaneView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                HStack(spacing: 8) {
-                    Text("Runs")
-                        .font(.headline)
-
-                    Picker("Sort", selection: $sortOrder) {
-                        ForEach(RunsSortOrder.allCases) { order in
-                            Text(order.rawValue).tag(order)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 170)
-
-                    Spacer(minLength: 0)
-                    Button(role: .destructive) {
-                        viewModel.deleteSelectedHistoryEntries()
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
-                    .disabled(!viewModel.canDeleteSelectedHistoryEntries)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-
-                Picker("Status", selection: $selectedFilter) {
-                    ForEach(RunsFilter.allCases) { filter in
-                        Text(filter.rawValue).tag(filter)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 10)
-
-                Divider()
-
-                List(selection: $viewModel.selectedHistoryEntryIDs) {
-                    if viewModel.historyEntries.isEmpty {
-                        Text("No transcription runs yet.")
-                            .foregroundStyle(.secondary)
-                    } else if filteredHistoryEntries.isEmpty {
-                        Text("No runs match current filters.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(filteredHistoryEntries) { entry in
-                            RunRowView(entry: entry)
-                                .tag(entry.id)
-                        }
-                    }
-                }
-                .searchable(text: $searchQuery, prompt: "Search runs")
-                .onDeleteCommand {
-                    viewModel.deleteSelectedHistoryEntries()
+        runsTable
+            .overlay {
+                if viewModel.historyEntries.isEmpty {
+                    EmptyStateView(
+                        title: "No Runs Yet",
+                        systemImage: "clock.arrow.circlepath",
+                        description: "Transcriptions you start will appear here."
+                    )
+                } else if filteredHistoryEntries.isEmpty {
+                    EmptyStateView(
+                        title: "No Matching Runs",
+                        systemImage: "line.3.horizontal.decrease.circle",
+                        description: "No runs match current filters."
+                    )
                 }
             }
-            .frame(minWidth: 280, idealWidth: 340, maxWidth: 460)
+            .modifier(RunInspector(isPresented: $showsInspector) {
+                inspectorContent
+            })
+            .navigationTitle("Runs")
+            .navigationSubtitle("\(filteredHistoryEntries.count) of \(viewModel.historyEntries.count)")
+            .searchable(text: $searchQuery, placement: .toolbar, prompt: "Search runs")
+            .toolbar { runsToolbar }
             .onAppear {
                 alignSelectionToVisibleEntries()
             }
@@ -132,37 +88,170 @@ struct RunsPaneView: View {
             .onChange(of: viewModel.historyEntries) { _ in
                 alignSelectionToVisibleEntries()
             }
+    }
 
-            Divider()
-
-            if let entry = selectedVisibleEntry {
-                RunDetailView(entry: entry)
-                    .environmentObject(viewModel)
-            } else if viewModel.selectedHistoryEntryCount > 1 {
-                VStack(spacing: 10) {
-                    Text("Multiple Runs Selected")
-                        .font(.title2.weight(.semibold))
-                    Text("Select a single run to inspect details.")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if !viewModel.selectedHistoryEntryIDs.isEmpty, !viewModel.historyEntries.isEmpty {
-                VStack(spacing: 10) {
-                    Text("Selected Run Hidden")
-                        .font(.title2.weight(.semibold))
-                    Text("Adjust search/filter options to view this run.")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                VStack(spacing: 10) {
-                    Text("Runs")
-                        .font(.title2.weight(.semibold))
-                    Text("Select a run to inspect details.")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+    private var runsTable: some View {
+        Table(filteredHistoryEntries, selection: $viewModel.selectedHistoryEntryIDs, sortOrder: $sortOrder) {
+            TableColumn("Recording", value: \.recordingName) { entry in
+                Text(entry.recordingName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(entry.inputPath)
             }
+            .width(min: 180, ideal: 320)
+
+            TableColumn("Status", value: \.statusName) { entry in
+                Label(entry.status.displayName, systemImage: entry.status.systemImage)
+                    .foregroundStyle(entry.status.badgeColor)
+            }
+            .width(min: 90, ideal: 110, max: 140)
+
+            TableColumn("Model", value: \.modelName)
+                .width(min: 100, ideal: 150, max: 200)
+
+            TableColumn("Started", value: \.startedAt) { entry in
+                Text(entry.startedAt, format: .dateTime.month(.abbreviated).day().year().hour().minute())
+                    .monospacedDigit()
+            }
+            .width(min: 130, ideal: 170, max: 200)
+        }
+        .contextMenu(forSelectionType: TranscriptionHistoryEntry.ID.self) { ids in
+            if ids.count == 1, let entry = viewModel.historyEntries.first(where: { ids.contains($0.id) }) {
+                Button("Open Transcript", systemImage: "doc.text") {
+                    viewModel.openHistoryOutput(entry)
+                }
+                Button("Reveal in Finder", systemImage: "folder") {
+                    viewModel.revealHistoryOutput(entry)
+                }
+                Button("Re-run", systemImage: "arrow.clockwise") {
+                    viewModel.rerunHistoryEntry(entry)
+                }
+                .disabled(viewModel.isRunning || !FileManager.default.fileExists(atPath: entry.inputPath))
+                Divider()
+            }
+            if !ids.isEmpty {
+                Button("Delete", systemImage: "trash", role: .destructive) {
+                    viewModel.selectedHistoryEntryIDs = ids
+                    viewModel.deleteSelectedHistoryEntries()
+                }
+            }
+        } primaryAction: { ids in
+            guard ids.count == 1, let entry = viewModel.historyEntries.first(where: { ids.contains($0.id) }) else {
+                return
+            }
+            viewModel.openHistoryOutput(entry)
+        }
+        .onDeleteCommand {
+            viewModel.deleteSelectedHistoryEntries()
+        }
+    }
+
+    @ViewBuilder
+    private var inspectorContent: some View {
+        if let entry = selectedVisibleEntry {
+            RunDetailView(entry: entry)
+                .environmentObject(viewModel)
+        } else if viewModel.selectedHistoryEntryCount > 1 {
+            EmptyStateView(
+                title: "Multiple Runs Selected",
+                systemImage: "square.stack",
+                description: "Select a single run to inspect details."
+            )
+        } else if !viewModel.selectedHistoryEntryIDs.isEmpty, !viewModel.historyEntries.isEmpty {
+            EmptyStateView(
+                title: "Selected Run Hidden",
+                systemImage: "line.3.horizontal.decrease.circle",
+                description: "Adjust search/filter options to view this run."
+            )
+        } else {
+            EmptyStateView(
+                title: "No Selection",
+                systemImage: "sidebar.trailing",
+                description: "Select a run to inspect details."
+            )
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var runsToolbar: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Picker("Status", selection: $selectedFilter) {
+                    ForEach(RunsFilter.allCases) { filter in
+                        Text(filter.rawValue).tag(filter)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Label(
+                    "Filter",
+                    systemImage: selectedFilter == .all
+                        ? "line.3.horizontal.decrease.circle"
+                        : "line.3.horizontal.decrease.circle.fill"
+                )
+            }
+            .help("Filter by status")
+        }
+
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                if let entry = selectedVisibleEntry {
+                    viewModel.rerunHistoryEntry(entry)
+                }
+            } label: {
+                Label("Re-run", systemImage: "arrow.clockwise")
+            }
+            .help("Re-run this transcription")
+            .disabled(
+                selectedVisibleEntry.map { viewModel.isRunning || !FileManager.default.fileExists(atPath: $0.inputPath) } ?? true
+            )
+
+            Button {
+                if let entry = selectedVisibleEntry {
+                    viewModel.revealHistoryOutput(entry)
+                }
+            } label: {
+                Label("Reveal in Finder", systemImage: "folder")
+            }
+            .help("Reveal in Finder")
+            .disabled(selectedVisibleEntry == nil)
+
+            Button {
+                if let entry = selectedVisibleEntry {
+                    viewModel.openHistoryOutput(entry)
+                }
+            } label: {
+                Label("Open Transcript", systemImage: "doc.text")
+            }
+            .help("Open Transcript")
+            .disabled(
+                selectedVisibleEntry.flatMap(\.outputPath).map { !FileManager.default.fileExists(atPath: $0) } ?? true
+            )
+
+            Button(role: .destructive) {
+                viewModel.deleteSelectedHistoryEntries()
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            .help("Delete selected runs")
+            .disabled(!viewModel.canDeleteSelectedHistoryEntries)
+        }
+
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                showsInspector.toggle()
+            } label: {
+                Label("Inspector", systemImage: "sidebar.trailing")
+            }
+            .help(showsInspector ? "Hide Inspector" : "Show Inspector")
         }
     }
 
@@ -200,45 +289,44 @@ struct RunsPaneView: View {
     }
 }
 
-private struct RunRowView: View {
-    let entry: TranscriptionHistoryEntry
+/// Shows run details in a system inspector (macOS 14+), or a trailing column on older systems.
+private struct RunInspector<InspectorContent: View>: ViewModifier {
+    @Binding var isPresented: Bool
+    @ViewBuilder var inspector: () -> InspectorContent
 
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(primaryTitle)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(Self.timestampFormatter.string(from: entry.startedAt))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content
+                .inspector(isPresented: $isPresented) {
+                    inspector()
+                        .inspectorColumnWidth(min: 280, ideal: 320, max: 480)
+                }
+        } else {
+            HStack(spacing: 0) {
+                content
+                if isPresented {
+                    Divider()
+                    inspector()
+                        .frame(width: 320)
+                }
             }
-
-            Spacer(minLength: 8)
-
-            Text(entry.status.displayName)
-                .font(.caption.weight(.semibold))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(entry.status.badgeColor.opacity(0.18), in: Capsule())
-                .foregroundStyle(entry.status.badgeColor)
         }
-        .padding(.vertical, 3)
+    }
+}
+
+private extension TranscriptionHistoryEntry {
+    var recordingName: String {
+        URL(fileURLWithPath: inputPath).lastPathComponent
     }
 
-    private var primaryTitle: String {
-        if let outputPath = entry.outputPath, !outputPath.isEmpty {
-            return URL(fileURLWithPath: outputPath).lastPathComponent
-        }
-        return URL(fileURLWithPath: entry.inputPath).lastPathComponent
+    var statusName: String {
+        status.displayName
     }
 
-    private static let timestampFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter
-    }()
+    var modelName: String {
+        guard let model else { return "—" }
+        return TranscriptionModel(rawValue: model)?.displayName ?? model
+    }
 }
 
 private struct RunDetailView: View {
@@ -261,13 +349,10 @@ private struct RunDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Run Details")
-                    .font(.title2.weight(.semibold))
-
+        Form {
+            Section("Run Details") {
                 LabeledContent("Status") {
-                    Text(entry.status.displayName)
+                    Label(entry.status.displayName, systemImage: entry.status.systemImage)
                         .foregroundStyle(entry.status.badgeColor)
                 }
 
@@ -288,117 +373,84 @@ private struct RunDetailView: View {
                         Text(TranscriptionModel(rawValue: rawModel)?.displayName ?? rawModel)
                     }
                 }
+            }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Input file")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(entry.inputPath)
-                        .textSelection(.enabled)
-                        .font(.system(.body, design: .monospaced))
-                    if !inputExists {
-                        Text("Original input file is missing. Re-run is disabled.")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                }
+            Section("Files") {
+                pathRow(
+                    "Input file",
+                    path: entry.inputPath,
+                    warning: inputExists ? nil : "Original input file is missing. Re-run is disabled."
+                )
+                pathRow(
+                    "Output file",
+                    path: entry.outputPath ?? "Not available",
+                    warning: entry.outputPath != nil && !outputExists ? "Output file is missing or moved." : nil
+                )
+                pathRow("Output folder", path: entry.outputDirectory, warning: nil)
+            }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Output file")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(entry.outputPath ?? "Not available")
-                        .textSelection(.enabled)
-                        .font(.system(.body, design: .monospaced))
-                    if entry.outputPath != nil, !outputExists {
-                        Text("Output file is missing or moved.")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Output folder")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(entry.outputDirectory)
-                        .textSelection(.enabled)
-                        .font(.system(.body, design: .monospaced))
-                }
-
-                if let errorMessage = entry.errorMessage, !errorMessage.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Error")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+            if let errorMessage = entry.errorMessage, !errorMessage.isEmpty {
+                Section("Error") {
+                    Label {
                         Text(errorMessage)
-                            .foregroundStyle(.red)
                             .textSelection(.enabled)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
                     }
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Transcript Preview")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 6)
-                        Button("Refresh Preview") {
-                            loadTranscriptPreview()
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(!outputExists)
-                    }
-
-                    if transcriptPreviewText.isEmpty {
-                        Text(transcriptPreviewNote)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text(transcriptPreviewText)
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(10)
-                            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
-
-                        if !transcriptPreviewNote.isEmpty {
-                            Text(transcriptPreviewNote)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                HStack(spacing: 10) {
-                    Button("Open Transcript") {
-                        viewModel.openHistoryOutput(entry)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!outputExists)
-
-                    Button("Reveal in Finder") {
-                        viewModel.revealHistoryOutput(entry)
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("Re-run") {
-                        viewModel.rerunHistoryEntry(entry)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(viewModel.isRunning || !inputExists)
+                    .foregroundStyle(.red)
                 }
             }
-            .frame(maxWidth: 760, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 24)
-            .padding(.vertical, 20)
+
+            Section {
+                if transcriptPreviewText.isEmpty {
+                    Text(transcriptPreviewNote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(transcriptPreviewText)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } header: {
+                HStack {
+                    Text("Transcript Preview")
+                    Spacer()
+                    Button("Refresh Preview") {
+                        loadTranscriptPreview()
+                    }
+                    .buttonStyle(.link)
+                    .font(.callout)
+                    .disabled(!outputExists)
+                }
+            } footer: {
+                if !transcriptPreviewText.isEmpty, !transcriptPreviewNote.isEmpty {
+                    Text(transcriptPreviewNote)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
+        .formStyle(.grouped)
         .task(id: entry.id) {
             loadTranscriptPreview()
         }
         .onChange(of: entry.outputPath) { _ in
             loadTranscriptPreview()
+        }
+    }
+
+    private func pathRow(_ title: String, path: String, warning: String?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+            Text(path)
+                .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            if let warning {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
         }
     }
 
@@ -446,6 +498,19 @@ private struct RunDetailView: View {
 }
 
 private extension TranscriptionHistoryEntry.Status {
+    var systemImage: String {
+        switch self {
+        case .running:
+            return "clock.fill"
+        case .success:
+            return "checkmark.circle.fill"
+        case .failed:
+            return "xmark.octagon.fill"
+        case .cancelled:
+            return "minus.circle.fill"
+        }
+    }
+
     var badgeColor: Color {
         switch self {
         case .running:

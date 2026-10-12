@@ -33,7 +33,7 @@ has_fixed 'frame(minWidth: 1120, minHeight: 760)' Sources/LectureTranscribeNativ
 has_fixed 'loadHistoryEntries()' Sources/LectureTranscribeNative/TranscribeViewModel.swift
 has_fixed 'saveHistoryEntries()' Sources/LectureTranscribeNative/TranscribeViewModel.swift
 has_fixed 'normalizeHistorySelection(' Sources/LectureTranscribeNative/TranscribeViewModel.swift
-has_fixed 'GroupBox("Output")' Sources/LectureTranscribeNative/RootView.swift
+has_fixed 'Text("Output")' Sources/LectureTranscribeNative/RootView.swift
 has_fixed 'Button("Open Output Folder")' Sources/LectureTranscribeNative/RootView.swift
 has_fixed 'Button("Change Folder…")' Sources/LectureTranscribeNative/RootView.swift
 lacks_fixed '.disabled(!viewModel.canOpenOutputFolder)' Sources/LectureTranscribeNative/RootView.swift

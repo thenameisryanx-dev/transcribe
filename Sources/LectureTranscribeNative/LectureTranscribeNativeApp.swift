@@ -101,7 +101,19 @@ struct LectureTranscribeNativeApp: App {
                 .environmentObject(viewModel)
                 .frame(minWidth: 1120, minHeight: 760)
         }
+        .defaultSize(width: 1120, height: 812)
         .windowResizability(.contentSize)
+        .commands {
+            // The app has one window, so ⌘N starts a new transcription instead of opening a window.
+            CommandGroup(replacing: .newItem) {
+                Button("New Transcription") {
+                    viewModel.startNewTranscription()
+                    activateAndBringPrimaryWindowToFront()
+                }
+                .keyboardShortcut("n")
+                .disabled(viewModel.isRunning)
+            }
+        }
 
         MenuBarExtra(
             viewModel.isRunning ? viewModel.progressLabel : "LT",

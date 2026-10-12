@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -9,6 +10,8 @@ struct TranscribePaneView: View {
     @State private var showingHowToGuide = false
     @State private var howToStepIndex = 0
     @State private var isAudioFileDropTargeted = false
+    @State private var audioFileDetails: String?
+    @AppStorage("showsRunLog") private var showsRunLog = false
 
     private var currentHowToStep: HowToStep {
         Self.howToSteps[howToStepIndex]
@@ -16,139 +19,94 @@ struct TranscribePaneView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Lecture Transcribe")
-                            .font(.largeTitle.weight(.semibold))
-                        Text("Fast transcripts with optional speaker labeling.")
-                            .foregroundStyle(.secondary)
-                    }
-
-                    GroupBox("Account") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("API Key")
-                                .font(.subheadline.weight(.semibold))
-                            HStack(spacing: 12) {
-                                Text(viewModel.apiKeyStatusText)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                                Spacer(minLength: 8)
-                                Button("Set API Key…") {
-                                    viewModel.presentAPIKeySheet()
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(viewModel.isRunning)
-                            }
-                        }
-                    }
+            if needsAPIKey {
+                apiKeyBanner
+                    .padding([.horizontal, .top], 20)
                     .howToTarget(.account)
-
-                    GroupBox("Input & Output") {
-                        VStack(alignment: .leading, spacing: 14) {
-                            labeledInputRow(
-                                title: "Audio File",
-                                placeholder: "Choose an audio file",
-                                text: $viewModel.audioFilePath,
-                                action: viewModel.browseAudioFile
-                            )
-
-                            labeledInputRow(
-                                title: "Output Folder",
-                                placeholder: "Choose output folder",
-                                text: $viewModel.outputFolderPath,
-                                action: viewModel.browseOutputFolder
-                            )
-                        }
-                    }
-                    .howToTarget(.inputOutput)
-
-                    GroupBox("Options") {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Toggle("Add speaker labels (diarize)", isOn: $viewModel.diarizeEnabled)
-                                .disabled(viewModel.isRunning || !viewModel.isDiarizationAvailable)
-                                .accessibilityLabel("Add speaker labels")
-                            if !viewModel.isDiarizationAvailable {
-                                Text("Unavailable for \(viewModel.selectedTranscriptionModel.displayName).")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .howToTarget(.options)
-
-                    GroupBox("Run Log") {
-                        ScrollView {
-                            Text(viewModel.logText.isEmpty ? "No log output yet." : viewModel.logText)
-                                .font(.system(.body, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                                .padding(.vertical, 4)
-                        }
-                        .frame(minHeight: 220)
-                        .howToTarget(.runLog)
-                    }
-                }
-                .frame(maxWidth: 760, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.horizontal, 24)
-                .padding(.top, 20)
-                .padding(.bottom, 18)
             }
 
-            Divider()
+            VStack(spacing: 18) {
+                recordingView
+                    .howToTarget(.inputOutput)
 
-            HStack(alignment: .center, spacing: 12) {
-                Button("Start Transcribing") {
-                    viewModel.startTranscription()
+                if !viewModel.hasTranscribedCurrentRecording {
+                    speakerLabelsOption
+                        .howToTarget(.options)
                 }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(!viewModel.canStart)
-                .accessibilityLabel("Start transcribing")
-                .howToTarget(.startButton)
-
-                Button("Cancel Run") {
-                    viewModel.cancelTranscription()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(20)
+            .overlay {
+                if isAudioFileDropTargeted && !viewModel.isRunning {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+                        .background(
+                            Color.accentColor.opacity(0.06),
+                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        )
+                        .padding(12)
+                        .allowsHitTesting(false)
                 }
-                .buttonStyle(.bordered)
-                .keyboardShortcut(.cancelAction)
-                .disabled(!viewModel.canCancel)
-                .help("Stops the active transcription run.")
+            }
 
+            runLog
+                .padding(.horizontal, 20)
+                .padding(.bottom, 16)
+                .howToTarget(.runLog)
+        }
+        .navigationTitle("Transcribe")
+        .navigationSubtitle(windowSubtitle)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                ModelSelectionPopoverButton(
+                    selectedModel: $viewModel.selectedTranscriptionModel,
+                    isDisabled: viewModel.isRunning
+                )
+                .help("Transcription model")
+            }
+
+            if #available(macOS 26.0, *) {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
                 Button {
                     viewModel.requestClearDraft()
                 } label: {
                     Label("Clear Draft", systemImage: "xmark.circle")
                 }
-                .buttonStyle(.bordered)
                 .disabled(!viewModel.canClearDraft)
                 .help("Clears selected audio, progress, and run log. Keeps run history.")
 
-                ModelSelectionPopoverButton(
-                    selectedModel: $viewModel.selectedTranscriptionModel,
-                    isDisabled: viewModel.isRunning
-                )
+                // Cancel and Start stay put and enable by state (like Run/Stop in Xcode);
+                // once the recording is transcribed, the primary action opens the result.
+                Button {
+                    viewModel.cancelTranscription()
+                } label: {
+                    Label("Cancel Run", systemImage: "stop.fill")
+                }
+                .keyboardShortcut(.cancelAction)
+                .disabled(!viewModel.canCancel)
+                .help("Stops the active transcription run.")
 
-                Spacer(minLength: 18)
-
-                VStack(alignment: .trailing, spacing: 6) {
-                    ProgressView(value: viewModel.progressValue, total: 100.0)
-                        .frame(width: 220)
-                    HStack(spacing: 8) {
-                        Text(viewModel.progressLabel)
-                            .monospacedDigit()
-                        Text(viewModel.statusText)
-                            .foregroundStyle(.secondary)
+                if viewModel.hasTranscribedCurrentRecording {
+                    Button("Open Transcript") {
+                        viewModel.openLatestTranscript()
                     }
-                    .font(.subheadline)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .help("Open the finished transcript (Return)")
+                } else {
+                    Button("Start Transcribing") {
+                        viewModel.startTranscription()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!viewModel.canStart)
+                    .accessibilityLabel("Start transcribing")
+                    .help("Transcribe the selected recording (Return)")
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 12)
-            .background(.bar)
         }
         .contentShape(Rectangle())
         .onDrop(
@@ -174,17 +132,6 @@ struct TranscribePaneView: View {
                     )
                 }
             }
-        }
-        .sheet(isPresented: $viewModel.showingAPIKeySheet) {
-            APIKeySheetView()
-                .environmentObject(viewModel)
-                .frame(width: 420)
-                .padding(20)
-        }
-        .alert("Lecture Transcribe", isPresented: $viewModel.showingErrorAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(viewModel.errorMessage)
         }
         .confirmationDialog(
             "Clear current draft?",
@@ -214,86 +161,212 @@ struct TranscribePaneView: View {
         }
     }
 
+    private var trimmedAudioPath: String {
+        viewModel.audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var needsAPIKey: Bool {
+        let status = viewModel.apiKeyStatusText.lowercased()
+        return status.contains("required") || status.contains("unknown")
+    }
+
+    private var windowSubtitle: String {
+        if viewModel.isRunning {
+            return "\(viewModel.statusText) – \(viewModel.progressLabel)"
+        }
+        return viewModel.statusText
+    }
+
+    private var apiKeyBanner: some View {
+        GroupBox {
+            HStack(spacing: 12) {
+                Image(systemName: "key.fill")
+                    .font(.title2)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Add your OpenAI API key")
+                        .font(.headline)
+                    Text("Transcription needs a key. You can also manage it in Settings.")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 12)
+                Button("Set API Key…") {
+                    viewModel.presentAPIKeySheet()
+                }
+                .disabled(viewModel.isRunning)
+            }
+            .padding(6)
+        }
+    }
+
     @ViewBuilder
-    private func labeledInputRow(
-        title: String,
-        placeholder: String,
-        text: Binding<String>,
-        action: @escaping () -> Void
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-            HStack(spacing: 8) {
-                TextField(placeholder, text: text)
-                    .textFieldStyle(.roundedBorder)
+    private var recordingView: some View {
+        if trimmedAudioPath.isEmpty {
+            EmptyStateView(
+                title: "Drop a Lecture Recording",
+                systemImage: "waveform.badge.plus",
+                description: "Drag an audio or video file here, or choose one from your Mac."
+            ) {
+                Button("Choose File…", action: viewModel.browseAudioFile)
                     .disabled(viewModel.isRunning)
-                Button("Browse…", action: action)
-                    .buttonStyle(.bordered)
+            }
+        } else {
+            selectedRecordingView
+        }
+    }
+
+    private var selectedRecordingView: some View {
+        let url = URL(fileURLWithPath: trimmedAudioPath)
+        let outputFolder = (viewModel.outputFolderPath as NSString).abbreviatingWithTildeInPath
+
+        return VStack(spacing: 12) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: trimmedAudioPath))
+                .resizable()
+                .frame(width: 96, height: 96)
+
+            VStack(spacing: 4) {
+                Text(url.lastPathComponent)
+                    .font(.title2.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                if let audioFileDetails {
+                    Text(audioFileDetails)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .help(trimmedAudioPath)
+
+            if viewModel.hasTranscribedCurrentRecording {
+                completedRunSummary
+            } else if viewModel.isRunning || viewModel.progressValue > 0 {
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: viewModel.progressValue, total: 100.0)
+                    HStack {
+                        Text(viewModel.statusText)
+                        Spacer()
+                        Text(viewModel.progressLabel)
+                            .monospacedDigit()
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                }
+                .frame(width: 360)
+                .padding(.top, 4)
+            } else {
+                Button("Choose Different File…", action: viewModel.browseAudioFile)
                     .disabled(viewModel.isRunning)
+            }
+
+            if !viewModel.hasTranscribedCurrentRecording {
+                Text("Transcripts are saved to \(outputFolder).")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: 520)
+        .task(id: trimmedAudioPath) {
+            audioFileDetails = await Self.loadAudioFileDetails(for: url)
+        }
+    }
+
+    private var completedRunSummary: some View {
+        VStack(spacing: 12) {
+            Label {
+                Text("Transcription Complete")
+            } icon: {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            }
+            .font(.headline)
+
+            if let latestOutputPath = viewModel.latestOutputPath {
+                Text((latestOutputPath as NSString).abbreviatingWithTildeInPath)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+
+            HStack(spacing: 10) {
+                Button("Show in Finder") {
+                    viewModel.revealLatestTranscript()
+                }
+                Button("Choose Another File…", action: viewModel.browseAudioFile)
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private var speakerLabelsOption: some View {
+        VStack(spacing: 4) {
+            Toggle("Add speaker labels (diarize)", isOn: $viewModel.diarizeEnabled)
+                .toggleStyle(.checkbox)
+                .disabled(viewModel.isRunning || !viewModel.isDiarizationAvailable)
+                .accessibilityLabel("Add speaker labels")
+            if !viewModel.isDiarizationAvailable {
+                Text("Unavailable for \(viewModel.selectedTranscriptionModel.displayName).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
 
+    private var runLog: some View {
+        DisclosureGroup("Run Log", isExpanded: $showsRunLog) {
+            ScrollView {
+                Text(viewModel.logText.isEmpty ? "No log output yet." : viewModel.logText)
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(10)
+            }
+            .frame(height: 180)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .padding(.top, 6)
+        }
+    }
+
+    private static func loadAudioFileDetails(for url: URL) async -> String? {
+        var parts: [String] = []
+        let folder = url.deletingLastPathComponent().path
+        parts.append((folder as NSString).abbreviatingWithTildeInPath)
+
+        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+            parts.append(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
+        }
+
+        if let duration = try? await AVURLAsset(url: url).load(.duration), duration.isNumeric, duration.seconds > 0 {
+            let formatter = DateComponentsFormatter()
+            formatter.allowedUnits = duration.seconds >= 3600 ? [.hour, .minute] : [.minute, .second]
+            formatter.unitsStyle = .abbreviated
+            if let text = formatter.string(from: duration.seconds) {
+                parts.append(text)
+            }
+        }
+
+        return parts.joined(separator: " · ")
+    }
+
+    /// Returns `nil` when the target isn't laid out in the pane content
+    /// (toolbar items, or the API key banner once a key is set).
     private func spotlightRect(
         for target: HowToTarget,
-        anchors: [HowToTarget: Anchor<CGRect>],
+        anchors: [HowToTarget: [Anchor<CGRect>]],
         proxy: GeometryProxy
-    ) -> CGRect {
-        let rawRect: CGRect
-        guard let anchor = anchors[target] else {
-            rawRect = CGRect(
-                x: max(20, (proxy.size.width - 360) / 2),
-                y: max(20, (proxy.size.height - 160) / 2),
-                width: min(360, max(200, proxy.size.width - 40)),
-                height: 160
-            )
-            return clampedSpotlightRect(rawRect, in: proxy.size, for: target)
+    ) -> CGRect? {
+        guard let targetAnchors = anchors[target], !targetAnchors.isEmpty else {
+            return nil
         }
 
-        let padding: CGFloat
-        switch target {
-        case .runLog:
-            padding = 2
-        case .options, .startButton:
-            padding = 6
-        default:
-            padding = 10
-        }
-
-        let anchoredRect = proxy[anchor].insetBy(dx: -padding, dy: -padding)
-        if target == .runLog {
-            // GroupBox styling can include the section label/header in bounds;
-            // trim to keep spotlight focused on the log content viewport.
-            let horizontalTrim: CGFloat = 2
-            let topTrim: CGFloat = 24
-            let bottomTrim: CGFloat = 4
-            let sideExpansion: CGFloat = 8
-            let bottomExpansion: CGFloat = 8
-            let baseHeight = max(120, anchoredRect.height - topTrim - bottomTrim)
-            let topLift = baseHeight / 4
-            let topEdge = anchoredRect.minY + topTrim - topLift
-            rawRect = CGRect(
-                x: anchoredRect.minX + horizontalTrim - sideExpansion,
-                y: topEdge,
-                width: max(120, anchoredRect.width - (horizontalTrim * 2) + (sideExpansion * 2)),
-                height: baseHeight + topLift + bottomExpansion
-            )
-        } else if target == .startButton {
-            // Keep left/bottom fixed and nudge top/right inward.
-            let rightInset: CGFloat = 2
-            let topInset: CGFloat = 4
-            let adjustedWidth = max(88, anchoredRect.width - rightInset)
-            let adjustedHeight = max(30, anchoredRect.height - topInset)
-            rawRect = CGRect(
-                x: anchoredRect.minX,
-                y: anchoredRect.maxY - adjustedHeight,
-                width: adjustedWidth,
-                height: adjustedHeight
-            )
-        } else {
-            rawRect = anchoredRect
-        }
+        let unionRect = targetAnchors
+            .map { proxy[$0] }
+            .reduce(CGRect.null) { $0.union($1) }
+        let rawRect = unionRect.insetBy(dx: -10, dy: -10)
         return clampedSpotlightRect(rawRect, in: proxy.size, for: target)
     }
 
@@ -305,21 +378,12 @@ struct TranscribePaneView: View {
         case .startButton:
             minimumSize = CGSize(width: 88, height: 30)
         default:
-            minimumSize = CGSize(width: 140, height: 100)
+            minimumSize = CGSize(width: 140, height: 40)
         }
 
         let availableWidth = max(80, size.width - 32)
         let availableHeight = max(60, size.height - 32)
-        let maximumSize: CGSize
-        switch target {
-        case .runLog:
-            maximumSize = CGSize(
-                width: min(780, availableWidth),
-                height: min(252, availableHeight)
-            )
-        default:
-            maximumSize = CGSize(width: availableWidth, height: availableHeight)
-        }
+        let maximumSize = CGSize(width: availableWidth, height: availableHeight)
 
         let width = min(max(rect.width.isFinite ? rect.width : 220, minimumSize.width), maximumSize.width)
         let height = min(max(rect.height.isFinite ? rect.height : 120, minimumSize.height), maximumSize.height)
@@ -371,27 +435,27 @@ struct TranscribePaneView: View {
         HowToStep(
             target: .account,
             title: "1) Add your API key",
-            message: "This app requires an OpenAI API key to work. Use Set API Key first, then you can run transcriptions."
+            message: "This app requires an OpenAI API key to work. Use Set API Key (also in Settings) first, then you can run transcriptions."
         ),
         HowToStep(
             target: .inputOutput,
-            title: "2) Select audio and output",
-            message: "Pick the lecture audio file and choose where transcript files should be written."
+            title: "2) Choose a recording",
+            message: "Drop a lecture recording into the window or click Choose File. Transcripts are saved to the output folder set in Settings."
         ),
         HowToStep(
             target: .options,
             title: "3) Choose options",
-            message: "Enable speaker labels when your recording includes multiple speakers and you want separated dialogue."
+            message: "Enable speaker labels when your recording includes multiple speakers. Pick the transcription model from the toolbar."
         ),
         HowToStep(
             target: .startButton,
             title: "4) Start transcription",
-            message: "Click Start Transcribing to run the selected audio file with your current options."
+            message: "Click Start Transcribing in the toolbar. Progress appears here and in the window title."
         ),
         HowToStep(
             target: .runLog,
             title: "5) Review results",
-            message: "Watch progress and logs here. Use Open Output Folder to quickly access your generated transcript."
+            message: "Expand Run Log to watch progress. Finished transcripts are listed in Runs."
         ),
     ]
 
@@ -455,42 +519,22 @@ private struct ModelSelectionPopoverButton: View {
     let isDisabled: Bool
 
     @State private var showingPopover = false
-    @State private var isButtonHovered = false
     @State private var hoveredModelInPopover: TranscriptionModel?
 
     var body: some View {
         Button {
             showingPopover.toggle()
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Text(selectedModel.displayName)
                     .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.footnote.weight(.semibold))
+                Image(systemName: "chevron.up.chevron.down")
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
             }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(
-                isButtonHovered || showingPopover
-                    ? Color.accentColor
-                    : Color.primary
-            )
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(
-                        isButtonHovered || showingPopover
-                            ? Color.accentColor.opacity(0.18)
-                            : Color.secondary.opacity(0.12)
-                    )
-            )
         }
-        .buttonStyle(.plain)
         .fixedSize()
         .disabled(isDisabled)
-        .onHover { isHovering in
-            isButtonHovered = isHovering
-        }
         .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Transcription Model")
@@ -550,7 +594,7 @@ private struct ModelSelectionPopoverButton: View {
     }
 }
 
-private struct APIKeySheetView: View {
+struct APIKeySheetView: View {
     @EnvironmentObject private var viewModel: TranscribeViewModel
 
     var body: some View {
@@ -600,17 +644,19 @@ private struct HowToStep {
     let message: String
 }
 
+// Inside a Form, a modifier on a Section is applied to each of its rows,
+// so every target collects all of its anchors and the spotlight unions them.
 private struct HowToTargetPreferenceKey: PreferenceKey {
-    static let defaultValue: [HowToTarget: Anchor<CGRect>] = [:]
+    static let defaultValue: [HowToTarget: [Anchor<CGRect>]] = [:]
 
-    static func reduce(value: inout [HowToTarget: Anchor<CGRect>], nextValue: () -> [HowToTarget: Anchor<CGRect>]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, newer in newer })
+    static func reduce(value: inout [HowToTarget: [Anchor<CGRect>]], nextValue: () -> [HowToTarget: [Anchor<CGRect>]]) {
+        value.merge(nextValue(), uniquingKeysWith: +)
     }
 }
 
 private extension View {
     func howToTarget(_ target: HowToTarget) -> some View {
-        anchorPreference(key: HowToTargetPreferenceKey.self, value: .bounds) { [target: $0] }
+        anchorPreference(key: HowToTargetPreferenceKey.self, value: .bounds) { [target: [$0]] }
     }
 }
 
@@ -620,7 +666,9 @@ private struct SpotlightShape: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
         path.addRect(rect)
-        path.addRoundedRect(in: holeRect, cornerSize: CGSize(width: 14, height: 14))
+        if !holeRect.isNull {
+            path.addRoundedRect(in: holeRect, cornerSize: CGSize(width: 14, height: 14))
+        }
         return path
     }
 }
@@ -629,17 +677,17 @@ private struct HowToGuideOverlay: View {
     let step: HowToStep
     let stepNumber: Int
     let totalSteps: Int
-    let highlightRect: CGRect
+    let highlightRect: CGRect?
     let onBack: () -> Void
     let onNext: () -> Void
     let onClose: () -> Void
 
     var body: some View {
         GeometryReader { proxy in
-            let layout = instructionLayout(in: proxy.size)
+            let layout = instructionLayout(in: proxy.size, highlightRect: highlightRect ?? .null)
 
             ZStack {
-                SpotlightShape(holeRect: highlightRect)
+                SpotlightShape(holeRect: highlightRect ?? .null)
                     .fill(Color.black.opacity(0.62), style: FillStyle(eoFill: true))
 
                 // Allow users to advance the tutorial by clicking anywhere.
@@ -649,11 +697,13 @@ private struct HowToGuideOverlay: View {
                         onNext()
                     }
 
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.white.opacity(0.95), lineWidth: 2)
-                    .frame(width: max(0, highlightRect.width), height: max(0, highlightRect.height))
-                    .position(x: highlightRect.midX, y: highlightRect.midY)
-                    .shadow(color: .black.opacity(0.3), radius: 16)
+                if let highlightRect {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.95), lineWidth: 2)
+                        .frame(width: max(0, highlightRect.width), height: max(0, highlightRect.height))
+                        .position(x: highlightRect.midX, y: highlightRect.midY)
+                        .shadow(color: .black.opacity(0.3), radius: 16)
+                }
 
                 VStack(alignment: .leading, spacing: 10) {
                     Text("How to Use Lecture Transcribe")
@@ -698,7 +748,7 @@ private struct HowToGuideOverlay: View {
         .accessibilityLabel("Getting started guide")
     }
 
-    private func instructionLayout(in size: CGSize) -> (cardWidth: CGFloat, center: CGPoint) {
+    private func instructionLayout(in size: CGSize, highlightRect: CGRect) -> (cardWidth: CGFloat, center: CGPoint) {
         let horizontalInset: CGFloat = 16
         let verticalInset: CGFloat = 16
         let gap: CGFloat = 14
@@ -716,7 +766,9 @@ private struct HowToGuideOverlay: View {
             y: size.height - verticalInset - (estimatedCardHeight / 2)
         )
 
-        if rightSpace >= cardWidth + gap {
+        if highlightRect.isNull {
+            center = CGPoint(x: size.width / 2, y: size.height / 2)
+        } else if rightSpace >= cardWidth + gap {
             center = CGPoint(
                 x: highlightRect.maxX + gap + (cardWidth / 2),
                 y: highlightRect.midY
@@ -747,5 +799,45 @@ private struct HowToGuideOverlay: View {
         center.y = min(max(center.y, minY), maxY)
 
         return (cardWidth, center)
+    }
+}
+
+/// The system empty-state layout (`ContentUnavailableView` on macOS 14 and later).
+struct EmptyStateView<Actions: View>: View {
+    let title: String
+    let systemImage: String
+    let description: String
+    @ViewBuilder var actions: () -> Actions
+
+    var body: some View {
+        if #available(macOS 14.0, *) {
+            ContentUnavailableView {
+                Label(title, systemImage: systemImage)
+            } description: {
+                Text(description)
+            } actions: {
+                actions()
+            }
+        } else {
+            VStack(spacing: 10) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 44))
+                    .foregroundStyle(.secondary)
+                Text(title)
+                    .font(.title2.weight(.semibold))
+                Text(description)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                actions()
+                    .padding(.top, 4)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+extension EmptyStateView where Actions == EmptyView {
+    init(title: String, systemImage: String, description: String) {
+        self.init(title: title, systemImage: systemImage, description: description) { EmptyView() }
     }
 }

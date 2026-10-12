@@ -35,7 +35,14 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
 final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published var selectedPane: NavigationPane? = .transcribe
 
-    @Published var audioFilePath = ""
+    @Published var audioFilePath = "" {
+        didSet {
+            // A different recording starts a fresh draft, so results from the previous
+            // file no longer drive the toolbar's primary action.
+            guard oldValue != audioFilePath, !isRunning else { return }
+            resetRunResult()
+        }
+    }
     @Published var outputFolderPath: String {
         didSet {
             guard oldValue != outputFolderPath else { return }
@@ -67,6 +74,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published var isRunning = false
     @Published var canOpenOutputFolder = false
     @Published var latestOutputPath: String?
+    /// The recording that produced `latestOutputPath`.
+    @Published private(set) var completedAudioFilePath: String?
 
     @Published var showingAPIKeySheet = false
     @Published var pendingAPIKey = ""
@@ -120,6 +129,12 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         let hasAudioPath = !audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasRunState = progressValue > 0 || !logText.isEmpty || statusText != "Ready" || latestOutputPath != nil || canOpenOutputFolder
         return hasAudioPath || hasRunState
+    }
+
+    /// True once the selected recording has been transcribed successfully.
+    var hasTranscribedCurrentRecording: Bool {
+        guard !isRunning, latestOutputPath != nil, let completedAudioFilePath else { return false }
+        return completedAudioFilePath == audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var canCancel: Bool {
@@ -259,6 +274,22 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         NSWorkspace.shared.open(URL(fileURLWithPath: targetPath))
     }
 
+    func openLatestTranscript() {
+        guard let latestOutputPath, FileManager.default.fileExists(atPath: latestOutputPath) else {
+            showError("Transcript file no longer exists:\n\(latestOutputPath ?? "")")
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: latestOutputPath))
+    }
+
+    func revealLatestTranscript() {
+        guard let latestOutputPath, FileManager.default.fileExists(atPath: latestOutputPath) else {
+            openOutputFolder()
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: latestOutputPath)])
+    }
+
     func openHistoryOutput(_ entry: TranscriptionHistoryEntry) {
         guard let outputPath = entry.outputPath else {
             showError("This run does not have an output file path.")
@@ -373,6 +404,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         statusText = "Starting..."
         logText = ""
         latestOutputPath = nil
+        completedAudioFilePath = nil
         canOpenOutputFolder = false
         isRunning = true
         let shouldDiarize = diarizeEnabled && selectedTranscriptionModel.supportsDiarization
@@ -454,6 +486,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             progressValue = 100
             statusText = "Done"
             latestOutputPath = path
+            completedAudioFilePath = audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
             canOpenOutputFolder = true
             appendLog("Done. Wrote: \(path)")
             finalizeActiveHistoryEntry(status: .success, outputPath: path, errorMessage: nil)
@@ -482,6 +515,13 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         showingErrorAlert = true
     }
 
+    /// File ▸ New Transcription: return to an empty Transcribe pane. Run history is kept.
+    func startNewTranscription() {
+        guard !isRunning else { return }
+        selectedPane = .transcribe
+        clearDraft()
+    }
+
     func requestClearDraft() {
         guard canClearDraft else { return }
         showingClearDraftConfirmation = true
@@ -497,10 +537,19 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         progressValue = 0
         logText = ""
         latestOutputPath = nil
+        completedAudioFilePath = nil
         canOpenOutputFolder = false
         showingErrorAlert = false
         errorMessage = ""
         showingClearDraftConfirmation = false
+    }
+
+    private func resetRunResult() {
+        statusText = "Ready"
+        progressValue = 0
+        latestOutputPath = nil
+        completedAudioFilePath = nil
+        canOpenOutputFolder = false
     }
 
     private func normalizeOutputDirectoryPath(_ path: String) -> String {

@@ -40,4 +40,42 @@ final class TranscribeViewModelDropTests: XCTestCase {
         XCTAssertTrue(viewModel.showingErrorAlert)
         XCTAssertEqual(viewModel.errorMessage, "Drop an audio/video file, not a folder.")
     }
+
+    @MainActor
+    func testChoosingDifferentRecordingResetsPreviousRunResult() {
+        let viewModel = TranscribeViewModel()
+        viewModel.audioFilePath = "/tmp/first-lecture.m4a"
+        viewModel.statusText = "Done"
+        viewModel.progressValue = 100
+        viewModel.latestOutputPath = "/tmp/first-lecture.txt"
+        viewModel.canOpenOutputFolder = true
+
+        viewModel.audioFilePath = "/tmp/second-lecture.m4a"
+
+        XCTAssertEqual(viewModel.statusText, "Ready")
+        XCTAssertEqual(viewModel.progressValue, 0)
+        XCTAssertNil(viewModel.latestOutputPath)
+        XCTAssertFalse(viewModel.canOpenOutputFolder)
+        XCTAssertFalse(viewModel.hasTranscribedCurrentRecording)
+        XCTAssertTrue(viewModel.canStart)
+    }
+
+    @MainActor
+    func testStartNewTranscriptionClearsDraftAndShowsTranscribePane() {
+        let viewModel = TranscribeViewModel()
+        viewModel.selectedPane = .runs
+        viewModel.audioFilePath = "/tmp/finished-lecture.m4a"
+        viewModel.statusText = "Done"
+        viewModel.progressValue = 100
+        viewModel.logText = "Done. Wrote: /tmp/finished-lecture.txt"
+
+        viewModel.startNewTranscription()
+
+        XCTAssertEqual(viewModel.selectedPane, .transcribe)
+        XCTAssertEqual(viewModel.audioFilePath, "")
+        XCTAssertEqual(viewModel.statusText, "Ready")
+        XCTAssertEqual(viewModel.progressValue, 0)
+        XCTAssertEqual(viewModel.logText, "")
+        XCTAssertFalse(viewModel.showingClearDraftConfirmation)
+    }
 }
