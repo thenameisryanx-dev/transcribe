@@ -39,6 +39,18 @@ from lecture_transcribe import (
 T = TypeVar("T")
 
 
+def _chunk_spans(parts: list[Path], fallback_seconds: int) -> list[tuple[float, float]]:
+    """(start, end) of each chunk within the original audio, from the chunks' measured lengths."""
+    spans: list[tuple[float, float]] = []
+    start = 0.0
+    for p in parts:
+        duration = get_duration_seconds(p)
+        end = start + (duration if duration > 0 else fallback_seconds)
+        spans.append((start, end))
+        start = end
+    return spans
+
+
 def _run_chunks_in_parallel(
     parts: list[Path],
     work: Callable[[Path], T],
@@ -149,12 +161,7 @@ def run_transcription_job(
                 push_event("log", f"Prepared {len(parts)} chunk(s) for diarization.")
 
                 # Offsets depend on earlier chunks' real lengths, so measure them before fanning out.
-                offsets: list[float] = []
-                offset_seconds = 0.0
-                for p in parts:
-                    offsets.append(offset_seconds)
-                    chunk_duration = get_duration_seconds(p)
-                    offset_seconds += chunk_duration if chunk_duration > 0 else DIARIZE_CHUNK_SECONDS
+                offsets = [start for start, _ in _chunk_spans(parts, DIARIZE_CHUNK_SECONDS)]
 
                 responses = _run_chunks_in_parallel(
                     parts,
@@ -194,6 +201,8 @@ def run_transcription_job(
         try:
             parts = split_audio_to_chunks(working_input_path, run_chunks_dir, chunk_seconds)
             push_event("log", f"Prepared {len(parts)} chunk(s) for transcription.")
+            # Chunks are cut at pauses, so their lengths vary; measure them for the section headers.
+            spans = _chunk_spans(parts, chunk_seconds)
 
             chunk_results = _run_chunks_in_parallel(
                 parts,
@@ -220,9 +229,7 @@ def run_transcription_job(
                 chunk_warnings=chunk_warnings,
             )
         ]
-        for i, (p, (chunk_text, warning)) in enumerate(zip(parts, chunk_results)):
-            start = i * chunk_seconds
-            end = start + chunk_seconds
+        for p, (chunk_text, warning), (start, end) in zip(parts, chunk_results, spans):
             sections.append(f"\n\n===== {p.name} ({hhmmss(start)}-{hhmmss(end)}) =====\n\n")
             if warning:
                 sections.append(f"[WARNING: {warning}]\n\n")

@@ -46,6 +46,12 @@ DIARIZE_INCLUDE_TIMESTAMPS = False  # keep diarized output cleaner for lecture n
 # Chunk encoding (robust for "any random audio file")
 AUDIO_BITRATE = "128k"
 
+# Chunk boundaries move back to the quietest moment in the stretch before each cut, so a
+# sentence isn't sliced in half (the model can't transcribe half a word on either side).
+SPLIT_SEARCH_SECONDS = 60           # how far back from each nominal cut to look for a pause
+SPLIT_FRAME_SECONDS = 0.1           # loudness is measured per frame of this length
+SPLIT_PAUSE_FRAMES = 5              # frames averaged together, so the cut lands in a ~0.5s pause
+
 # Cleanup chunk files after successful run
 CLEANUP_CHUNKS = True
 
@@ -503,12 +509,95 @@ def _copied_m4a_chunk_is_transcribable(path: Path) -> bool:
         return False
 
 
+def _quietest_point(input_path: Path, window_start: float, window_seconds: float) -> float | None:
+    """
+    Return the absolute time of the quietest ~0.5s inside [window_start, window_start + window_seconds],
+    or None if the window can't be analyzed.
+    """
+    sample_rate = 16000
+    frame_samples = int(sample_rate * SPLIT_FRAME_SECONDS)
+    cmd = [
+        *ffmpeg_cmd_prefix(),
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-ss", f"{window_start:.3f}",
+        "-t", f"{window_seconds:.3f}",
+        "-i", str(input_path),
+        "-vn",
+        "-map", "0:a:0",
+        "-af",
+        f"aresample={sample_rate},asetnsamples=n={frame_samples}:p=0,astats=metadata=1:reset=1,"
+        "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
+        "-f", "null",
+        "-",
+    ]
+    try:
+        r = subprocess.run(
+            cmd, check=True, capture_output=True, text=True, errors="replace", timeout=120
+        )
+    except Exception:
+        return None
+
+    levels: list[float] = []
+    for line in r.stdout.splitlines():
+        if line.startswith("lavfi.astats.Overall.RMS_level="):
+            raw = line.split("=", 1)[1].strip()
+            try:
+                level = float(raw)
+            except ValueError:
+                level = -200.0
+            # Digital silence reports -inf.
+            levels.append(level if level > -200.0 else -200.0)
+    if len(levels) < SPLIT_PAUSE_FRAMES:
+        return None
+
+    best_index = 0
+    best_level = float("inf")
+    for i in range(len(levels) - SPLIT_PAUSE_FRAMES + 1):
+        level = sum(levels[i : i + SPLIT_PAUSE_FRAMES]) / SPLIT_PAUSE_FRAMES
+        # `<=` keeps the latest of equally quiet spots, so chunks stay close to their nominal length.
+        if level <= best_level:
+            best_level = level
+            best_index = i
+    return window_start + (best_index + SPLIT_PAUSE_FRAMES / 2) * SPLIT_FRAME_SECONDS
+
+
+def plan_chunk_cuts(input_path: Path, chunk_seconds: int) -> list[float]:
+    """
+    Cut times (seconds) for splitting into chunks of at most chunk_seconds, each moved back to the
+    quietest moment before the nominal cut. Empty when the audio fits in one chunk or its length is unknown.
+    """
+    total = get_duration_seconds(input_path)
+    if total <= chunk_seconds:
+        return []
+
+    search = min(SPLIT_SEARCH_SECONDS, chunk_seconds / 4)
+    cuts: list[float] = []
+    previous = 0.0
+    while total - previous > chunk_seconds:
+        target = previous + chunk_seconds
+        window_start = target - search
+        cut = _quietest_point(input_path, window_start, search)
+        if cut is None or not (window_start <= cut <= target):
+            cut = target
+        cuts.append(cut)
+        previous = cut
+    return cuts
+
+
 def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds: int) -> list[Path]:
     """
-    Split input into chunk_seconds pieces.
+    Split input into pieces of at most chunk_seconds, cutting at pauses (see plan_chunk_cuts).
     First tries stream copy (no quality loss). Falls back to AAC re-encode for robustness.
     """
     run_chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    cuts = plan_chunk_cuts(input_path, chunk_seconds)
+    if cuts:
+        segment_args = ["-segment_times", ",".join(f"{c:.3f}" for c in cuts)]
+    else:
+        segment_args = ["-segment_time", str(chunk_seconds)]
 
     for old in run_chunks_dir.glob("part_*.m4a"):
         old.unlink()
@@ -521,7 +610,7 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
         "-i", str(input_path),
         "-vn",
         "-f", "segment",
-        "-segment_time", str(chunk_seconds),
+        *segment_args,
         "-reset_timestamps", "1",
         "-map", "0:a:0",
         "-c:a", "copy",
@@ -547,7 +636,7 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
         "-i", str(input_path),
         "-vn",
         "-f", "segment",
-        "-segment_time", str(chunk_seconds),
+        *segment_args,
         "-reset_timestamps", "1",
         "-map", "0:a:0",
         "-c:a", "aac",
