@@ -211,12 +211,17 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
+        // Containers like .mkv/.webm aren't mapped to .movie unless another
+        // installed app declares them, so add them by extension explicitly.
+        let extraVideoTypes = ["mkv", "webm", "avi"].compactMap {
+            UTType(filenameExtension: $0)
+        }
         panel.allowedContentTypes = [
             .audio,
             .mpeg4Movie,
             .movie,
             .quickTimeMovie,
-        ]
+        ] + extraVideoTypes
 
         if panel.runModal() == .OK, let path = panel.url?.path {
             audioFilePath = path
