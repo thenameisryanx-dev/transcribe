@@ -2,6 +2,9 @@
 import argparse
 import json
 import os
+import signal
+import sys
+import threading
 import traceback
 from pathlib import Path
 
@@ -18,8 +21,15 @@ MODEL_GPT4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
 SUPPORTED_TRANSCRIPTION_MODELS = [MODEL_GPT4O_TRANSCRIBE, MODEL_GPT4O_MINI_TRANSCRIBE]
 
 
+_EMIT_LOCK = threading.Lock()
+
+
 def emit(kind: str, payload) -> None:
-    print(json.dumps({"kind": kind, "payload": payload}, ensure_ascii=False), flush=True)
+    # Chunk workers log from several threads; write each event as one locked line so they never interleave.
+    line = json.dumps({"kind": kind, "payload": payload}, ensure_ascii=False) + "\n"
+    with _EMIT_LOCK:
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 def resolve_api_key_status() -> str:
@@ -42,7 +52,9 @@ def command_key_status(_args: argparse.Namespace) -> int:
 
 
 def command_set_key(args: argparse.Namespace) -> int:
-    key = str(args.key or "").strip()
+    # Prefer stdin so the key is never exposed in the process argument list.
+    raw_key = args.key if args.key is not None else sys.stdin.readline()
+    key = str(raw_key or "").strip()
     save = bool(args.save)
     if not is_valid_api_key(key):
         print(json.dumps({"error": "Invalid API key format. It should start with 'sk-'."}, ensure_ascii=False))
@@ -65,7 +77,16 @@ def command_set_key(args: argparse.Namespace) -> int:
     return 2
 
 
+def _raise_keyboard_interrupt(_signum, _frame) -> None:
+    raise KeyboardInterrupt
+
+
 def command_run(args: argparse.Namespace) -> int:
+    # The app cancels with SIGINT then SIGTERM; route both through KeyboardInterrupt so
+    # cleanup (temp chunks) runs instead of the process dying mid-write. SIGINT is set
+    # explicitly because Python skips its default handler when the parent ignores SIGINT.
+    signal.signal(signal.SIGINT, _raise_keyboard_interrupt)
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     input_path = Path(args.input).expanduser()
     output_dir = Path(args.output).expanduser()
     diarize = bool(args.diarize)
@@ -100,6 +121,8 @@ def command_run(args: argparse.Namespace) -> int:
         )
         emit("done", str(out_path.resolve()))
         return 0
+    except KeyboardInterrupt:
+        return 130
     except SystemExit as exc:
         emit("error", str(exc))
         return 1
@@ -115,7 +138,7 @@ def parse_args() -> argparse.Namespace:
     sub.add_parser("key-status", help="Get API key availability status.")
 
     set_key = sub.add_parser("set-key", help="Set and optionally save an OpenAI API key.")
-    set_key.add_argument("--key", required=True, help="API key value.")
+    set_key.add_argument("--key", help="API key value. Omit to read the key from stdin.")
     set_key.add_argument("--save", action="store_true", help="Persist to system keychain.")
 
     run = sub.add_parser("run", help="Run a transcription job.")
@@ -139,7 +162,12 @@ def main() -> int:
     if args.command == "set-key":
         return command_set_key(args)
     if args.command == "run":
-        return command_run(args)
+        code = command_run(args)
+        # In-flight chunk requests run on worker threads that a normal exit would wait on;
+        # leave immediately once the result (or cancellation) has been reported.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
     return 2
 
 

@@ -6,12 +6,9 @@ import sys
 import time
 import shutil
 import subprocess
-import threading
 import platform
 from pathlib import Path
-from datetime import datetime
 from typing import Any, Callable
-from getpass import getpass
 
 from openai import OpenAI
 
@@ -45,13 +42,10 @@ AUDIO_BITRATE = "128k"
 # Cleanup chunk files after successful run
 CLEANUP_CHUNKS = True
 
-# Terminal progress UI
-PROGRESS_BAR_WIDTH = 24
-PROGRESS_TICK_SECONDS = 0.25
-ESTIMATED_REQUEST_SECONDS = 90
+# Chunks sent to the API at once. Retries absorb occasional 429s; override with TRANSCRIBE_MAX_PARALLEL.
+DEFAULT_MAX_PARALLEL_REQUESTS = 4
 
 WORK_ROOT_DIR = Path(os.getenv("TRANSCRIBE_WORKDIR", ".")).expanduser()
-TRANSCRIPTS_DIR = WORK_ROOT_DIR / "transcripts"
 CHUNKS_ROOT_DIR = WORK_ROOT_DIR / "chunks"
 CONVERTED_ROOT_DIR = WORK_ROOT_DIR / "converted_inputs"
 KEYRING_SERVICE = "lecture-transcribe"
@@ -150,22 +144,23 @@ def save_api_key_to_keyring(key: str) -> bool:
     # Fallback for macOS app bundles where the Python keyring package may be absent.
     if platform.system() == "Darwin":
         try:
-            subprocess.run(
-                [
-                    "security",
-                    "add-generic-password",
-                    "-U",
-                    "-a",
-                    KEYRING_USERNAME,
-                    "-s",
-                    KEYRING_SERVICE,
-                    "-w",
-                    key,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            add_args = ["add-generic-password", "-U", "-a", KEYRING_USERNAME, "-s", KEYRING_SERVICE, "-w"]
+            if re.fullmatch(r"[A-Za-z0-9_\-]+", key):
+                # Feed the command through `security -i` on stdin so the key never appears in `ps` output.
+                subprocess.run(
+                    ["security", "-i"],
+                    input=" ".join(add_args + [key]) + "\n",
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                subprocess.run(
+                    ["security", *add_args, key],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
             _set_last_keychain_error("")
             return True
         except Exception as exc:
@@ -174,39 +169,6 @@ def save_api_key_to_keyring(key: str) -> bool:
 
     _set_last_keychain_error("No supported secure keychain backend is available.")
     return False
-
-
-def ensure_api_key() -> None:
-    env_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if is_valid_api_key(env_key):
-        return
-
-    saved_key = load_api_key_from_keyring()
-    if is_valid_api_key(saved_key):
-        os.environ["OPENAI_API_KEY"] = saved_key
-        return
-
-    print("OpenAI API key is required before transcription can start.")
-    entered_key = getpass("Enter OPENAI_API_KEY (input hidden): ").strip()
-    if not entered_key:
-        raise SystemExit("No API key provided.")
-    if not is_valid_api_key(entered_key):
-        raise SystemExit("OPENAI_API_KEY looks malformed. It should start with 'sk-' and contain no whitespace/newlines.")
-
-    os.environ["OPENAI_API_KEY"] = entered_key
-    save_choice = input("Save API key securely in system keychain for future runs? [y/N]: ").strip().lower()
-    if save_choice not in {"y", "yes"}:
-        print("Using API key for this session only.")
-        return
-
-    if save_api_key_to_keyring(entered_key):
-        print("Saved API key to system keychain.")
-    else:
-        detail = get_last_keychain_error()
-        if detail:
-            print(f"Could not save key to keychain: {detail}")
-        else:
-            print("Could not save key to keychain.")
 
 
 def _candidate_tool_paths(tool_name: str) -> list[Path]:
@@ -311,18 +273,6 @@ def _tool_invocation_prefix(path: Path) -> list[str]:
     return [str(path)]
 
 
-def get_media_tool_paths() -> dict[str, str | None]:
-    return {
-        "ffmpeg": find_media_tool("ffmpeg"),
-        "ffprobe": find_media_tool("ffprobe"),
-    }
-
-
-def missing_media_tools() -> list[str]:
-    paths = get_media_tool_paths()
-    return [name for name in ("ffmpeg", "ffprobe") if not paths.get(name)]
-
-
 def ffmpeg_bin() -> str:
     path = find_media_tool("ffmpeg")
     if path:
@@ -385,35 +335,6 @@ def require_ffprobe() -> None:
             "ffprobe executable was found but could not run. "
             "Reinstall app or reinstall with: brew install ffmpeg"
         )
-
-
-def ask_yes_no(prompt: str, default: str = "n") -> bool:
-    default = default.lower()
-    suffix = " [Y/n] " if default == "y" else " [y/N] "
-    ans = input(prompt + suffix).strip().lower()
-    if not ans:
-        ans = default
-    return ans in ("y", "yes")
-
-
-def strip_outer_quotes(s: str) -> str:
-    s = s.strip()
-    if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
-        return s[1:-1]
-    return s
-
-
-def unescape_drag_path(s: str) -> str:
-    """
-    When dragging into input(), Terminal often pastes escaped spaces like: /path/New\\ Recording.m4a
-    Shell would normally unescape that, but input() won't. So we fix common escapes.
-    """
-    s = s.strip()
-    s = s.replace("\\ ", " ")
-    s = s.replace("\\(", "(").replace("\\)", ")")
-    s = s.replace("\\[", "[").replace("\\]", "]")
-    s = s.replace("\\&", "&")
-    return s
 
 
 def hhmmss(seconds: float) -> str:
@@ -515,25 +436,6 @@ def build_transcript_header(
     if duration_seconds is not None:
         lines.append(f"DURATION_SECONDS: {duration_seconds:.3f}")
     return "\n".join(lines) + "\n\n"
-
-
-def get_audio_path_from_user() -> Path:
-    if len(sys.argv) >= 2:
-        raw = " ".join(sys.argv[1:])
-    else:
-        raw = input("Drag an audio file into this Terminal window, then press Enter:\n> ")
-
-    raw = strip_outer_quotes(raw)
-    raw = unescape_drag_path(raw)
-    raw = os.path.expanduser(raw).strip()
-
-    if not raw:
-        raise SystemExit("No file path provided.")
-
-    p = Path(raw)
-    if not p.exists():
-        raise SystemExit(f"File not found: {p}")
-    return p
 
 
 def get_duration_seconds(path: Path) -> float:
@@ -737,6 +639,15 @@ def repair_audio_for_api(input_path: Path) -> Path:
     return repaired_path
 
 
+def max_parallel_requests() -> int:
+    raw = os.getenv("TRANSCRIBE_MAX_PARALLEL", "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_MAX_PARALLEL_REQUESTS
+    except ValueError:
+        value = DEFAULT_MAX_PARALLEL_REQUESTS
+    return max(1, value)
+
+
 def cleanup_dir(dir_path: Path) -> None:
     if not CLEANUP_CHUNKS:
         return
@@ -754,134 +665,19 @@ def cleanup_dir(dir_path: Path) -> None:
         pass
 
 
-class ChunkProgressTracker:
-    def __init__(self, parts: list[Path], label: str) -> None:
-        self.enabled = sys.stdout.isatty()
-        self.label = label
-        self.rows = [
-            {
-                "name": p.name,
-                "state": "pending",
-                "fraction": 0.0,
-                "status": "pending",
-            }
-            for p in parts
-        ]
-        self._line_count = len(self.rows) + 1
-        self._rendered_once = False
-        self._spinner_index = 0
-        self._lock = threading.Lock()
-
-        if self.enabled:
-            self._render_locked()
-
-    def start_attempt(self, idx: int, attempt: int, total_attempts: int) -> None:
-        with self._lock:
-            row = self.rows[idx]
-            row["state"] = "running"
-            row["fraction"] = max(0.01, float(row["fraction"]))
-            row["status"] = f"running (attempt {attempt}/{total_attempts})"
-            self._render_locked()
-
-    def update_progress(self, idx: int, fraction: float, *, note: str | None = None) -> None:
-        with self._lock:
-            row = self.rows[idx]
-            if row["state"] != "running":
-                return
-            row["fraction"] = max(float(row["fraction"]), min(0.95, max(0.0, fraction)))
-            if note:
-                row["status"] = note
-            self._render_locked()
-
-    def mark_retry(self, idx: int, attempt: int, total_attempts: int, delay_seconds: int) -> None:
-        with self._lock:
-            row = self.rows[idx]
-            row["state"] = "running"
-            row["fraction"] = 0.0
-            row["status"] = (
-                f"retrying in {delay_seconds}s "
-                f"(attempt {attempt + 1}/{total_attempts})"
-            )
-            self._render_locked()
-
-    def mark_done(self, idx: int) -> None:
-        with self._lock:
-            row = self.rows[idx]
-            row["state"] = "done"
-            row["fraction"] = 1.0
-            row["status"] = "done"
-            self._render_locked()
-
-    def mark_failed(self, idx: int, err: Exception) -> None:
-        with self._lock:
-            row = self.rows[idx]
-            row["state"] = "failed"
-            row["fraction"] = 1.0
-            row["status"] = f"failed: {str(err).splitlines()[0][:80]}"
-            self._render_locked()
-
-    def close(self) -> None:
-        if self.enabled and self._rendered_once:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-
-    def _render_locked(self) -> None:
-        if not self.enabled:
-            return
-
-        self._spinner_index += 1
-        done_count = sum(1 for r in self.rows if r["state"] == "done")
-        failed_count = sum(1 for r in self.rows if r["state"] == "failed")
-        header = (
-            f"{self.label}: {done_count}/{len(self.rows)} done"
-            f"{f', {failed_count} failed' if failed_count else ''}"
-        )
-        lines = [header]
-
-        for i, row in enumerate(self.rows):
-            frac = float(row["fraction"])
-            filled = int(PROGRESS_BAR_WIDTH * frac)
-            bar = "#" * filled + "-" * (PROGRESS_BAR_WIDTH - filled)
-            pct = int(frac * 100)
-            spinner = "-\\|/"[self._spinner_index % 4] if row["state"] == "running" else " "
-            lines.append(
-                f"{spinner} {i + 1:03d}/{len(self.rows):03d} {row['name']:<14} "
-                f"[{bar}] {pct:3d}% {row['status']}"
-            )
-
-        if self._rendered_once:
-            sys.stdout.write(f"\x1b[{self._line_count}A")
-        for line in lines:
-            sys.stdout.write("\x1b[2K\r" + line + "\n")
-        sys.stdout.flush()
-        self._rendered_once = True
-
-
-def run_estimated_progress(
-    stop_event: threading.Event,
-    on_progress: Callable[[float], None],
-) -> None:
-    start = time.monotonic()
-    while not stop_event.wait(PROGRESS_TICK_SECONDS):
-        elapsed = time.monotonic() - start
-        on_progress(min(0.95, elapsed / ESTIMATED_REQUEST_SECONDS))
-
-
 def transcribe_chunk_text(
     client: OpenAI,
     chunk_path: Path,
     *,
     model: str = MODEL_NORMAL,
-    chunk_idx: int | None = None,
-    progress: ChunkProgressTracker | None = None,
+    on_log: Callable[[str], None] | None = None,
 ) -> str:
     text = create_transcription_with_retry(
         client,
         chunk_path,
         model=model,
         response_format="text",
-        chunk_idx=chunk_idx,
-        progress=progress,
+        on_log=on_log,
     )
     return str(text)
 
@@ -912,16 +708,6 @@ def is_invalid_audio_file_error(exc: Exception) -> bool:
     )
 
 
-def _stop_progress_thread(
-    stop_event: threading.Event | None,
-    progress_thread: threading.Thread | None,
-) -> None:
-    if stop_event is not None:
-        stop_event.set()
-    if progress_thread is not None:
-        progress_thread.join(timeout=0.5)
-
-
 def create_transcription_with_retry(
     client: OpenAI,
     audio_path: Path,
@@ -929,33 +715,14 @@ def create_transcription_with_retry(
     model: str,
     response_format: str,
     chunking_strategy: str | None = None,
-    chunk_idx: int | None = None,
-    progress: ChunkProgressTracker | None = None,
+    on_log: Callable[[str], None] | None = None,
 ):
-    use_progress = (
-        progress is not None
-        and progress.enabled
-        and chunk_idx is not None
-    )
+    log = on_log or (lambda _message: None)
     active_audio_path = audio_path
     repaired_audio_path: Path | None = None
 
     try:
         for attempt in range(1, MAX_TRANSCRIBE_RETRIES + 1):
-            if use_progress:
-                progress.start_attempt(chunk_idx, attempt, MAX_TRANSCRIBE_RETRIES)
-
-            progress_thread = None
-            stop_event = None
-            if use_progress:
-                stop_event = threading.Event()
-                progress_thread = threading.Thread(
-                    target=run_estimated_progress,
-                    args=(stop_event, lambda frac: progress.update_progress(chunk_idx, frac)),
-                    daemon=True,
-                )
-                progress_thread.start()
-
             with active_audio_path.open("rb") as f:
                 kwargs = {
                     "model": model,
@@ -969,42 +736,26 @@ def create_transcription_with_retry(
                     kwargs["chunking_strategy"] = chunking_strategy
 
                 try:
-                    result = client.audio.transcriptions.create(**kwargs)
-                    if use_progress:
-                        progress.mark_done(chunk_idx)
-                    return result
+                    return client.audio.transcriptions.create(**kwargs)
                 except Exception as e:
-                    _stop_progress_thread(stop_event, progress_thread)
-
                     if repaired_audio_path is None and is_invalid_audio_file_error(e):
-                        if use_progress:
-                            progress.update_progress(chunk_idx, 0.05, note="repairing audio and retrying")
-                        else:
-                            print(
-                                f"API rejected {active_audio_path.name} as unsupported. "
-                                "Re-encoding once and retrying..."
-                            )
+                        log(
+                            f"API rejected {active_audio_path.name} as unsupported. "
+                            "Re-encoding once and retrying..."
+                        )
                         repaired_audio_path = repair_audio_for_api(audio_path)
                         active_audio_path = repaired_audio_path
                         continue
 
                     if attempt == MAX_TRANSCRIBE_RETRIES or not is_retryable_transcription_error(e):
-                        if use_progress:
-                            progress.mark_failed(chunk_idx, e)
                         raise
 
                     delay = RETRY_BASE_SECONDS * (2 ** (attempt - 1))
-                    if use_progress:
-                        progress.mark_retry(chunk_idx, attempt, MAX_TRANSCRIBE_RETRIES, delay)
-                    else:
-                        print(
-                            f"Transient transcription error on {active_audio_path.name} "
-                            f"(attempt {attempt}/{MAX_TRANSCRIBE_RETRIES}): {e}"
-                        )
-                        print(f"Retrying in {delay}s...")
+                    log(
+                        f"Transient transcription error on {active_audio_path.name} "
+                        f"(attempt {attempt}/{MAX_TRANSCRIBE_RETRIES}): {e}. Retrying in {delay}s..."
+                    )
                     time.sleep(delay)
-                finally:
-                    _stop_progress_thread(stop_event, progress_thread)
     finally:
         if repaired_audio_path and repaired_audio_path.exists():
             try:
@@ -1013,7 +764,7 @@ def create_transcription_with_retry(
                 pass
 
 
-def diarize_whole_file(client: OpenAI, input_path: Path) -> str:
+def diarize_whole_file(client: OpenAI, input_path: Path, *, on_log: Callable[[str], None] | None = None) -> str:
     """
     Single diarize request (only for shorter audio).
     """
@@ -1023,6 +774,7 @@ def diarize_whole_file(client: OpenAI, input_path: Path) -> str:
         model=MODEL_DIARIZE,
         response_format="diarized_json",
         chunking_strategy="auto",
+        on_log=on_log,
     )
 
     segments = extract_diarization_segments(resp)
@@ -1035,8 +787,7 @@ def diarize_chunk(
     client: OpenAI,
     chunk_path: Path,
     *,
-    chunk_idx: int | None = None,
-    progress: ChunkProgressTracker | None = None,
+    on_log: Callable[[str], None] | None = None,
 ):
     """
     Diarize a single chunk (< 1400s). Requires chunking_strategy for diarize model.
@@ -1047,145 +798,5 @@ def diarize_chunk(
         model=MODEL_DIARIZE,
         response_format="diarized_json",
         chunking_strategy="auto",
-        chunk_idx=chunk_idx,
-        progress=progress,
+        on_log=on_log,
     )
-
-
-def diarize_long_with_local_chunks(client: OpenAI, input_path: Path, run_chunks_dir: Path) -> str:
-    """
-    Split locally into ~10min chunks (600s) to reduce timeout risk, then offset timestamps.
-    """
-    parts = split_audio_to_chunks(input_path, run_chunks_dir, DIARIZE_CHUNK_SECONDS)
-
-    out_lines = []
-    progress = ChunkProgressTracker(parts, "Diarization Chunk Progress")
-    offset_seconds = 0.0
-    try:
-        for i, p in enumerate(parts):
-            chunk_duration = get_duration_seconds(p)
-            chunk_span = chunk_duration if chunk_duration > 0 else DIARIZE_CHUNK_SECONDS
-
-            if not progress.enabled:
-                print(f"Diarizing {p.name} ...")
-
-            resp = diarize_chunk(client, p, chunk_idx=i, progress=progress)
-            segments = extract_diarization_segments(resp)
-
-            if not segments:
-                # fallback to whole chunk text
-                out_lines.append(f"\n===== {p.name} =====\n")
-                out_lines.extend(sentence_lines(extract_transcription_text(resp)))
-                offset_seconds += chunk_span
-                continue
-
-            # Note: speaker letters (A/B/...) may reset per chunk.
-            out_lines.extend(format_diarized_lines(segments, offset_seconds))
-
-            offset_seconds += chunk_span
-    finally:
-        progress.close()
-        cleanup_dir(run_chunks_dir)
-    return "\n".join(out_lines)
-
-
-def main():
-    ensure_api_key()
-    require_ffmpeg()
-    require_ffprobe()
-
-    input_path = get_audio_path_from_user()
-    diarize = ask_yes_no("Add speaker labels (diarize)?", default="n")
-
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = safe_stem_from_path(input_path)
-
-    TRANSCRIPTS_DIR.mkdir(exist_ok=True)
-
-    out_suffix = "_diarize" if diarize else ""
-    out_path = TRANSCRIPTS_DIR / f"{stem}_{run_id}{out_suffix}.txt"
-
-    client = OpenAI()
-    working_input_path = input_path
-    converted_temp_path: Path | None = None
-
-    try:
-        if input_path.suffix.lower() == ".qta":
-            print("Detected .qta input. Converting to .m4a with stream copy (no re-encoding)...")
-            converted_temp_path = convert_qta_to_m4a_copy(input_path, run_id)
-            working_input_path = converted_temp_path
-
-        if diarize:
-            dur = get_duration_seconds(working_input_path)
-            # If duration unknown, play it safe and do local chunking
-            if 0 < dur <= DIARIZE_SINGLE_BUFFER:
-                print("Transcribing with diarization (single request, server-side chunking_strategy=auto)...")
-                content = diarize_whole_file(client, working_input_path)
-                header = build_transcript_header(
-                    input_path=input_path,
-                    working_input_path=working_input_path,
-                    model=MODEL_DIARIZE,
-                    response_format="diarized_json",
-                    chunking_strategy="auto",
-                    duration_seconds=dur,
-                )
-            else:
-                # Long audio: must local-chunk to respect diarize model duration cap
-                print("Long audio detected (or duration unknown). Using local chunks for diarization...")
-                run_chunks_dir = CHUNKS_ROOT_DIR / f"{stem}_{run_id}_diarize"
-                content = diarize_long_with_local_chunks(client, working_input_path, run_chunks_dir)
-                header = build_transcript_header(
-                    input_path=input_path,
-                    working_input_path=working_input_path,
-                    model=MODEL_DIARIZE,
-                    response_format="diarized_json",
-                    chunking_strategy="auto",
-                    local_chunk_seconds=DIARIZE_CHUNK_SECONDS,
-                    duration_seconds=dur,
-                )
-
-            out_path.write_text(header + content, encoding="utf-8")
-            print(f"\n✅ Done. Wrote: {out_path.resolve()}")
-            return
-
-        # Non-diarize: always local split into 10-minute chunks (reliable for 60+ minutes)
-        run_chunks_dir = CHUNKS_ROOT_DIR / f"{stem}_{run_id}"
-        parts = split_audio_to_chunks(working_input_path, run_chunks_dir, NORMAL_CHUNK_SECONDS)
-        progress = ChunkProgressTracker(parts, "Transcription Chunk Progress")
-
-        try:
-            with out_path.open("w", encoding="utf-8") as out:
-                out.write(
-                    build_transcript_header(
-                        input_path=input_path,
-                        working_input_path=working_input_path,
-                        model=MODEL_NORMAL,
-                        local_chunk_seconds=NORMAL_CHUNK_SECONDS,
-                    )
-                )
-                for i, p in enumerate(parts):
-                    start = i * NORMAL_CHUNK_SECONDS
-                    end = start + NORMAL_CHUNK_SECONDS
-                    out.write(f"\n\n===== {p.name} ({hhmmss(start)}–{hhmmss(end)}) =====\n\n")
-                    if not progress.enabled:
-                        print(f"Transcribing {p.name} ...")
-                    chunk_text = transcribe_chunk_text(client, p, chunk_idx=i, progress=progress)
-                    lines = sentence_lines(chunk_text)
-                    if lines:
-                        out.write("\n".join(lines))
-                    else:
-                        out.write(str(chunk_text))
-        finally:
-            progress.close()
-            cleanup_dir(run_chunks_dir)
-        print(f"\n✅ Done. Wrote: {out_path.resolve()}")
-    finally:
-        if converted_temp_path and converted_temp_path.exists():
-            try:
-                converted_temp_path.unlink()
-            except Exception:
-                pass
-
-
-if __name__ == "__main__":
-    main()

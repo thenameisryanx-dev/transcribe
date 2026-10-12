@@ -495,9 +495,12 @@ LAUNCHER
 
 build_native_binary() {
   echo "Building native SwiftUI app..." >&2
-  swift build -c release >&2
+  # Build outside ~/Documents (iCloud Drive metadata breaks codesign); see scripts/swift_build_dir.sh.
+  local build_dir
+  build_dir="$("$PROJECT_DIR/scripts/swift_build_dir.sh" "$PROJECT_DIR")"
+  swift build -c release --package-path "$PROJECT_DIR" --scratch-path "$build_dir" >&2
   local bin_dir
-  bin_dir="$(swift build -c release --show-bin-path)"
+  bin_dir="$(swift build -c release --package-path "$PROJECT_DIR" --scratch-path "$build_dir" --show-bin-path)"
   local binary_path="$bin_dir/$NATIVE_BINARY_NAME"
   if [[ ! -x "$binary_path" ]]; then
     echo "Build failed: native binary not found at $binary_path"

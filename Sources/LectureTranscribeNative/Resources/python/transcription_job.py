@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable, TypeVar
 
 from openai import OpenAI
 
@@ -24,6 +26,7 @@ from lecture_transcribe import (
     format_diarized_lines,
     get_duration_seconds,
     hhmmss,
+    max_parallel_requests,
     require_ffmpeg,
     require_ffprobe,
     safe_stem_from_path,
@@ -31,6 +34,41 @@ from lecture_transcribe import (
     split_audio_to_chunks,
     transcribe_chunk_text,
 )
+
+T = TypeVar("T")
+
+
+def _run_chunks_in_parallel(
+    parts: list[Path],
+    work: Callable[[Path], T],
+    push_event,
+    label: str,
+) -> list[T]:
+    """
+    Run `work` over every chunk with a bounded thread pool and return results in chunk order.
+    Progress events are emitted from this (the calling) thread as chunks finish.
+    """
+    total = len(parts)
+    workers = max(1, min(max_parallel_requests(), total))
+    push_event("log", f"{label} {total} chunk(s), up to {workers} at a time.")
+    push_event("status", f"{label}: 0/{total} chunks done")
+
+    results: list[Any] = [None] * total
+    executor = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = {executor.submit(work, part): i for i, part in enumerate(parts)}
+        done = 0
+        for future in as_completed(futures):
+            i = futures[future]
+            results[i] = future.result()
+            done += 1
+            push_event("log", f"Finished chunk {i + 1}/{total}: {parts[i].name}")
+            push_event("status", f"{label}: {done}/{total} chunks done")
+            push_event("progress", (done / total) * 100.0)
+    finally:
+        # On failure or cancellation, drop queued chunks instead of waiting for them.
+        executor.shutdown(wait=False, cancel_futures=True)
+    return results
 
 
 def run_transcription_job(
@@ -55,6 +93,9 @@ def run_transcription_job(
 
     push_event("log", f"Using transcription model: {transcription_model}")
 
+    def log(message: str) -> None:
+        push_event("log", message)
+
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = safe_stem_from_path(input_path)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -74,11 +115,13 @@ def run_transcription_job(
             working_input_path = converted_temp_path
             push_event("log", f"Converted .qta to: {working_input_path.name}")
 
+        # Transcripts are written only after every chunk succeeds, so a failed or
+        # cancelled run never leaves a partial file in the output folder.
         if diarize:
             dur = get_duration_seconds(working_input_path)
             if 0 < dur <= DIARIZE_SINGLE_BUFFER:
                 push_event("status", "Diarizing (single request)...")
-                content = diarize_whole_file(client, working_input_path)
+                content = diarize_whole_file(client, working_input_path, on_log=log)
                 header = build_transcript_header(
                     input_path=input_path,
                     working_input_path=working_input_path,
@@ -96,28 +139,33 @@ def run_transcription_job(
             push_event("status", "Preparing audio chunks...")
             parts = split_audio_to_chunks(working_input_path, run_chunks_dir, DIARIZE_CHUNK_SECONDS)
             push_event("log", f"Prepared {len(parts)} chunk(s) for diarization.")
-            out_lines: list[str] = []
-            offset_seconds = 0.0
 
             try:
-                for i, p in enumerate(parts):
-                    push_event("status", f"Diarizing chunk {i + 1}/{len(parts)}: {p.name}")
-                    resp = diarize_chunk(client, p)
-                    segments = extract_diarization_segments(resp)
-
+                # Offsets depend on earlier chunks' real lengths, so measure them before fanning out.
+                offsets: list[float] = []
+                offset_seconds = 0.0
+                for p in parts:
+                    offsets.append(offset_seconds)
                     chunk_duration = get_duration_seconds(p)
-                    chunk_span = chunk_duration if chunk_duration > 0 else DIARIZE_CHUNK_SECONDS
+                    offset_seconds += chunk_duration if chunk_duration > 0 else DIARIZE_CHUNK_SECONDS
 
-                    if not segments:
-                        out_lines.append(f"\n===== {p.name} =====\n")
-                        out_lines.extend(sentence_lines(extract_transcription_text(resp)))
-                    else:
-                        out_lines.extend(format_diarized_lines(segments, offset_seconds))
-
-                    offset_seconds += chunk_span
-                    push_event("progress", ((i + 1) / len(parts)) * 100.0)
+                responses = _run_chunks_in_parallel(
+                    parts,
+                    lambda p: diarize_chunk(client, p, on_log=log),
+                    push_event,
+                    "Diarizing",
+                )
             finally:
                 cleanup_dir(run_chunks_dir)
+
+            out_lines: list[str] = []
+            for p, resp, chunk_offset in zip(parts, responses, offsets):
+                segments = extract_diarization_segments(resp)
+                if not segments:
+                    out_lines.append(f"\n===== {p.name} =====\n")
+                    out_lines.extend(sentence_lines(extract_transcription_text(resp)))
+                else:
+                    out_lines.extend(format_diarized_lines(segments, chunk_offset))
 
             header = build_transcript_header(
                 input_path=input_path,
@@ -140,29 +188,30 @@ def run_transcription_job(
         push_event("log", f"Prepared {len(parts)} chunk(s) for transcription.")
 
         try:
-            with out_path.open("w", encoding="utf-8") as out:
-                out.write(
-                    build_transcript_header(
-                        input_path=input_path,
-                        working_input_path=working_input_path,
-                        model=transcription_model,
-                        local_chunk_seconds=chunk_seconds,
-                    )
-                )
-                for i, p in enumerate(parts):
-                    start = i * chunk_seconds
-                    end = start + chunk_seconds
-                    push_event("status", f"Transcribing chunk {i + 1}/{len(parts)}: {p.name}")
-                    out.write(f"\n\n===== {p.name} ({hhmmss(start)}-{hhmmss(end)}) =====\n\n")
-                    chunk_text = transcribe_chunk_text(client, p, model=transcription_model)
-                    lines = sentence_lines(chunk_text)
-                    if lines:
-                        out.write("\n".join(lines))
-                    else:
-                        out.write(str(chunk_text))
-                    push_event("progress", ((i + 1) / len(parts)) * 100.0)
+            chunk_texts = _run_chunks_in_parallel(
+                parts,
+                lambda p: transcribe_chunk_text(client, p, model=transcription_model, on_log=log),
+                push_event,
+                "Transcribing",
+            )
         finally:
             cleanup_dir(run_chunks_dir)
+
+        sections = [
+            build_transcript_header(
+                input_path=input_path,
+                working_input_path=working_input_path,
+                model=transcription_model,
+                local_chunk_seconds=chunk_seconds,
+            )
+        ]
+        for i, (p, chunk_text) in enumerate(zip(parts, chunk_texts)):
+            start = i * chunk_seconds
+            end = start + chunk_seconds
+            sections.append(f"\n\n===== {p.name} ({hhmmss(start)}-{hhmmss(end)}) =====\n\n")
+            lines = sentence_lines(chunk_text)
+            sections.append("\n".join(lines) if lines else str(chunk_text))
+        out_path.write_text("".join(sections), encoding="utf-8")
 
         return out_path
     finally:

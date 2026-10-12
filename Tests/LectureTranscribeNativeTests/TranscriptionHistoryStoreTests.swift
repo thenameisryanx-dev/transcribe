@@ -63,4 +63,37 @@ final class TranscriptionHistoryStoreTests: XCTestCase {
         let loaded = try store.loadEntries()
         XCTAssertEqual(loaded, [entry])
     }
+
+    func testLoadEntriesWithoutModelFieldDecodesNilModel() throws {
+        let fileManager = FileManager.default
+        let tempDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempDirectory) }
+
+        let historyFileURL = tempDirectory.appendingPathComponent("history.json", isDirectory: false)
+        let store = TranscriptionHistoryStore(historyFileURL: historyFileURL)
+
+        // History saved before the model was recorded has no "model" key.
+        let legacyJSON = """
+        {
+          "schemaVersion": 1,
+          "entries": [
+            {
+              "id": "99999999-8888-7777-6666-555555555555",
+              "startedAt": "2026-01-01T12:00:00Z",
+              "inputPath": "/tmp/old.m4a",
+              "outputDirectory": "/tmp",
+              "diarize": false,
+              "status": "success"
+            }
+          ]
+        }
+        """
+        try Data(legacyJSON.utf8).write(to: historyFileURL, options: .atomic)
+
+        let loaded = try store.loadEntries()
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertNil(loaded.first?.model)
+    }
 }

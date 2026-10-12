@@ -32,6 +32,9 @@ final class BackendClient: @unchecked Sendable {
         .deletingLastPathComponent() // Sources
     private let activeProcessLock = NSLock()
     private var activeProcess: Process?
+    // Each backend call is a fresh Python process, so a "this session only" key has to live here.
+    private var sessionAPIKey: String?
+    private static let cancelGracePeriodSeconds: Double = 3
     private let fileManager = FileManager.default
 
     private var executableURL: URL {
@@ -79,8 +82,22 @@ final class BackendClient: @unchecked Sendable {
         return bundledPythonProgram ?? "python3"
     }
 
+    /// Scratch space for audio chunks and converted inputs; keeps them out of the app bundle.
+    private var workingDirectoryURL: URL {
+        let cachesURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Caches", isDirectory: true)
+        return cachesURL.appendingPathComponent("LectureTranscribe", isDirectory: true)
+    }
+
     private var pythonEnvironment: [String: String] {
         var env = ProcessInfo.processInfo.environment
+        if (env["TRANSCRIBE_WORKDIR"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty {
+            env["TRANSCRIBE_WORKDIR"] = workingDirectoryURL.path
+        }
+        if let sessionAPIKey = withActiveProcessLock({ sessionAPIKey }) {
+            env["OPENAI_API_KEY"] = sessionAPIKey
+        }
+
         let override = env["TRANSCRIBE_PYTHON"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard override.isEmpty, let bundledHome = bundledPythonHomeURL, let bundledProgram = bundledPythonProgram else {
             return env
@@ -148,13 +165,17 @@ final class BackendClient: @unchecked Sendable {
     }
 
     func setAPIKey(_ key: String, saveToKeychain: Bool) async throws -> String {
-        var args = ["set-key", "--key", key]
+        // The key goes over stdin so it never shows up in the process argument list.
+        var args = ["set-key"]
         if saveToKeychain {
             args.append("--save")
         }
 
-        let output = try runSimpleCommand(args)
+        let output = try runSimpleCommand(args, stdinText: key + "\n")
         if let status = output["status"] as? String {
+            withActiveProcessLock {
+                sessionAPIKey = key
+            }
             return status
         }
         if let error = output["error"] as? String {
@@ -183,16 +204,22 @@ final class BackendClient: @unchecked Sendable {
         withActiveProcessLock {
             guard let process = activeProcess else { return }
             guard process.isRunning else { return }
+            // SIGINT first so the backend can clean up temp files; escalate if it doesn't exit.
             process.interrupt()
-            process.terminate()
+            DispatchQueue.global().asyncAfter(deadline: .now() + Self.cancelGracePeriodSeconds) {
+                if process.isRunning {
+                    process.terminate()
+                }
+            }
         }
     }
 
-    private func runSimpleCommand(_ args: [String]) throws -> [String: Any] {
+    private func runSimpleCommand(_ args: [String], stdinText: String? = nil) throws -> [String: Any] {
         let backendScriptURL = try resolveBackendScriptURL()
         let process = Process()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
+        let stdinPipe = Pipe()
 
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [pythonProgram, backendScriptURL.path] + args
@@ -200,8 +227,13 @@ final class BackendClient: @unchecked Sendable {
         process.environment = pythonEnvironment
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        process.standardInput = stdinPipe
 
         try process.run()
+        if let stdinText {
+            stdinPipe.fileHandleForWriting.write(Data(stdinText.utf8))
+        }
+        try? stdinPipe.fileHandleForWriting.close()
         process.waitUntilExit()
 
         let stdoutText = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -282,9 +314,7 @@ final class BackendClient: @unchecked Sendable {
             var textBuffer = ""
             while true {
                 if Task.isCancelled {
-                    if process.isRunning {
-                        process.terminate()
-                    }
+                    cancelActiveRun()
                     throw CancellationError()
                 }
 

@@ -283,6 +283,12 @@ private struct RunDetailView: View {
                     Text(entry.diarize ? "Diarized" : "Standard")
                 }
 
+                if let rawModel = entry.model {
+                    LabeledContent("Model") {
+                        Text(TranscriptionModel(rawValue: rawModel)?.displayName ?? rawModel)
+                    }
+                }
+
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Input file")
                         .font(.caption.weight(.semibold))

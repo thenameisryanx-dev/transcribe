@@ -30,6 +30,8 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     var diarize: Bool
     var status: Status
     var errorMessage: String?
+    // Optional so history written before models were recorded still decodes.
+    var model: String? = nil
 }
 
 private struct TranscriptionHistoryPayload: Codable {

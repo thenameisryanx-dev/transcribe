@@ -36,7 +36,12 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published var selectedPane: NavigationPane? = .transcribe
 
     @Published var audioFilePath = ""
-    @Published var outputFolderPath: String
+    @Published var outputFolderPath: String {
+        didSet {
+            guard oldValue != outputFolderPath else { return }
+            UserDefaults.standard.set(outputFolderPath, forKey: Self.outputFolderDefaultsKey)
+        }
+    }
     @Published var selectedTranscriptionModel: TranscriptionModel = .gpt4oTranscribe {
         didSet {
             if !selectedTranscriptionModel.supportsDiarization && diarizeEnabled {
@@ -76,6 +81,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private let historyStore = TranscriptionHistoryStore()
     private let maxHistoryEntries = 200
     private static let selectedModelDefaultsKey = "selectedTranscriptionModel"
+    private static let outputFolderDefaultsKey = "outputFolderPath"
     private let defaultOutputFolderPath: String
     private var runTask: Task<Void, Never>?
     private var cancellationRequested = false
@@ -89,7 +95,13 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     init() {
         let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         defaultOutputFolderPath = downloads?.path ?? NSHomeDirectory()
-        outputFolderPath = defaultOutputFolderPath
+        if let storedOutputFolder = UserDefaults.standard.string(forKey: Self.outputFolderDefaultsKey),
+           !storedOutputFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            outputFolderPath = storedOutputFolder
+        } else {
+            outputFolderPath = defaultOutputFolderPath
+        }
         if let rawModel = UserDefaults.standard.string(forKey: Self.selectedModelDefaultsKey),
            let storedModel = TranscriptionModel(rawValue: rawModel)
         {
@@ -278,6 +290,12 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     func rerunHistoryEntry(_ entry: TranscriptionHistoryEntry) {
         audioFilePath = entry.inputPath
         outputFolderPath = entry.outputDirectory
+        // Restore the model before diarization; diarizeEnabled is reset when the model can't diarize.
+        if entry.diarize {
+            selectedTranscriptionModel = .gpt4oTranscribe
+        } else if let rawModel = entry.model, let model = TranscriptionModel(rawValue: rawModel) {
+            selectedTranscriptionModel = model
+        }
         diarizeEnabled = entry.diarize
         selectedPane = .transcribe
         startTranscription()
@@ -361,37 +379,49 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         if diarizeEnabled != shouldDiarize {
             diarizeEnabled = shouldDiarize
         }
-        beginHistoryEntry(inputPath: trimmedPath, outputDirectory: normalizedOutputDirectory, diarize: shouldDiarize)
+        let model = selectedTranscriptionModel
+        beginHistoryEntry(inputPath: trimmedPath, outputDirectory: normalizedOutputDirectory, diarize: shouldDiarize, model: model)
 
         runTask = Task { [weak self] in
             guard let self else { return }
 
+            // Funnel backend events through one FIFO stream so they apply in order and are fully
+            // drained before the run is finalized below.
+            let (events, eventContinuation) = AsyncStream.makeStream(of: BackendStreamEvent.self)
+            let eventConsumer = Task { @MainActor [weak self] in
+                for await event in events {
+                    self?.apply(event: event)
+                }
+            }
+
+            var runError: Error?
             do {
                 try await backend.startTranscription(
                     inputPath: trimmedPath,
                     outputDirectory: normalizedOutputDirectory,
                     diarize: shouldDiarize,
-                    model: selectedTranscriptionModel.rawValue
-                ) { [weak self] event in
-                    Task { @MainActor in
-                        self?.apply(event: event)
-                    }
+                    model: model.rawValue
+                ) { event in
+                    eventContinuation.yield(event)
                 }
-            } catch is CancellationError {
+            } catch {
+                runError = error
+            }
+            eventContinuation.finish()
+            await eventConsumer.value
+
+            if activeHistoryEntryFinalized {
+                // A `done` or `error` event already recorded the outcome.
+            } else if runError is CancellationError || (runError != nil && cancellationRequested) {
                 statusText = "Cancelled"
                 appendLog("Run cancelled.")
                 finalizeActiveHistoryEntry(status: .cancelled, errorMessage: "Run cancelled.")
-            } catch {
-                if cancellationRequested {
-                    statusText = "Cancelled"
-                    appendLog("Run cancelled.")
-                    finalizeActiveHistoryEntry(status: .cancelled, errorMessage: "Run cancelled.")
-                } else {
-                    statusText = "Failed"
-                    appendLog("Error: \(error.localizedDescription)")
-                    showError(error.localizedDescription)
-                    finalizeActiveHistoryEntry(status: .failed, errorMessage: error.localizedDescription)
-                }
+            } else {
+                let message = runError?.localizedDescription ?? "The transcription backend exited without reporting a result."
+                statusText = "Failed"
+                appendLog("Error: \(message)")
+                showError(message)
+                finalizeActiveHistoryEntry(status: .failed, errorMessage: message)
             }
 
             isRunning = false
@@ -556,7 +586,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func beginHistoryEntry(inputPath: String, outputDirectory: String, diarize: Bool) {
+    private func beginHistoryEntry(inputPath: String, outputDirectory: String, diarize: Bool, model: TranscriptionModel) {
         let entry = TranscriptionHistoryEntry(
             id: UUID(),
             startedAt: Date(),
@@ -566,7 +596,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             outputDirectory: outputDirectory,
             diarize: diarize,
             status: .running,
-            errorMessage: nil
+            errorMessage: nil,
+            model: model.rawValue
         )
 
         activeHistoryEntryID = entry.id

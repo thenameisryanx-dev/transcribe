@@ -16,9 +16,7 @@ Preserve existing shipped behavior while adding or fixing features. Do not remov
 - `Runs` pane remains reachable from `RootView` and renders run list/details.
 - History persistence remains enabled through `TranscriptionHistoryStore`.
 - `TranscribeViewModel` loads and saves history entries.
-- Launch commands keep working:
-  - `Open Lecture Transcribe.command`
-  - `Open Lecture Transcribe Native.command`
+- The single launcher `Open Lecture Transcribe.command` keeps working and resolves the project from its own location (no hardcoded user paths).
 
 ## Forbidden
 - Do not remove existing panes/features unless user explicitly asks.

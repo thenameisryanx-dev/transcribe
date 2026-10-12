@@ -3,11 +3,13 @@
 ## Run the project
 - Requirements: macOS 13+, Swift 6.2 toolchain, and `python3` available for the first dev launcher bootstrap.
 - Launch the native app from source:
-  - `swift run LectureTranscribeNative`
-  - or `./Open\ Lecture\ Transcribe\ Native.command`
-- `Open Lecture Transcribe Native.command` bootstraps a repo-local `.venv` and uses it for backend Python dependencies.
+  - `./Open\ Lecture\ Transcribe.command` (or double-click it in Finder)
+- `Open Lecture Transcribe.command` bootstraps a repo-local `.venv` and uses it for backend Python dependencies.
 - Build only:
-  - `swift build`
+  - `swift build --scratch-path "$(scripts/swift_build_dir.sh)"`
+- Build products live in `~/Library/Caches/LectureTranscribe/swiftpm/`, not `.build/`: when the repo sits in an
+  iCloud-synced folder (like `~/Documents`), iCloud tags `.build/*.bundle` and codesign fails with
+  "resource fork, Finder information, or similar detritus not allowed".
 
 ## Test the project
 - Run the regression guardrail first:

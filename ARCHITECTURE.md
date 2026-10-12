@@ -25,3 +25,5 @@
 - SwiftUI remains thin; most run-state logic is centralized in `TranscribeViewModel`.
 - Cross-language boundary uses simple process execution plus JSON events (no sockets/services).
 - Backend script lookup supports both source runs and bundled app resources.
+- Audio chunks are transcribed in parallel (default 4 concurrent requests, override with `TRANSCRIBE_MAX_PARALLEL`); transcripts are written only after every chunk succeeds.
+- Backend scratch files (chunks, converted inputs) live under `~/Library/Caches/LectureTranscribe` (override with `TRANSCRIBE_WORKDIR`), never inside the app bundle.
