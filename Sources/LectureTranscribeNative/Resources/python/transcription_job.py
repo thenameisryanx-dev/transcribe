@@ -137,10 +137,12 @@ def run_transcription_job(
             push_event("log", "Long audio detected. Using local chunks for diarization...")
             run_chunks_dir = CHUNKS_ROOT_DIR / f"{stem}_{run_id}_diarize"
             push_event("status", "Preparing audio chunks...")
-            parts = split_audio_to_chunks(working_input_path, run_chunks_dir, DIARIZE_CHUNK_SECONDS)
-            push_event("log", f"Prepared {len(parts)} chunk(s) for diarization.")
-
+            # Splitting sits inside the try so a cancel or ffmpeg failure mid-split
+            # still removes any partial chunks.
             try:
+                parts = split_audio_to_chunks(working_input_path, run_chunks_dir, DIARIZE_CHUNK_SECONDS)
+                push_event("log", f"Prepared {len(parts)} chunk(s) for diarization.")
+
                 # Offsets depend on earlier chunks' real lengths, so measure them before fanning out.
                 offsets: list[float] = []
                 offset_seconds = 0.0
@@ -184,10 +186,10 @@ def run_transcription_job(
 
         run_chunks_dir = CHUNKS_ROOT_DIR / f"{stem}_{run_id}"
         push_event("status", "Preparing audio chunks...")
-        parts = split_audio_to_chunks(working_input_path, run_chunks_dir, chunk_seconds)
-        push_event("log", f"Prepared {len(parts)} chunk(s) for transcription.")
-
         try:
+            parts = split_audio_to_chunks(working_input_path, run_chunks_dir, chunk_seconds)
+            push_event("log", f"Prepared {len(parts)} chunk(s) for transcription.")
+
             chunk_texts = _run_chunks_in_parallel(
                 parts,
                 lambda p: transcribe_chunk_text(client, p, model=transcription_model, on_log=log),
