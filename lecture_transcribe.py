@@ -785,6 +785,16 @@ def parse_language_codes(raw: str) -> list[str]:
     return codes
 
 
+def single_language_hint(languages: list[str] | None) -> str | None:
+    """
+    The `language` to force on models that take only one (GPT-4o and diarize). Several languages,
+    or a code that isn't ISO-639-1, mean auto-detect so mixed-language audio isn't forced into one.
+    """
+    if languages and len(languages) == 1 and len(languages[0]) == 2:
+        return languages[0]
+    return LANGUAGE
+
+
 def _looks_repeated(text: str, duration_seconds: float) -> bool:
     if duration_seconds <= 0:
         return False
@@ -807,7 +817,7 @@ def transcribe_chunk_checked(
     and a warning is returned if the last attempt still fails the check.
     """
     if model != MODEL_GPT_TRANSCRIBE:
-        return transcribe_chunk_text(client, chunk_path, model=model, on_log=on_log), None
+        return transcribe_chunk_text(client, chunk_path, model=model, languages=languages, on_log=on_log), None
 
     log = on_log or (lambda _message: None)
     attempts = 1 + GPT_TRANSCRIBE_RETRIES
@@ -842,6 +852,7 @@ def transcribe_chunk_text(
     chunk_path: Path,
     *,
     model: str = MODEL_NORMAL,
+    languages: list[str] | None = None,
     on_log: Callable[[str], None] | None = None,
 ) -> str:
     text = create_transcription_with_retry(
@@ -849,6 +860,7 @@ def transcribe_chunk_text(
         chunk_path,
         model=model,
         response_format="text",
+        languages=languages,
         on_log=on_log,
     )
     return str(text)
@@ -908,8 +920,8 @@ def create_transcription_with_retry(
                     hint = languages or ([LANGUAGE] if LANGUAGE else None)
                     if hint:
                         kwargs["extra_body"] = {"languages": hint}
-                elif LANGUAGE:
-                    kwargs["language"] = LANGUAGE
+                elif language := single_language_hint(languages):
+                    kwargs["language"] = language
                 if chunking_strategy is not None:
                     kwargs["chunking_strategy"] = chunking_strategy
 
@@ -942,7 +954,13 @@ def create_transcription_with_retry(
                 pass
 
 
-def diarize_whole_file(client: OpenAI, input_path: Path, *, on_log: Callable[[str], None] | None = None) -> str:
+def diarize_whole_file(
+    client: OpenAI,
+    input_path: Path,
+    *,
+    languages: list[str] | None = None,
+    on_log: Callable[[str], None] | None = None,
+) -> str:
     """
     Single diarize request (only for shorter audio).
     """
@@ -952,6 +970,7 @@ def diarize_whole_file(client: OpenAI, input_path: Path, *, on_log: Callable[[st
         model=MODEL_DIARIZE,
         response_format="diarized_json",
         chunking_strategy="auto",
+        languages=languages,
         on_log=on_log,
     )
 
@@ -965,6 +984,7 @@ def diarize_chunk(
     client: OpenAI,
     chunk_path: Path,
     *,
+    languages: list[str] | None = None,
     on_log: Callable[[str], None] | None = None,
 ):
     """
@@ -976,5 +996,6 @@ def diarize_chunk(
         model=MODEL_DIARIZE,
         response_format="diarized_json",
         chunking_strategy="auto",
+        languages=languages,
         on_log=on_log,
     )

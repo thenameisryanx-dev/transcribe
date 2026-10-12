@@ -331,11 +331,10 @@ struct TranscribePaneView: View {
                 Text("Unavailable for \(viewModel.selectedTranscriptionModel.displayName).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else if viewModel.selectedTranscriptionModel.usesSpokenLanguages && !viewModel.diarizeEnabled {
-                Text("Spoken languages: \(viewModel.spokenLanguagesSummary). Change in Settings.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
+            Text("Spoken language: \(viewModel.spokenLanguageSummary). Change in Settings.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

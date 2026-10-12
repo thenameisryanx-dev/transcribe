@@ -108,7 +108,7 @@ def command_run(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        languages = parse_language_codes(args.languages or "") or list(DEFAULT_LANGUAGES)
+        languages = parse_language_codes(args.languages or "")
     except ValueError as exc:
         emit("error", f"Invalid spoken languages: {exc}")
         return 2
@@ -163,8 +163,11 @@ def parse_args() -> argparse.Namespace:
     )
     run.add_argument(
         "--languages",
-        default=",".join(DEFAULT_LANGUAGES),
-        help="Comma-separated spoken language codes (e.g. en,es). Used by gpt-transcribe.",
+        default="",
+        help=(
+            "Comma-separated spoken language codes (e.g. en,es). gpt-transcribe uses all of them "
+            f"(default {','.join(DEFAULT_LANGUAGES)}); other models use a single code or auto-detect."
+        ),
     )
 
     return parser.parse_args()
