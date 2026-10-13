@@ -65,6 +65,11 @@ has_fixed 'showingClearDraftConfirmation' Sources/LectureTranscribeNative/Transc
 has_fixed 'This clears the selected audio file, progress, and run log. It does not remove any run history.' Sources/LectureTranscribeNative/TranscribePaneView.swift
 lacks 'canCreateNewTranscript' Sources/LectureTranscribeNative/TranscribeViewModel.swift
 lacks 'New Transcription' Sources/LectureTranscribeNative/TranscribePaneView.swift
+has_fixed '.environmentObject(updateChecker)' Sources/LectureTranscribeNative/LectureTranscribeNativeApp.swift
+has_fixed 'await updateChecker.checkOnLaunch()' Sources/LectureTranscribeNative/RootView.swift
+has_fixed 'Text("About")' Sources/LectureTranscribeNative/RootView.swift
+grep -Eq '^[0-9]+(\.[0-9]+)*$' VERSION
+has_fixed '<string>$APP_VERSION</string>' build_macos_dmg.sh
 
 echo "[4/4] Verifying launcher entry point..."
 LAUNCHER="Open Lecture Transcribe.command"
