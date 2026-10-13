@@ -9,6 +9,7 @@ import traceback
 from pathlib import Path
 
 from lecture_transcribe import (
+    CHUNK_SECONDS_CHOICES,
     DEFAULT_LANGUAGES,
     parse_language_codes,
     get_last_keychain_error,
@@ -169,6 +170,7 @@ def command_run(args: argparse.Namespace) -> int:
             languages=languages,
             context=args.context,
             carry_context=bool(args.carry_context),
+            chunk_seconds=args.chunk_seconds,
         )
         emit("done", str(out_path.resolve()))
         return 0
@@ -275,6 +277,14 @@ def parse_args() -> argparse.Namespace:
         "--carry-context",
         action="store_true",
         help="Transcribe chunks in order and add the end of each chunk's transcript to the next chunk's prompt.",
+    )
+
+    run.add_argument(
+        "--chunk-seconds",
+        type=int,
+        default=None,
+        choices=CHUNK_SECONDS_CHOICES,
+        help="Length of each chunk sent to the API, cut at the nearest pause (default 300; not used with --diarize).",
     )
 
     return parser.parse_args()

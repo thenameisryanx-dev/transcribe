@@ -23,6 +23,11 @@ final class TranscriptionModelTests: XCTestCase {
         XCTAssertEqual(TranscriptionModel.allCases.filter(\.requiresSpokenLanguages), [.gptTranscribe])
     }
 
+    func testDefaultChunkLengthMatchesBackendDefault() {
+        XCTAssertEqual(ChunkLength.standard.seconds, 300)
+        XCTAssertEqual(ChunkLength.allCases.map(\.seconds), [300, 600])
+    }
+
     func testBackendCodes() {
         XCTAssertEqual(SpokenLanguage.backendCodes(for: "", model: .gptTranscribe), ["en"])
         XCTAssertEqual(SpokenLanguage.backendCodes(for: "", model: .gpt4oTranscribe), [])
