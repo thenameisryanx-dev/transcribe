@@ -15,6 +15,10 @@ final class TranscriptionModelTests: XCTestCase {
         XCTAssertFalse(TranscriptionModel.gpt4oMiniTranscribe.supportsDiarization)
     }
 
+    func testOnlyGPTTranscribeSupportsConsistencyMode() {
+        XCTAssertEqual(TranscriptionModel.allCases.filter(\.supportsConsistencyMode), [.gptTranscribe])
+    }
+
     func testOnlyGPTTranscribeRequiresSpokenLanguages() {
         XCTAssertEqual(TranscriptionModel.allCases.filter(\.requiresSpokenLanguages), [.gptTranscribe])
     }

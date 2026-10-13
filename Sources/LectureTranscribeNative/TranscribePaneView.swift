@@ -30,8 +30,13 @@ struct TranscribePaneView: View {
                     .howToTarget(.inputOutput)
 
                 if !viewModel.hasTranscribedCurrentRecording {
-                    speakerLabelsOption
-                        .howToTarget(.options)
+                    VStack(spacing: 14) {
+                        if !trimmedAudioPath.isEmpty {
+                            contextOption
+                        }
+                        speakerLabelsOption
+                    }
+                    .howToTarget(.options)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -319,6 +324,66 @@ struct TranscribePaneView: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    private var contextOption: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Context (optional)")
+                    .font(.headline)
+                Spacer()
+                Menu("Recent") {
+                    ForEach(viewModel.recentContextPrompts, id: \.self) { context in
+                        Button(RecentContextPrompts.menuTitle(for: context)) {
+                            viewModel.contextPrompt = context
+                        }
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(viewModel.recentContextPrompts.isEmpty || viewModel.isRunning || !viewModel.isContextAvailable)
+                .help("Reuse the context from an earlier run.")
+            }
+            TextField(
+                "Context",
+                text: $viewModel.contextPrompt,
+                prompt: Text("e.g. Cell Biology lecture on mitochondria, Prof. Okonkwo"),
+                axis: .vertical
+            )
+            .textFieldStyle(.roundedBorder)
+            .lineLimit(2...5)
+            .labelsHidden()
+            .disabled(viewModel.isRunning || !viewModel.isContextAvailable)
+            Text("Describe the course, topic, and speaker names to help with names and terms.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle("Consistency mode", isOn: Binding(
+                get: { viewModel.consistencyModeEnabled && viewModel.isConsistencyModeAvailable },
+                set: { viewModel.consistencyModeEnabled = $0 }
+            ))
+                .toggleStyle(.checkbox)
+                .disabled(viewModel.isRunning || !viewModel.isConsistencyModeAvailable)
+                .padding(.top, 4)
+            Text(
+                "Carries context between chunks: each part of the recording sees the end of the part before it, "
+                    + "keeping names and wording consistent. Slower, since parts are transcribed one at a time."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if !viewModel.isContextAvailable {
+                Text("Context isn't used with speaker labels.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if !viewModel.selectedTranscriptionModel.supportsConsistencyMode {
+                Text("Consistency mode is only available with GPT Transcribe.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: 420)
     }
 
     private var speakerLabelsOption: some View {

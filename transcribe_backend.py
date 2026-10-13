@@ -128,6 +128,8 @@ def command_run(args: argparse.Namespace) -> int:
             transcription_model=model,
             push_event=push_event,
             languages=languages,
+            context=args.context,
+            carry_context=bool(args.carry_context),
         )
         emit("done", str(out_path.resolve()))
         return 0
@@ -168,6 +170,16 @@ def parse_args() -> argparse.Namespace:
             "Comma-separated spoken language codes (e.g. en,es). gpt-transcribe uses all of them "
             f"(default {','.join(DEFAULT_LANGUAGES)}); other models use a single code or auto-detect."
         ),
+    )
+    run.add_argument(
+        "--context",
+        default="",
+        help="Description of the recording sent as the prompt with every chunk (not used with --diarize).",
+    )
+    run.add_argument(
+        "--carry-context",
+        action="store_true",
+        help="Transcribe chunks in order and add the end of each chunk's transcript to the next chunk's prompt.",
     )
 
     return parser.parse_args()

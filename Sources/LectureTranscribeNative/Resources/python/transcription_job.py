@@ -12,17 +12,20 @@ from lecture_transcribe import (
     DEFAULT_LANGUAGES,
     DIARIZE_CHUNK_SECONDS,
     DIARIZE_SINGLE_BUFFER,
+    MAX_COPY_CHANNELS,
     MODEL_DIARIZE,
     MODEL_GPT_TRANSCRIBE,
     MODEL_MINI,
     MODEL_NORMAL,
     MINI_CHUNK_SECONDS,
     NORMAL_CHUNK_SECONDS,
+    audio_channel_count,
     build_transcript_header,
     cleanup_dir,
     convert_qta_to_m4a_copy,
     diarize_chunk,
     diarize_whole_file,
+    downmix_to_mono_m4a,
     extract_diarization_segments,
     extract_transcription_text,
     format_diarized_lines,
@@ -36,6 +39,7 @@ from lecture_transcribe import (
     single_language_hint,
     split_audio_to_chunks,
     transcribe_chunk_checked,
+    transcript_tail,
 )
 
 T = TypeVar("T")
@@ -86,6 +90,31 @@ def _run_chunks_in_parallel(
     return results
 
 
+def _run_chunks_in_order(
+    parts: list[Path],
+    work: Callable[[Path, T | None], T],
+    push_event,
+    label: str,
+) -> list[T]:
+    """
+    Run `work(part, previous_result)` one chunk at a time, so each chunk can use the result of the
+    chunk before it. Slower than `_run_chunks_in_parallel`, but needed to carry context forward.
+    """
+    total = len(parts)
+    push_event("log", f"{label} {total} chunk(s) one at a time, carrying context between chunks.")
+    push_event("status", f"{label}: 0/{total} chunks done")
+
+    results: list[T] = []
+    previous: T | None = None
+    for i, part in enumerate(parts):
+        previous = work(part, previous)
+        results.append(previous)
+        push_event("log", f"Finished chunk {i + 1}/{total}: {part.name}")
+        push_event("status", f"{label}: {i + 1}/{total} chunks done")
+        push_event("progress", ((i + 1) / total) * 100.0)
+    return results
+
+
 def run_transcription_job(
     input_path: Path,
     diarize: bool,
@@ -93,6 +122,8 @@ def run_transcription_job(
     transcription_model: str,
     push_event,
     languages: list[str] | None = None,
+    context: str | None = None,
+    carry_context: bool = False,
 ) -> Path:
     require_ffmpeg()
     require_ffprobe()
@@ -116,6 +147,19 @@ def run_transcription_job(
         chunk_languages = languages or None
         push_event("log", f"Spoken language: {single_language_hint(chunk_languages) or 'auto-detect'}")
 
+    context = (context or "").strip() or None
+    if diarize:
+        if context or carry_context:
+            push_event("log", "Context prompt isn't supported with speaker labels, so it won't be sent.")
+        context, carry_context = None, False
+    else:
+        if carry_context and transcription_model != MODEL_GPT_TRANSCRIBE:
+            # The GPT-4o models tend to loop or invent text at chunk ends when given the excerpt.
+            push_event("log", f"Consistency mode is only used with {MODEL_GPT_TRANSCRIBE}, so it is off for this run.")
+            carry_context = False
+        push_event("log", f"Context prompt: {f'{len(context)} characters' if context else 'none'}")
+        push_event("log", f"Consistency mode (carry context between chunks): {'on' if carry_context else 'off'}")
+
     def log(message: str) -> None:
         push_event("log", message)
 
@@ -138,15 +182,28 @@ def run_transcription_job(
             working_input_path = converted_temp_path
             push_event("log", f"Converted .qta to: {working_input_path.name}")
 
+        # Surround sources keep dialogue in the center channel; chunks and single requests get a mono mix.
+        channels = audio_channel_count(working_input_path)
+        is_surround = channels is not None and channels > MAX_COPY_CHANNELS
+        if is_surround:
+            push_event("log", f"Source audio has {channels} channels. Mixing down to mono for transcription.")
+
         # Transcripts are written only after every chunk succeeds, so a failed or
         # cancelled run never leaves a partial file in the output folder.
         if diarize:
             dur = get_duration_seconds(working_input_path)
             if 0 < dur <= DIARIZE_SINGLE_BUFFER:
                 push_event("status", "Diarizing (single request)...")
-                content = diarize_whole_file(
-                    client, working_input_path, languages=chunk_languages, on_log=log
-                )
+                diarize_input_path = working_input_path
+                mono_dir = CHUNKS_ROOT_DIR / f"{stem}_{run_id}_mono"
+                try:
+                    if is_surround:
+                        diarize_input_path = downmix_to_mono_m4a(working_input_path, mono_dir / "part_mono.m4a")
+                    content = diarize_whole_file(
+                        client, diarize_input_path, languages=chunk_languages, on_log=log
+                    )
+                finally:
+                    cleanup_dir(mono_dir)
                 header = build_transcript_header(
                     input_path=input_path,
                     working_input_path=working_input_path,
@@ -212,14 +269,41 @@ def run_transcription_job(
             # Chunks are cut at pauses, so their lengths vary; measure them for the section headers.
             spans = _chunk_spans(parts, chunk_seconds)
 
-            chunk_results = _run_chunks_in_parallel(
-                parts,
-                lambda p: transcribe_chunk_checked(
-                    client, p, model=transcription_model, languages=chunk_languages, on_log=log
-                ),
-                push_event,
-                "Transcribing",
-            )
+            if carry_context and len(parts) > 1:
+
+                def transcribe_after(p: Path, previous: tuple[str, str | None] | None):
+                    tail = None
+                    if previous is not None:
+                        previous_text, previous_warning = previous
+                        if previous_warning or not previous_text.strip():
+                            log(f"Not carrying context into {p.name}: the previous chunk failed its check.")
+                        else:
+                            tail = transcript_tail(previous_text)
+                    return transcribe_chunk_checked(
+                        client,
+                        p,
+                        model=transcription_model,
+                        languages=chunk_languages,
+                        context=context,
+                        previous_tail=tail,
+                        on_log=log,
+                    )
+
+                chunk_results = _run_chunks_in_order(parts, transcribe_after, push_event, "Transcribing")
+            else:
+                chunk_results = _run_chunks_in_parallel(
+                    parts,
+                    lambda p: transcribe_chunk_checked(
+                        client,
+                        p,
+                        model=transcription_model,
+                        languages=chunk_languages,
+                        context=context,
+                        on_log=log,
+                    ),
+                    push_event,
+                    "Transcribing",
+                )
         finally:
             cleanup_dir(run_chunks_dir)
 

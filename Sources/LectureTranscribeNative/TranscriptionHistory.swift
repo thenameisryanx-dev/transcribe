@@ -35,6 +35,9 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     // Optional so older history still decodes. Warnings mean the run finished but part of the transcript may be missing.
     var warnings: [String]? = nil
     var log: String? = nil
+    // Optional so older history still decodes. The context prompt and whether consistency mode was on.
+    var context: String? = nil
+    var consistencyMode: Bool? = nil
 
     var hasWarnings: Bool {
         !(warnings ?? []).isEmpty
