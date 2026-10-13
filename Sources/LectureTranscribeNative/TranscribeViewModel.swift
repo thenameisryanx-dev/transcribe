@@ -182,6 +182,11 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published var showingAPIKeySheet = false
     @Published var pendingAPIKey = ""
     @Published var saveAPIKeyToKeychain = true
+    /// Why the API key sheet opened on its own, e.g. after OpenAI rejected the key.
+    @Published private(set) var apiKeySheetReason: String?
+    /// Why the last key entered in the sheet wasn't accepted.
+    @Published private(set) var apiKeyEntryError: String?
+    @Published private(set) var isCheckingAPIKey = false
 
     @Published var showingErrorAlert = false
     @Published var errorMessage = ""
@@ -203,6 +208,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private var activeHistoryEntryID: UUID?
     private var activeHistoryEntryFinalized = false
     private var lastHandledHowToGuideRequestToken = 0
+    private var runFailedForAPIKey = false
+    private var startTranscriptionAfterAPIKey = false
 
     @Published private(set) var historyEntries: [TranscriptionHistoryEntry] = []
     @Published var selectedHistoryEntryIDs: Set<UUID> = []
@@ -228,7 +235,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             selectedTranscriptionModel = storedModel
         }
         loadHistoryEntries()
-        refreshAPIKeyStatus()
+        refreshAPIKeyStatus(verify: true)
     }
 
     var canStart: Bool {
@@ -305,10 +312,16 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    func refreshAPIKeyStatus() {
+    /// True when there's no key, or OpenAI rejected the one we have.
+    var apiKeyNeedsAttention: Bool {
+        let status = apiKeyStatusText.lowercased()
+        return status.contains("required") || status.contains("rejected")
+    }
+
+    func refreshAPIKeyStatus(verify: Bool = false) {
         Task {
             do {
-                let status = try await backend.fetchAPIKeyStatus()
+                let status = try await backend.fetchAPIKeyStatus(verify: verify)
                 apiKeyStatusText = "API key: \(status)"
             } catch {
                 apiKeyStatusText = "API key: unknown"
@@ -317,29 +330,45 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     }
 
     func presentAPIKeySheet() {
+        presentAPIKeySheet(reason: nil, startTranscriptionAfterward: false)
+    }
+
+    private func presentAPIKeySheet(reason: String?, startTranscriptionAfterward: Bool) {
         pendingAPIKey = ""
         saveAPIKeyToKeychain = true
+        apiKeySheetReason = reason
+        apiKeyEntryError = nil
+        startTranscriptionAfterAPIKey = startTranscriptionAfterward
         showingAPIKeySheet = true
     }
 
     func dismissAPIKeySheet() {
         showingAPIKeySheet = false
+        startTranscriptionAfterAPIKey = false
     }
 
+    /// Checks the key with OpenAI and saves it. A key that doesn't work keeps the sheet open with the reason.
     func submitAPIKey() {
         let key = pendingAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return }
+        guard !key.isEmpty, !isCheckingAPIKey else { return }
 
+        isCheckingAPIKey = true
+        apiKeyEntryError = nil
         Task {
+            defer { isCheckingAPIKey = false }
             do {
                 let status = try await backend.setAPIKey(key, saveToKeychain: saveAPIKeyToKeychain)
                 apiKeyStatusText = "API key: \(status)"
                 showingAPIKeySheet = false
                 appendLog("API key updated (\(status)).")
+                if startTranscriptionAfterAPIKey {
+                    startTranscriptionAfterAPIKey = false
+                    if canStart {
+                        startTranscription()
+                    }
+                }
             } catch {
-                showingAPIKeySheet = false
-                appendLog("API key update failed: \(error.localizedDescription)")
-                showError(error.localizedDescription)
+                apiKeyEntryError = error.localizedDescription
             }
         }
     }
@@ -527,6 +556,14 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     func startTranscription() {
         guard runTask == nil else { return }
 
+        if apiKeyNeedsAttention {
+            let reason = apiKeyStatusText.lowercased().contains("rejected")
+                ? "OpenAI didn't accept your saved API key. Enter a working key to start transcribing."
+                : "Add your OpenAI API key to start transcribing."
+            presentAPIKeySheet(reason: reason, startTranscriptionAfterward: true)
+            return
+        }
+
         let trimmedPath = audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPath.isEmpty else {
             showError("Choose an audio file first.")
@@ -554,6 +591,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         latestOutputPath = nil
         completedAudioFilePath = nil
         canOpenOutputFolder = false
+        runFailedForAPIKey = false
         isRunning = true
         let shouldDiarize = diarizeEnabled && selectedTranscriptionModel.supportsDiarization
         if diarizeEnabled != shouldDiarize {
@@ -656,6 +694,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             canOpenOutputFolder = true
             appendLog("Done. Wrote: \(path)")
             finalizeActiveHistoryEntry(status: .success, outputPath: path, errorMessage: nil)
+        case .apiKeyProblem:
+            runFailedForAPIKey = true
         case let .error(message):
             if cancellationRequested {
                 appendLog("Run cancellation completed.")
@@ -663,7 +703,21 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             }
             statusText = "Failed"
             appendLog("Error: \(message)")
-            showError(message)
+            if runFailedForAPIKey {
+                // Ask for a working key instead of showing an alert; the run restarts once one is saved.
+                let hadKey = !apiKeyStatusText.lowercased().contains("required")
+                if hadKey {
+                    apiKeyStatusText = "API key: rejected by OpenAI"
+                }
+                presentAPIKeySheet(
+                    reason: hadKey
+                        ? "OpenAI didn't accept your API key, so the transcription stopped. Enter a working key to try again."
+                        : message,
+                    startTranscriptionAfterward: true
+                )
+            } else {
+                showError(message)
+            }
             finalizeActiveHistoryEntry(status: .failed, errorMessage: message)
         }
     }
@@ -677,8 +731,22 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     }
 
     private func showError(_ message: String) {
-        errorMessage = message
+        errorMessage = Self.alertSummary(for: message)
         showingErrorAlert = true
+    }
+
+    /// Keeps the error alert short enough to fit on screen; the full message stays in the run log and history.
+    nonisolated static func alertSummary(for message: String, maxLength: Int = 300) -> String {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let firstParagraph = trimmed.components(separatedBy: "\n\n").first ?? trimmed
+        var summary = firstParagraph.trimmingCharacters(in: .whitespacesAndNewlines)
+        if summary.count > maxLength {
+            summary = String(summary.prefix(maxLength)).trimmingCharacters(in: .whitespaces) + "…"
+        }
+        if summary != trimmed {
+            summary += "\n\nFull details are in the Run Log."
+        }
+        return summary
     }
 
     /// File ▸ New Transcription: return to an empty Transcribe pane. Run history is kept.
