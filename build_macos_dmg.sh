@@ -31,7 +31,13 @@ APP_ICON_PNG_LEGACY_RESOURCE_PATH="$PROJECT_DIR/Resources/Icon.png"
 DMG_BACKGROUND_PATH="$PROJECT_DIR/Resources/dmg-background.png"
 DMG_BACKGROUND_ALT_PATH="$PROJECT_DIR/dmg-background.png"
 DATE_TAG="$(date +%Y%m%d)"
-DMG_PATH="$DIST_DIR/Lecture-Transcribe-${DATE_TAG}-${ARCH}.dmg"
+# VERSION is the single source of the app version; the in-app update check compares it with GitHub Releases.
+APP_VERSION="$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")"
+if [[ ! "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+  echo "VERSION must contain a dotted number like 1.2.0 (found: '$APP_VERSION')."
+  exit 1
+fi
+DMG_PATH="$DIST_DIR/Lecture-Transcribe-${APP_VERSION}-${ARCH}.dmg"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 USE_CREATE_DMG="${USE_CREATE_DMG:-1}"
 DMG_WINDOW_WIDTH=760
@@ -334,7 +340,9 @@ ${icon_plist_block}  <key>CFBundleIdentifier</key>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.0.0</string>
+  <string>$APP_VERSION</string>
+  <key>CFBundleVersion</key>
+  <string>$APP_VERSION</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>

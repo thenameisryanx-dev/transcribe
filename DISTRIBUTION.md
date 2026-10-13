@@ -11,7 +11,7 @@ chmod +x build_macos_dmg.sh
 
 Output DMG will be in `dist/`:
 
-`Lecture-Transcribe-YYYYMMDD-<arch>.dmg`
+`Lecture-Transcribe-<version>-<arch>.dmg` (version from `VERSION`)
 
 By default, the script now builds the standard macOS drag-to-Applications layout with only:
 
@@ -38,6 +38,16 @@ If you already have a local app bundle and only want to re-wrap it into a DMG:
 ```bash
 SKIP_BUILD=1 ./build_macos_dmg.sh
 ```
+
+## Releasing an update
+
+1. Bump the number in `VERSION` (for example `1.0.0` → `1.1.0`) and commit.
+2. Build the DMG: `./build_macos_dmg.sh` → `dist/Lecture-Transcribe-<version>-<arch>.dmg`.
+3. Publish it: `./scripts/publish_release.sh`. This pushes the branch and creates GitHub Release `v<version>` with the DMG attached.
+
+On launch, installed copies check the latest GitHub Release. If it is newer, they show a banner with a **Download** button that downloads the DMG for their Mac. Settings → About shows the installed version and has a **Check for Updates** button. Builds run from source (`Open Lecture Transcribe.command`) skip the check.
+
+To install the update, they open the new DMG, drag the app into Applications and choose **Replace**, then repeat the **Open Anyway** step once. Settings, run history and the saved API key are kept.
 
 ## What your friend does
 

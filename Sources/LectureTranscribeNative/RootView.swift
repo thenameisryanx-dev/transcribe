@@ -21,6 +21,7 @@ enum NavigationPane: String, CaseIterable, Identifiable {
 
 struct RootView: View {
     @EnvironmentObject private var viewModel: TranscribeViewModel
+    @EnvironmentObject private var updateChecker: UpdateChecker
 
     var body: some View {
         NavigationSplitView {
@@ -51,8 +52,16 @@ struct RootView: View {
             // Grouped Forms report their full content height as their ideal size,
             // which would make the `.contentSize` window grow on its own.
             .frame(idealWidth: 600, idealHeight: 600)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if updateChecker.showsBanner, let update = updateChecker.availableUpdate {
+                    UpdateBannerView(update: update)
+                }
+            }
         }
         .navigationSplitViewStyle(.balanced)
+        .task {
+            await updateChecker.checkOnLaunch()
+        }
         // Presented from the root so the Transcribe and Settings panes can both use them.
         .sheet(isPresented: $viewModel.showingAPIKeySheet) {
             APIKeySheetView()
@@ -68,8 +77,36 @@ struct RootView: View {
     }
 }
 
+private struct UpdateBannerView: View {
+    @EnvironmentObject private var updateChecker: UpdateChecker
+    let update: AvailableUpdate
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.down.circle.fill")
+                .foregroundStyle(.tint)
+            Text("Lecture Transcribe \(update.version) is available.")
+            Spacer()
+            Button("Later") {
+                updateChecker.dismissBanner()
+            }
+            Button("Download") {
+                updateChecker.openDownload()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+    }
+}
+
 private struct SettingsPaneView: View {
     @EnvironmentObject private var viewModel: TranscribeViewModel
+    @EnvironmentObject private var updateChecker: UpdateChecker
 
     var body: some View {
         Form {
@@ -138,6 +175,39 @@ private struct SettingsPaneView: View {
                     Text("Guided Walkthrough")
                     Text("New to the app? Start the guided walkthrough.")
                 }
+            }
+
+            Section {
+                LabeledContent("Version") {
+                    Text(updateChecker.currentVersionText)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                HStack {
+                    Text(updateChecker.lastCheckMessage)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if updateChecker.isChecking {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    if updateChecker.availableUpdate != nil {
+                        Button("Download Update") {
+                            updateChecker.openDownload()
+                        }
+                    }
+                    Button("Check for Updates") {
+                        Task { await updateChecker.checkNow() }
+                    }
+                    .disabled(updateChecker.isChecking || updateChecker.currentVersion == nil)
+                }
+            } header: {
+                Text("About")
+            } footer: {
+                Text("To update, download the new version, drag it into Applications, and choose Replace. "
+                    + "Your settings, run history, and API key are kept.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
