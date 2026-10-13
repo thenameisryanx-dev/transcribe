@@ -196,6 +196,7 @@ final class BackendClient: @unchecked Sendable {
         languages: [String] = [],
         context: String = "",
         carryContext: Bool = false,
+        chunkSeconds: Int? = nil,
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
     ) async throws {
         var args = ["run", "--input", inputPath, "--output", outputDirectory]
@@ -208,6 +209,9 @@ final class BackendClient: @unchecked Sendable {
         }
         if carryContext {
             args.append("--carry-context")
+        }
+        if let chunkSeconds, !diarize {
+            args.append(contentsOf: ["--chunk-seconds", String(chunkSeconds)])
         }
         if diarize {
             args.append("--diarize")

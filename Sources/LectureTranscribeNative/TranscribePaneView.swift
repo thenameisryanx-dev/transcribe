@@ -35,6 +35,7 @@ struct TranscribePaneView: View {
                             contextOption
                         }
                         speakerLabelsOption
+                        chunkLengthOption
                     }
                     .howToTarget(.options)
                 }
@@ -405,6 +406,30 @@ struct TranscribePaneView: View {
             Text("Spoken language: \(viewModel.spokenLanguageSummary). Change in Settings.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private var chunkLengthOption: some View {
+        VStack(spacing: 4) {
+            Picker("Chunk length", selection: Binding(
+                get: { viewModel.effectiveChunkLength },
+                set: { viewModel.chunkLengthPreference = $0 }
+            )) {
+                ForEach(ChunkLength.allCases) { length in
+                    Text(length.displayName).tag(length)
+                }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .disabled(viewModel.isRunning || !viewModel.isChunkLengthAvailable)
+            .help("How much audio goes into each request. Cuts are moved to the nearest pause.")
+            Text(
+                viewModel.isChunkLengthAvailable
+                    ? "Each chunk is cut at the nearest pause."
+                    : "Speaker labels use their own chunk length."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
     }
 

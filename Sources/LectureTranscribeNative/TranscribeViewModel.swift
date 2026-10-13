@@ -23,11 +23,11 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
     var hoverDescription: String {
         switch self {
         case .gptTranscribe:
-            return "Newest model. Uses the spoken language set in Settings (English if auto-detect). Supports speaker diarization."
+            return "Experimental. Uses the spoken language set in Settings (English if auto-detect). Supports speaker diarization. In testing it sometimes skipped quiet or whispered speech."
         case .gpt4oTranscribe:
-            return "Best accuracy and supports speaker diarization."
+            return "Accurate and supports speaker diarization."
         case .gpt4oMiniTranscribe:
-            return "Fast, cost-efficient transcription. Speaker diarization is unavailable."
+            return "As accurate as GPT-4o Transcribe in testing, at half the price. Speaker diarization is unavailable."
         }
     }
 
@@ -36,11 +36,11 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
     var menuSubtitle: String {
         switch self {
         case .gptTranscribe:
-            return "Most accurate · $0.0045/min"
+            return "Experimental · $0.0045/min"
         case .gpt4oTranscribe:
-            return "Previous generation · $0.006/min"
+            return "Accurate · $0.006/min"
         case .gpt4oMiniTranscribe:
-            return "Fastest · $0.003/min"
+            return "Accurate, lowest cost · $0.003/min"
         }
     }
 
@@ -59,6 +59,22 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
     /// The other models auto-detect when no language is set.
     var requiresSpokenLanguages: Bool {
         self == .gptTranscribe
+    }
+}
+
+/// How much audio goes into each API request. Cuts still move to the nearest pause.
+enum ChunkLength: Int, CaseIterable, Identifiable, Sendable {
+    case fiveMinutes = 300
+    case tenMinutes = 600
+
+    /// Used until the user picks one. 5-minute chunks dropped fewer words than 10-minute ones in testing.
+    static let standard: ChunkLength = .fiveMinutes
+
+    var id: Int { rawValue }
+    var seconds: Int { rawValue }
+
+    var displayName: String {
+        "\(rawValue / 60) min"
     }
 }
 
@@ -158,6 +174,17 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             UserDefaults.standard.set(consistencyModeEnabled, forKey: Self.consistencyModeDefaultsKey)
         }
     }
+    /// Chunk length the user picked; nil uses `ChunkLength.standard`.
+    @Published var chunkLengthPreference: ChunkLength? {
+        didSet {
+            guard oldValue != chunkLengthPreference else { return }
+            if let chunkLengthPreference {
+                UserDefaults.standard.set(chunkLengthPreference.rawValue, forKey: Self.chunkLengthDefaultsKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.chunkLengthDefaultsKey)
+            }
+        }
+    }
     @Published var diarizeEnabled = false {
         didSet {
             if diarizeEnabled && !selectedTranscriptionModel.supportsDiarization {
@@ -202,6 +229,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private static let spokenLanguageDefaultsKey = "spokenLanguages"
     private static let recentContextPromptsDefaultsKey = "recentContextPrompts"
     private static let consistencyModeDefaultsKey = "consistencyMode"
+    private static let chunkLengthDefaultsKey = "chunkLengthSeconds"
     private let defaultOutputFolderPath: String
     private var runTask: Task<Void, Never>?
     private var cancellationRequested = false
@@ -229,6 +257,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         )
         recentContextPrompts = UserDefaults.standard.stringArray(forKey: Self.recentContextPromptsDefaultsKey) ?? []
         consistencyModeEnabled = UserDefaults.standard.bool(forKey: Self.consistencyModeDefaultsKey)
+        chunkLengthPreference = ChunkLength(rawValue: UserDefaults.standard.integer(forKey: Self.chunkLengthDefaultsKey))
         if let rawModel = UserDefaults.standard.string(forKey: Self.selectedModelDefaultsKey),
            let storedModel = TranscriptionModel(rawValue: rawModel)
         {
@@ -285,6 +314,15 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     /// The diarize model doesn't accept a prompt, so context and consistency mode don't apply.
     var isContextAvailable: Bool {
         !diarizeEnabled
+    }
+
+    /// Diarized runs use their own chunk size.
+    var isChunkLengthAvailable: Bool {
+        !diarizeEnabled
+    }
+
+    var effectiveChunkLength: ChunkLength {
+        chunkLengthPreference ?? .standard
     }
 
     var isConsistencyModeAvailable: Bool {
@@ -502,6 +540,9 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             selectedTranscriptionModel = entryModel
         }
         diarizeEnabled = entry.diarize
+        if let chunkLength = entry.chunkSeconds.flatMap(ChunkLength.init(rawValue:)) {
+            chunkLengthPreference = chunkLength
+        }
         selectedPane = .transcribe
         startTranscription()
     }
@@ -600,6 +641,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         let model = selectedTranscriptionModel
         let context = shouldDiarize ? "" : trimmedContextPrompt
         let carryContext = !shouldDiarize && consistencyModeEnabled && model.supportsConsistencyMode
+        let chunkSeconds = shouldDiarize ? nil : effectiveChunkLength.seconds
         if !context.isEmpty {
             recentContextPrompts = RecentContextPrompts.adding(context, to: recentContextPrompts)
         }
@@ -609,7 +651,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             diarize: shouldDiarize,
             model: model,
             context: context,
-            consistencyMode: carryContext
+            consistencyMode: carryContext,
+            chunkSeconds: chunkSeconds
         )
 
         runTask = Task { [weak self] in
@@ -633,7 +676,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
                     model: model.rawValue,
                     languages: languages,
                     context: context,
-                    carryContext: carryContext
+                    carryContext: carryContext,
+                    chunkSeconds: chunkSeconds
                 ) { event in
                     eventContinuation.yield(event)
                 }
@@ -878,7 +922,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         diarize: Bool,
         model: TranscriptionModel,
         context: String,
-        consistencyMode: Bool
+        consistencyMode: Bool,
+        chunkSeconds: Int?
     ) {
         let entry = TranscriptionHistoryEntry(
             id: UUID(),
@@ -892,7 +937,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             errorMessage: nil,
             model: model.rawValue,
             context: context.isEmpty ? nil : context,
-            consistencyMode: consistencyMode
+            consistencyMode: consistencyMode,
+            chunkSeconds: chunkSeconds
         )
 
         activeHistoryEntryID = entry.id

@@ -22,8 +22,9 @@ LANGUAGE: str | None = None
 MODEL_GPT_TRANSCRIBE = "gpt-transcribe"
 MODEL_NORMAL = "gpt-4o-transcribe"
 MODEL_MINI = "gpt-4o-mini-transcribe"
-NORMAL_CHUNK_SECONDS = 10 * 60  # 10 minutes (reliable for 60+ min)
-MINI_CHUNK_SECONDS = 5 * 60     # smaller chunks give faster visible progress on mini
+# 5-minute chunks dropped fewer words and lines than 10-minute ones in side-by-side tests on every model.
+DEFAULT_CHUNK_SECONDS = 5 * 60
+CHUNK_SECONDS_CHOICES = (5 * 60, 10 * 60)  # lengths the user can pick
 
 # Diarization model + constraints
 MODEL_DIARIZE = "gpt-4o-transcribe-diarize"

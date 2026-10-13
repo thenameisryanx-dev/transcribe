@@ -38,6 +38,8 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     // Optional so older history still decodes. The context prompt and whether consistency mode was on.
     var context: String? = nil
     var consistencyMode: Bool? = nil
+    // Optional so older history still decodes. Seconds of audio per request; nil for diarized runs.
+    var chunkSeconds: Int? = nil
 
     var hasWarnings: Bool {
         !(warnings ?? []).isEmpty

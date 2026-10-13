@@ -401,6 +401,12 @@ private struct RunDetailView: View {
                     }
                 }
 
+                if let chunkSeconds = entry.chunkSeconds {
+                    LabeledContent("Chunk Length") {
+                        Text("\(chunkSeconds / 60) min")
+                    }
+                }
+
                 if entry.consistencyMode == true {
                     LabeledContent("Consistency Mode") {
                         Text("On")

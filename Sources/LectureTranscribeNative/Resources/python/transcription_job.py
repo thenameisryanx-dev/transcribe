@@ -9,6 +9,7 @@ from openai import OpenAI
 
 from lecture_transcribe import (
     CHUNKS_ROOT_DIR,
+    DEFAULT_CHUNK_SECONDS,
     DEFAULT_LANGUAGES,
     DIARIZE_CHUNK_SECONDS,
     DIARIZE_SINGLE_BUFFER,
@@ -17,8 +18,6 @@ from lecture_transcribe import (
     MODEL_GPT_TRANSCRIBE,
     MODEL_MINI,
     MODEL_NORMAL,
-    MINI_CHUNK_SECONDS,
-    NORMAL_CHUNK_SECONDS,
     audio_channel_count,
     build_transcript_header,
     cleanup_dir,
@@ -124,6 +123,7 @@ def run_transcription_job(
     languages: list[str] | None = None,
     context: str | None = None,
     carry_context: bool = False,
+    chunk_seconds: int | None = None,
 ) -> Path:
     require_ffmpeg()
     require_ffprobe()
@@ -149,6 +149,8 @@ def run_transcription_job(
 
     context = (context or "").strip() or None
     if diarize:
+        if chunk_seconds is not None:
+            push_event("log", "Chunk length setting isn't used with speaker labels; their own chunk size applies.")
         if context or carry_context:
             push_event("log", "Context prompt isn't supported with speaker labels, so it won't be sent.")
         context, carry_context = None, False
@@ -258,8 +260,9 @@ def run_transcription_job(
             out_path.write_text(header + "\n".join(out_lines), encoding="utf-8")
             return out_path
 
-        chunk_seconds = MINI_CHUNK_SECONDS if transcription_model == MODEL_MINI else NORMAL_CHUNK_SECONDS
-        push_event("log", f"Chunk size: {chunk_seconds // 60} minute(s) per request.")
+        if chunk_seconds is None:
+            chunk_seconds = DEFAULT_CHUNK_SECONDS
+        push_event("log", f"Chunk size: {chunk_seconds // 60} minute(s) per request (cut at the nearest pause).")
 
         run_chunks_dir = CHUNKS_ROOT_DIR / f"{stem}_{run_id}"
         push_event("status", "Preparing audio chunks...")
