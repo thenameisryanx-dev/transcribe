@@ -7,7 +7,10 @@ NATIVE_BINARY_NAME="LectureTranscribeNative"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
 DIST_DIR="$PROJECT_DIR/dist"
-STAGING_DIR="$PROJECT_DIR/dmg_staging"
+# DMG images use APFS: HFS+ images tag bundle files with Finder info, which invalidates the signature.
+# Stage and sign outside ~/Documents: iCloud Drive tags files there with Finder metadata,
+# which makes codesign fail ("resource fork, Finder information, or similar detritus").
+STAGING_DIR="$HOME/Library/Caches/LectureTranscribe/dmg_staging"
 ARCH="$(uname -m)"
 VENDOR_DIR="$PROJECT_DIR/vendor"
 FFMPEG_VENDOR_DIR="$VENDOR_DIR/ffmpeg/$ARCH"
@@ -595,6 +598,7 @@ create_dmg_with_finder_layout() {
     --app-drop-link "$DMG_APPS_ICON_X" "$DMG_ICON_Y"
     --hide-extension "$APP_NAME.app"
     --no-internet-enable
+    --filesystem APFS
   )
 
   if [[ -n "$dmg_background" ]]; then
@@ -625,8 +629,7 @@ create_dmg_with_native_layout() {
   COPYFILE_DISABLE=1 hdiutil create \
     -volname "$APP_NAME" \
     -srcfolder "$STAGING_DIR" \
-    -fs HFS+ \
-    -fsargs "-c c=64,a=16,e=16" \
+    -fs APFS \
     -ov \
     -format UDRW \
     "$rw_dmg" >/dev/null
@@ -764,6 +767,7 @@ create_distribution_dmg() {
   COPYFILE_DISABLE=1 hdiutil create \
     -volname "$APP_NAME" \
     -srcfolder "$STAGING_DIR" \
+    -fs APFS \
     -ov \
     -format UDZO \
     "$DMG_PATH" >/dev/null
@@ -841,21 +845,40 @@ else
 fi
 
 echo "Preparing distributable app..."
-xattr -cr "$APP_PATH" || true
-codesign --force --deep --sign - "$APP_PATH" || true
+mkdir -p "$STAGING_DIR"
+STAGED_APP_PATH="$STAGING_DIR/$APP_NAME.app"
+ditto --norsrc --noextattr "$APP_PATH" "$STAGED_APP_PATH"
+xattr -cr "$STAGED_APP_PATH"
+# An unsigned app is reported as "damaged" on other Macs, so signing failures are fatal.
+codesign --force --deep --sign - "$STAGED_APP_PATH"
+codesign --verify --deep --strict "$STAGED_APP_PATH"
+ln -s /Applications "$STAGING_DIR/Applications"
 
 # Keep a local top-level app bundle for quick manual launching.
 if [[ "$APP_PATH" != "$PROJECT_DIR/$APP_NAME.app" ]]; then
   rm -rf "$PROJECT_DIR/$APP_NAME.app"
-  ditto "$APP_PATH" "$PROJECT_DIR/$APP_NAME.app"
+  ditto "$STAGED_APP_PATH" "$PROJECT_DIR/$APP_NAME.app"
 fi
-
-mkdir -p "$STAGING_DIR"
-ditto --norsrc "$APP_PATH" "$STAGING_DIR/$APP_NAME.app"
-ln -s /Applications "$STAGING_DIR/Applications"
 
 echo "Creating DMG..."
 create_distribution_dmg
+
+verify_dmg_app_signature() {
+  local attach_output device mount_point
+  attach_output="$(hdiutil attach -nobrowse -readonly -noverify -noautoopen "$DMG_PATH")"
+  device="$(printf "%s\n" "$attach_output" | awk '/^\/dev\// {print $1; exit}')"
+  mount_point="$(printf "%s\n" "$attach_output" | awk -F'\t' '/\/Volumes\// {print $NF; exit}')"
+  local status=0
+  codesign --verify --deep --strict "$mount_point/$APP_NAME.app" || status=$?
+  hdiutil detach "$device" >/dev/null || true
+  if [[ "$status" -ne 0 ]]; then
+    echo "The app inside the DMG has an invalid code signature; other Macs would report it as damaged."
+    exit 1
+  fi
+}
+
+echo "Verifying app signature inside DMG..."
+verify_dmg_app_signature
 
 echo
 echo "Done."

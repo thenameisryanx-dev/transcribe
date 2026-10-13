@@ -41,21 +41,23 @@ SKIP_BUILD=1 ./build_macos_dmg.sh
 
 ## What your friend does
 
+Nothing needs to be installed first (no Homebrew, ffmpeg, Python or Xcode); everything ships inside the app.
+
 1. Open the DMG.
 2. Drag `Lecture Transcribe.app` to `Applications`.
-3. Open app (right-click -> Open on first launch if macOS blocks unsigned app).
-4. Enter your OpenAI API key when prompted.
-5. Install `ffmpeg` only if bundled media tools are missing:
-
-```bash
-brew install ffmpeg
-```
+3. Open the app. Because it is not notarized, macOS blocks the first launch:
+   - Click **Done** on the "could not verify" dialog.
+   - Open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to Lecture Transcribe.
+   - Confirm with their password. Later launches open normally.
+4. Enter their OpenAI API key when prompted.
 
 ## Notes
 
-- The generated app is architecture-specific (`arm64` or `x86_64`).
+- The generated app is architecture-specific (`arm64` or `x86_64`). A DMG built on Apple Silicon does not run on Intel Macs.
+- Requires macOS 13 or later.
+- The app is ad-hoc signed during the build, and the script fails if the app inside the DMG is not validly signed (an unsigned app is reported as "damaged" on other Macs). Staging and signing happen in `~/Library/Caches/LectureTranscribe/dmg_staging` because iCloud Drive metadata under `~/Documents` breaks `codesign`.
 - Release builds bundle the Python runtime and Python dependencies needed by the app.
 - Standard builds bundle `ffmpeg` + `ffprobe` automatically in app resources.
 - Apple Silicon builds now require and validate native `arm64` media tools; x86_64-only binaries are rejected.
 - The distribution bundle now packages the native SwiftUI executable (`LectureTranscribeNative`), not the legacy PyInstaller/Tk app.
-- For clean one-click installs without warnings, add Developer ID signing + Apple notarization.
+- For clean one-click installs without the Privacy & Security step, sign with a Developer ID certificate (Apple Developer Program) and notarize with `xcrun notarytool`.

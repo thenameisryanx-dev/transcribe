@@ -245,16 +245,34 @@ def _is_runnable_media_tool(path: Path) -> bool:
         return False
 
 
+_MACHO_CPU_TYPES = {0x0100000C: "arm64", 0x01000007: "x86_64"}
+
+
 def _binary_architectures(path: Path) -> set[str]:
+    """
+    Read architectures from the Mach-O header directly. /usr/bin/lipo is a stub on Macs
+    without the Command Line Tools and would prompt the user to install them.
+    """
     try:
-        result = subprocess.run(
-            ["/usr/bin/lipo", "-archs", str(path)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=MEDIA_TOOL_CHECK_TIMEOUT_SECONDS,
-        )
-        return {part.strip() for part in result.stdout.split() if part.strip()}
+        with open(path, "rb") as handle:
+            header = handle.read(8)
+            if len(header) < 8:
+                return set()
+            if header[:4] in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe"):
+                cpu_type = int.from_bytes(header[4:8], "little")
+                return {_MACHO_CPU_TYPES.get(cpu_type, hex(cpu_type))}
+            if header[:4] in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
+                arch_entry_size = 32 if header[3] == 0xBF else 20
+                arch_count = int.from_bytes(header[4:8], "big")
+                archs: set[str] = set()
+                for _ in range(min(arch_count, 16)):
+                    entry = handle.read(arch_entry_size)
+                    if len(entry) < arch_entry_size:
+                        break
+                    cpu_type = int.from_bytes(entry[:4], "big")
+                    archs.add(_MACHO_CPU_TYPES.get(cpu_type, hex(cpu_type)))
+                return archs
+        return set()
     except Exception:
         return set()
 
