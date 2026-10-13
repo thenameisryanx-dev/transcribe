@@ -48,10 +48,39 @@ def resolve_api_key_status() -> str:
     return "required"
 
 
-def command_key_status(_args: argparse.Namespace) -> int:
+def command_key_status(args: argparse.Namespace) -> int:
     status = resolve_api_key_status()
+    if getattr(args, "verify", False) and status != "required":
+        # Only a definite rejection changes the status; being offline shouldn't flag a good key.
+        if check_api_key_with_openai(os.environ.get("OPENAI_API_KEY", "")) == "rejected":
+            status = API_KEY_STATUS_REJECTED
     print(json.dumps({"status": status}, ensure_ascii=False))
     return 0
+
+
+API_KEY_STATUS_REJECTED = "rejected by OpenAI"
+# Marks a run error caused by a missing or rejected key, so the app can ask for a new one.
+ERROR_KIND_API_KEY = "api_key"
+
+
+def check_api_key_with_openai(key: str) -> str:
+    """Asks OpenAI whether a key works. Returns "ok", "rejected", or "unreachable"."""
+    try:
+        import openai
+    except ImportError:
+        return "unreachable"
+
+    try:
+        # Listing models is free and only needs a working key.
+        openai.OpenAI(api_key=key, timeout=15.0, max_retries=1).models.list()
+    except openai.AuthenticationError:
+        return "rejected"
+    except (openai.APIConnectionError, openai.APITimeoutError):
+        return "unreachable"
+    except openai.APIStatusError:
+        # Rate limits or server errors mean OpenAI accepted the key itself.
+        return "ok"
+    return "ok"
 
 
 def command_set_key(args: argparse.Namespace) -> int:
@@ -62,6 +91,15 @@ def command_set_key(args: argparse.Namespace) -> int:
     if not is_valid_api_key(key):
         print(json.dumps({"error": "Invalid API key format. It should start with 'sk-'."}, ensure_ascii=False))
         return 2
+
+    if not args.skip_check:
+        check = check_api_key_with_openai(key)
+        if check == "rejected":
+            print(json.dumps({"error": "OpenAI didn't accept this key. Copy it again from platform.openai.com/api-keys."}, ensure_ascii=False))
+            return 2
+        if check == "unreachable":
+            print(json.dumps({"error": "Couldn't reach OpenAI to check this key. Check your internet connection, then try again."}, ensure_ascii=False))
+            return 2
 
     os.environ["OPENAI_API_KEY"] = key
     if not save:
@@ -114,7 +152,8 @@ def command_run(args: argparse.Namespace) -> int:
         return 2
 
     if resolve_api_key_status() == "required":
-        emit("error", "API key is required. Set a valid key before running transcription.")
+        emit("error_kind", ERROR_KIND_API_KEY)
+        emit("error", "Add your OpenAI API key to start transcribing.")
         return 2
 
     def push_event(kind: str, payload) -> None:
@@ -139,19 +178,75 @@ def command_run(args: argparse.Namespace) -> int:
         emit("error", str(exc))
         return 1
     except Exception as exc:
-        emit("error", f"{exc}\n\n{traceback.format_exc()}")
+        # The traceback goes to the run log; the alert gets a short message people can act on.
+        emit("log", traceback.format_exc().rstrip())
+        if _is_api_key_error(exc):
+            emit("error_kind", ERROR_KIND_API_KEY)
+        emit("error", describe_run_error(exc))
         return 1
+
+
+def describe_run_error(exc: BaseException) -> str:
+    """Turns an exception into a short message for the error alert and run history."""
+    try:
+        import openai
+    except ImportError:  # pragma: no cover - openai is a hard dependency of the run path
+        openai = None
+
+    if openai is not None:
+        if isinstance(exc, openai.AuthenticationError):
+            return "OpenAI rejected your API key. Set a valid key in Settings, then try again."
+        if isinstance(exc, openai.PermissionDeniedError):
+            return "Your OpenAI API key doesn't have access to this model. Check your OpenAI project settings."
+        if isinstance(exc, openai.RateLimitError):
+            if _openai_error_code(exc) == "insufficient_quota":
+                return "Your OpenAI account is out of credits. Add billing at platform.openai.com, then try again."
+            return "OpenAI is rate limiting requests right now. Wait a minute, then try again."
+        if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
+            return "Couldn't reach OpenAI. Check your internet connection, then try again."
+        if isinstance(exc, openai.APIStatusError):
+            detail = _openai_error_message(exc)
+            return f"OpenAI returned an error ({exc.status_code}): {detail}" if detail else f"OpenAI returned an error ({exc.status_code})."
+
+    message = str(exc).strip() or type(exc).__name__
+    return message
+
+
+def _is_api_key_error(exc: BaseException) -> bool:
+    try:
+        import openai
+    except ImportError:
+        return False
+    return isinstance(exc, openai.AuthenticationError)
+
+
+def _openai_error_body(exc: BaseException) -> dict:
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        return body["error"]
+    return body if isinstance(body, dict) else {}
+
+
+def _openai_error_code(exc: BaseException) -> str:
+    return str(getattr(exc, "code", None) or _openai_error_body(exc).get("code") or "")
+
+
+def _openai_error_message(exc: BaseException) -> str:
+    message = _openai_error_body(exc).get("message")
+    return str(message).strip() if message else ""
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bridge backend for Lecture Transcribe native macOS UI.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("key-status", help="Get API key availability status.")
+    key_status = sub.add_parser("key-status", help="Get API key availability status.")
+    key_status.add_argument("--verify", action="store_true", help="Also check the key with OpenAI.")
 
     set_key = sub.add_parser("set-key", help="Set and optionally save an OpenAI API key.")
     set_key.add_argument("--key", help="API key value. Omit to read the key from stdin.")
     set_key.add_argument("--save", action="store_true", help="Persist to system keychain.")
+    set_key.add_argument("--skip-check", action="store_true", help="Don't check the key with OpenAI first.")
 
     run = sub.add_parser("run", help="Run a transcription job.")
     run.add_argument("--input", required=True, help="Input media file path.")

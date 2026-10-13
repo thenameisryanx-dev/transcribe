@@ -7,6 +7,8 @@ enum BackendStreamEvent: Sendable {
     case progress(Double)
     case done(String)
     case error(String)
+    /// The run failed because the API key is missing or OpenAI rejected it.
+    case apiKeyProblem
 }
 
 final class BackendClient: @unchecked Sendable {
@@ -157,8 +159,9 @@ final class BackendClient: @unchecked Sendable {
         )
     }
 
-    func fetchAPIKeyStatus() async throws -> String {
-        let output = try runSimpleCommand(["key-status"])
+    /// With `verify`, the backend also asks OpenAI whether the key works.
+    func fetchAPIKeyStatus(verify: Bool = false) async throws -> String {
+        let output = try runSimpleCommand(verify ? ["key-status", "--verify"] : ["key-status"])
         guard let value = output["status"] as? String else {
             throw BackendError.invalidResponse("Could not parse API key status response.")
         }
@@ -303,6 +306,10 @@ final class BackendClient: @unchecked Sendable {
                     onEvent(.done(String(describing: object["payload"] ?? "")))
                 case "error":
                     onEvent(.error(String(describing: object["payload"] ?? "")))
+                case "error_kind":
+                    if (object["payload"] as? String) == "api_key" {
+                        onEvent(.apiKeyProblem)
+                    }
                 default:
                     break
                 }

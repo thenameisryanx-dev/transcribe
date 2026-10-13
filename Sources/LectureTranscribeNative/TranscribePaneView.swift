@@ -177,7 +177,11 @@ struct TranscribePaneView: View {
 
     private var needsAPIKey: Bool {
         let status = viewModel.apiKeyStatusText.lowercased()
-        return status.contains("required") || status.contains("unknown")
+        return viewModel.apiKeyNeedsAttention || status.contains("unknown")
+    }
+
+    private var apiKeyWasRejected: Bool {
+        viewModel.apiKeyStatusText.lowercased().contains("rejected")
     }
 
     private var windowSubtitle: String {
@@ -194,9 +198,11 @@ struct TranscribePaneView: View {
                     .font(.title2)
                     .foregroundStyle(.orange)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Add your OpenAI API key")
+                    Text(apiKeyWasRejected ? "Your OpenAI API key isn't working" : "Add your OpenAI API key")
                         .font(.headline)
-                    Text("Transcription needs a key. You can also manage it in Settings.")
+                    Text(apiKeyWasRejected
+                        ? "OpenAI didn't accept the saved key. Enter a new one to transcribe."
+                        : "Transcription needs a key. You can also manage it in Settings.")
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 12)
@@ -371,7 +377,6 @@ struct TranscribePaneView: View {
             )
             .font(.caption)
             .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
 
             if !viewModel.isContextAvailable {
                 Text("Context isn't used with speaker labels.")
@@ -641,17 +646,35 @@ struct APIKeySheetView: View {
             Text("Set OpenAI API Key")
                 .font(.title3.weight(.semibold))
 
+            if let reason = viewModel.apiKeySheetReason {
+                Label(reason, systemImage: "exclamationmark.triangle.fill")
+                    .symbolRenderingMode(.multicolor)
+            }
+
             Text("Enter a key that starts with \"sk-\". You can save it securely in macOS Keychain.")
                 .foregroundStyle(.secondary)
 
             SecureField("sk-...", text: $viewModel.pendingAPIKey)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityLabel("OpenAI API key")
+                .disabled(viewModel.isCheckingAPIKey)
+
+            if let entryError = viewModel.apiKeyEntryError {
+                Text(entryError)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
 
             Toggle("Save in system keychain", isOn: $viewModel.saveAPIKeyToKeychain)
                 .toggleStyle(.checkbox)
 
             HStack {
+                if viewModel.isCheckingAPIKey {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Checking key with OpenAI…")
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Cancel", role: .cancel) {
                     viewModel.dismissAPIKeySheet()
@@ -663,7 +686,10 @@ struct APIKeySheetView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(viewModel.pendingAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    viewModel.isCheckingAPIKey
+                        || viewModel.pendingAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
             }
         }
     }
