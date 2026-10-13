@@ -191,12 +191,20 @@ final class BackendClient: @unchecked Sendable {
         diarize: Bool,
         model: String,
         languages: [String] = [],
+        context: String = "",
+        carryContext: Bool = false,
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
     ) async throws {
         var args = ["run", "--input", inputPath, "--output", outputDirectory]
         args.append(contentsOf: ["--model", model])
         if !languages.isEmpty {
             args.append(contentsOf: ["--languages", languages.joined(separator: ",")])
+        }
+        if !context.isEmpty {
+            args.append(contentsOf: ["--context", context])
+        }
+        if carryContext {
+            args.append("--carry-context")
         }
         if diarize {
             args.append("--diarize")

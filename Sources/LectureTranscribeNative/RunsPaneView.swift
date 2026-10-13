@@ -392,6 +392,20 @@ private struct RunDetailView: View {
                         Text(TranscriptionModel(rawValue: rawModel)?.displayName ?? rawModel)
                     }
                 }
+
+                if let context = entry.context {
+                    LabeledContent("Context") {
+                        Text(context)
+                            .textSelection(.enabled)
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
+
+                if entry.consistencyMode == true {
+                    LabeledContent("Consistency Mode") {
+                        Text("On")
+                    }
+                }
             }
 
             Section("Files") {

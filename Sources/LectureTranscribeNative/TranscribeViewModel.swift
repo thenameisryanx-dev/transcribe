@@ -49,6 +49,12 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
         self != .gpt4oMiniTranscribe
     }
 
+    /// Carrying the previous chunk's excerpt helped GPT Transcribe in testing, but made the GPT-4o models
+    /// loop or invent text at chunk ends.
+    var supportsConsistencyMode: Bool {
+        self == .gptTranscribe
+    }
+
     /// GPT Transcribe drops speech without a language list, so it falls back to English when none is set.
     /// The other models auto-detect when no language is set.
     var requiresSpokenLanguages: Bool {
@@ -104,6 +110,10 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             // A different recording starts a fresh draft, so results from the previous
             // file no longer drive the toolbar's primary action.
             guard oldValue != audioFilePath, !isRunning else { return }
+            // Context describes one recording; keep it while choosing a file, but not for the next lecture.
+            if completedAudioFilePath != nil {
+                contextPrompt = ""
+            }
             resetRunResult()
         }
     }
@@ -127,6 +137,25 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         didSet {
             guard oldValue != spokenLanguage else { return }
             UserDefaults.standard.set(spokenLanguage, forKey: Self.spokenLanguageDefaultsKey)
+        }
+    }
+    /// Description of the current recording, sent as the prompt with every chunk; empty sends no prompt.
+    /// Belongs to the draft: cleared by Clear Draft and when a new file follows a finished run.
+    @Published var contextPrompt = ""
+    /// Contexts from earlier runs, most recent first, offered in the Recent menu.
+    @Published private(set) var recentContextPrompts: [String] {
+        didSet {
+            UserDefaults.standard.set(recentContextPrompts, forKey: Self.recentContextPromptsDefaultsKey)
+        }
+    }
+    /// Consistency mode: transcribe chunks in order, adding the end of each chunk's transcript to the
+    /// next chunk's prompt. Slower, so it's a remembered preference rather than on by default.
+    /// Only GPT Transcribe uses it (see `supportsConsistencyMode`); the stored choice is kept when
+    /// another model is selected so switching back restores it.
+    @Published var consistencyModeEnabled: Bool {
+        didSet {
+            guard oldValue != consistencyModeEnabled else { return }
+            UserDefaults.standard.set(consistencyModeEnabled, forKey: Self.consistencyModeDefaultsKey)
         }
     }
     @Published var diarizeEnabled = false {
@@ -166,6 +195,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private static let outputFolderDefaultsKey = "outputFolderPath"
     // Keeps the older key so a language chosen before the dropdown carries over.
     private static let spokenLanguageDefaultsKey = "spokenLanguages"
+    private static let recentContextPromptsDefaultsKey = "recentContextPrompts"
+    private static let consistencyModeDefaultsKey = "consistencyMode"
     private let defaultOutputFolderPath: String
     private var runTask: Task<Void, Never>?
     private var cancellationRequested = false
@@ -189,6 +220,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         spokenLanguage = SpokenLanguage.normalizedCode(
             UserDefaults.standard.string(forKey: Self.spokenLanguageDefaultsKey)
         )
+        recentContextPrompts = UserDefaults.standard.stringArray(forKey: Self.recentContextPromptsDefaultsKey) ?? []
+        consistencyModeEnabled = UserDefaults.standard.bool(forKey: Self.consistencyModeDefaultsKey)
         if let rawModel = UserDefaults.standard.string(forKey: Self.selectedModelDefaultsKey),
            let storedModel = TranscriptionModel(rawValue: rawModel)
         {
@@ -236,6 +269,19 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
     var spokenLanguageSummary: String {
         SpokenLanguage(code: effectiveSpokenLanguage).displayName
+    }
+
+    var trimmedContextPrompt: String {
+        contextPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The diarize model doesn't accept a prompt, so context and consistency mode don't apply.
+    var isContextAvailable: Bool {
+        !diarizeEnabled
+    }
+
+    var isConsistencyModeAvailable: Bool {
+        isContextAvailable && selectedTranscriptionModel.supportsConsistencyMode
     }
 
     var isDiarizationAvailable: Bool {
@@ -514,7 +560,19 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             diarizeEnabled = shouldDiarize
         }
         let model = selectedTranscriptionModel
-        beginHistoryEntry(inputPath: trimmedPath, outputDirectory: normalizedOutputDirectory, diarize: shouldDiarize, model: model)
+        let context = shouldDiarize ? "" : trimmedContextPrompt
+        let carryContext = !shouldDiarize && consistencyModeEnabled && model.supportsConsistencyMode
+        if !context.isEmpty {
+            recentContextPrompts = RecentContextPrompts.adding(context, to: recentContextPrompts)
+        }
+        beginHistoryEntry(
+            inputPath: trimmedPath,
+            outputDirectory: normalizedOutputDirectory,
+            diarize: shouldDiarize,
+            model: model,
+            context: context,
+            consistencyMode: carryContext
+        )
 
         runTask = Task { [weak self] in
             guard let self else { return }
@@ -535,7 +593,9 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
                     outputDirectory: normalizedOutputDirectory,
                     diarize: shouldDiarize,
                     model: model.rawValue,
-                    languages: languages
+                    languages: languages,
+                    context: context,
+                    carryContext: carryContext
                 ) { event in
                     eventContinuation.yield(event)
                 }
@@ -639,6 +699,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         // Reset run-scoped fields while preserving API key state, options, and history.
         cancellationRequested = false
         audioFilePath = ""
+        contextPrompt = ""
         statusText = "Ready"
         progressValue = 0
         logText = ""
@@ -743,7 +804,14 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func beginHistoryEntry(inputPath: String, outputDirectory: String, diarize: Bool, model: TranscriptionModel) {
+    private func beginHistoryEntry(
+        inputPath: String,
+        outputDirectory: String,
+        diarize: Bool,
+        model: TranscriptionModel,
+        context: String,
+        consistencyMode: Bool
+    ) {
         let entry = TranscriptionHistoryEntry(
             id: UUID(),
             startedAt: Date(),
@@ -754,7 +822,9 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             diarize: diarize,
             status: .running,
             errorMessage: nil,
-            model: model.rawValue
+            model: model.rawValue,
+            context: context.isEmpty ? nil : context,
+            consistencyMode: consistencyMode
         )
 
         activeHistoryEntryID = entry.id
@@ -809,5 +879,23 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
     private static func sortHistoryEntriesNewestFirst(_ lhs: TranscriptionHistoryEntry, _ rhs: TranscriptionHistoryEntry) -> Bool {
         lhs.startedAt > rhs.startedAt
+    }
+}
+
+enum RecentContextPrompts {
+    static let limit = 10
+
+    /// Puts `context` first, dropping an identical earlier copy and anything past `limit`.
+    static func adding(_ context: String, to recent: [String]) -> [String] {
+        let trimmed = context.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return recent }
+        return Array(([trimmed] + recent.filter { $0 != trimmed }).prefix(limit))
+    }
+
+    /// A one-line label for the Recent menu.
+    static func menuTitle(for context: String, maxLength: Int = 60) -> String {
+        let oneLine = context.split(whereSeparator: \.isNewline).joined(separator: " ")
+        guard oneLine.count > maxLength else { return oneLine }
+        return String(oneLine.prefix(maxLength - 1)).trimmingCharacters(in: .whitespaces) + "…"
     }
 }

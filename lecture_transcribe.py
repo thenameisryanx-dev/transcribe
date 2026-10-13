@@ -37,6 +37,20 @@ DEFAULT_LANGUAGES = ["en"]
 GPT_TRANSCRIBE_RETRIES = 2           # extra attempts (same model) when a chunk's output fails a check
 MAX_PLAUSIBLE_WORDS_PER_MINUTE = 350 # faster than anyone speaks; more means the model repeated itself
 
+# Repeated-passage check (every model). Models occasionally loop and transcribe a stretch twice, which
+# the words-per-minute check misses when the chunk was only partly repeated. Short repeats are normal
+# speech ("Almost there. Almost there."); only a long run of mostly repeated wording is flagged.
+REPEAT_PHRASE_WORDS = 8             # wording is compared in overlapping phrases of this many words
+REPEAT_MIN_WORDS = 50               # shortest repeated passage that is flagged
+REPEAT_MATCH_SHARE = 0.7            # share of a passage's phrases that must repeat (allows small differences)
+
+# Context prompt. The user's description of the recording goes with every chunk; when context is
+# carried between chunks, the end of the previous chunk's transcript is added so sentences and names
+# that cross a cut stay consistent. The diarize model doesn't accept a prompt.
+PROMPT_MODELS = {MODEL_GPT_TRANSCRIBE, MODEL_NORMAL, MODEL_MINI}
+CONTEXT_TAIL_CHARS = 300            # how much of the previous chunk's transcript is carried over
+ECHO_MIN_WORDS = 4                  # shortest repeat of that excerpt removed from the next chunk's start
+
 # API request behavior
 API_TIMEOUT_SECONDS = 20 * 60       # per-request timeout (seconds)
 MAX_TRANSCRIBE_RETRIES = 4          # retries for transient API/network errors
@@ -45,6 +59,10 @@ DIARIZE_INCLUDE_TIMESTAMPS = False  # keep diarized output cleaner for lecture n
 
 # Chunk encoding (robust for "any random audio file")
 AUDIO_BITRATE = "128k"
+# Re-encoded audio is downmixed to mono: speech models use one channel, and surround sources keep
+# dialogue in the center channel, which can get lost when the API receives unlabeled 5.1 audio.
+AUDIO_CHANNELS = "1"
+MAX_COPY_CHANNELS = 2               # sources with more channels are always re-encoded, never copied
 
 # Chunk boundaries move back to the quietest moment in the stretch before each cut, so a
 # sentence isn't sliced in half (the model can't transcribe half a word on either side).
@@ -509,6 +527,30 @@ def _copied_m4a_chunk_is_transcribable(path: Path) -> bool:
         return False
 
 
+def audio_channel_count(path: Path) -> int | None:
+    """Channels in the first audio stream, or None if ffprobe can't tell."""
+    try:
+        r = subprocess.run(
+            [
+                *ffprobe_cmd_prefix(),
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=channels",
+                "-of", "default=nk=1:nw=1",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            # ffprobe has no -nostdin flag (it made every call fail); keep it off stdin this way instead.
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+        return int(str(r.stdout or "").strip().splitlines()[0])
+    except Exception:
+        return None
+
+
 def _quietest_point(input_path: Path, window_start: float, window_seconds: float) -> float | None:
     """
     Return the absolute time of the quietest ~0.5s inside [window_start, window_start + window_seconds],
@@ -589,7 +631,8 @@ def plan_chunk_cuts(input_path: Path, chunk_seconds: int) -> list[float]:
 def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds: int) -> list[Path]:
     """
     Split input into pieces of at most chunk_seconds, cutting at pauses (see plan_chunk_cuts).
-    First tries stream copy (no quality loss). Falls back to AAC re-encode for robustness.
+    Mono/stereo AAC is stream-copied (no quality loss); anything else, including surround audio,
+    is re-encoded to mono AAC.
     """
     run_chunks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -602,28 +645,30 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
     for old in run_chunks_dir.glob("part_*.m4a"):
         old.unlink()
 
-    copy_cmd = [
-        *ffmpeg_cmd_prefix(),
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", str(input_path),
-        "-vn",
-        "-f", "segment",
-        *segment_args,
-        "-reset_timestamps", "1",
-        "-map", "0:a:0",
-        "-c:a", "copy",
-        str(run_chunks_dir / "part_%03d.m4a"),
-    ]
-    try:
-        subprocess.run(copy_cmd, check=True, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
-    except Exception:
-        pass
+    channels = audio_channel_count(input_path)
+    if channels is None or channels <= MAX_COPY_CHANNELS:
+        copy_cmd = [
+            *ffmpeg_cmd_prefix(),
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", str(input_path),
+            "-vn",
+            "-f", "segment",
+            *segment_args,
+            "-reset_timestamps", "1",
+            "-map", "0:a:0",
+            "-c:a", "copy",
+            str(run_chunks_dir / "part_%03d.m4a"),
+        ]
+        try:
+            subprocess.run(copy_cmd, check=True, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
+        except Exception:
+            pass
 
-    parts = sorted(run_chunks_dir.glob("part_*.m4a"))
-    if parts and all(_copied_m4a_chunk_is_transcribable(p) for p in parts[: min(2, len(parts))]):
-        return parts
+        parts = sorted(run_chunks_dir.glob("part_*.m4a"))
+        if parts and all(_copied_m4a_chunk_is_transcribable(p) for p in parts[: min(2, len(parts))]):
+            return parts
 
     for old in run_chunks_dir.glob("part_*.m4a"):
         old.unlink()
@@ -640,6 +685,7 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
         "-reset_timestamps", "1",
         "-map", "0:a:0",
         "-c:a", "aac",
+        "-ac", AUDIO_CHANNELS,
         "-b:a", AUDIO_BITRATE,
         str(run_chunks_dir / "part_%03d.m4a"),
     ]
@@ -710,6 +756,35 @@ def convert_qta_to_m4a_copy(input_path: Path, run_id: str) -> Path:
     return out_path
 
 
+def downmix_to_mono_m4a(input_path: Path, output_path: Path) -> Path:
+    """Write the first audio stream of input_path as mono AAC .m4a (used for surround sources)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        *ffmpeg_cmd_prefix(),
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-i", str(input_path),
+        "-vn",
+        "-map", "0:a:0",
+        "-c:a", "aac",
+        "-ac", AUDIO_CHANNELS,
+        "-b:a", AUDIO_BITRATE,
+        str(output_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        raise SystemExit("Timed out mixing surround audio down to mono.") from None
+    except Exception as exc:
+        raise SystemExit(f"Could not mix surround audio down to mono: {exc}") from None
+
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise SystemExit("Mixing surround audio down to mono produced no audio.")
+    return output_path
+
+
 def repair_audio_for_api(input_path: Path) -> Path:
     """
     Re-encode an audio chunk to AAC .m4a if the API rejects the original bytes.
@@ -726,6 +801,7 @@ def repair_audio_for_api(input_path: Path) -> Path:
         "-i", str(input_path),
         "-vn",
         "-c:a", "aac",
+        "-ac", AUDIO_CHANNELS,
         "-b:a", AUDIO_BITRATE,
         str(repaired_path),
     ]
@@ -803,44 +879,185 @@ def _looks_repeated(text: str, duration_seconds: float) -> bool:
     return words > max(50.0, MAX_PLAUSIBLE_WORDS_PER_MINUTE * duration_seconds / 60.0)
 
 
+def find_repeated_passage(text: str) -> tuple[int, str] | None:
+    """
+    Find the longest passage of at least REPEAT_MIN_WORDS words that mostly repeats earlier wording
+    in `text`. Returns (approximate length in words, its opening words) or None.
+    """
+    words = text.split()
+    keys = [_word_key(w) for w in words]
+    n = REPEAT_PHRASE_WORDS
+    if len(keys) < REPEAT_MIN_WORDS + n:
+        return None
+
+    # repeated[i]: the phrase starting at word i already appeared earlier, without overlapping itself.
+    first_seen: dict[tuple[str, ...], int] = {}
+    repeated = [False] * len(keys)
+    for i in range(len(keys) - n + 1):
+        phrase = tuple(keys[i : i + n])
+        earlier = first_seen.setdefault(phrase, i)
+        if earlier + n <= i:
+            repeated[i] = True
+
+    # Slide a REPEAT_MIN_WORDS window and merge windows where enough phrases repeat into passages.
+    window = REPEAT_MIN_WORDS
+    needed = REPEAT_MATCH_SHARE * window
+    count = sum(repeated[:window])
+    best: tuple[int, int] | None = None
+    start = end = -1
+    for i in range(len(keys) - window + 1):
+        if i > 0:
+            count += repeated[i + window - 1] - repeated[i - 1]
+        if count >= needed:
+            if i > end:
+                start = i
+            end = i + window
+            if best is None or end - start > best[1] - best[0]:
+                best = (start, end)
+    if best is None:
+        return None
+    first = next(i for i in range(best[0], best[1]) if repeated[i])
+    opening = " ".join(words[first : first + 8])
+    return best[1] - first, opening
+
+
+def build_chunk_prompt(context: str | None, previous_tail: str | None) -> str | None:
+    """The prompt for one chunk: the user's context, then the previous chunk's closing words if any."""
+    parts = []
+    if context and context.strip():
+        parts.append(context.strip())
+    if previous_tail:
+        parts.append(f'The recording begins right after this transcript excerpt:\n"…{previous_tail}"')
+    return "\n\n".join(parts) or None
+
+
+def transcript_tail(text: str, max_chars: int = CONTEXT_TAIL_CHARS) -> str:
+    """The last whole sentences of `text` that fit in `max_chars`, or the end of one long sentence."""
+    tail: list[str] = []
+    length = 0
+    for sentence in reversed(sentence_lines(text)):
+        if tail and length + 1 + len(sentence) > max_chars:
+            break
+        tail.insert(0, sentence)
+        length += len(sentence) + (1 if length else 0)
+    joined = " ".join(tail)
+    if len(joined) > max_chars:
+        # A single sentence longer than the limit: keep its end, starting at a word boundary.
+        cut = joined[-max_chars:]
+        space = cut.find(" ")
+        joined = cut[space + 1:] if 0 <= space < len(cut) - 1 else cut
+    return joined
+
+
+def _word_key(word: str) -> str:
+    return re.sub(r"[^\w]", "", word.casefold())
+
+
+def strip_echoed_tail(text: str, tail: str) -> tuple[str, int]:
+    """
+    Remove the previous chunk's closing words if the model repeated them at the start of `text`.
+    Returns (text, number of words removed). Short overlaps are left alone, since a speaker can
+    genuinely say the same couple of words again.
+    """
+    words = text.split()
+    keys = [_word_key(w) for w in words]
+    tail_keys = [_word_key(w) for w in tail.split()]
+    for n in range(min(len(tail_keys), len(words)), ECHO_MIN_WORDS - 1, -1):
+        if keys[:n] == tail_keys[-n:]:
+            return " ".join(words[n:]), n
+    return text, 0
+
+
+def _log_chunk_prompt(log: Callable[[str], None], chunk_path: Path, prompt: str | None) -> None:
+    if prompt:
+        log(f"Prompt for {chunk_path.name}:\n{prompt}")
+    else:
+        log(f"Prompt for {chunk_path.name}: (none)")
+
+
+def _remove_echo(
+    text: str, previous_tail: str | None, chunk_path: Path, log: Callable[[str], None]
+) -> str:
+    if not previous_tail:
+        return text
+    stripped, removed = strip_echoed_tail(text, previous_tail)
+    if removed:
+        log(f"{chunk_path.name}: removed {removed} word(s) at the start that repeated the previous chunk's excerpt.")
+    return stripped
+
+
+def _chunk_check_failure(text: str, chunk_path: Path, model: str) -> str | None:
+    """Why a chunk's transcript looks wrong, or None if it passes."""
+    if model == MODEL_GPT_TRANSCRIBE:
+        if not text:
+            return f"{chunk_path.name}: {model} returned no text"
+        if _looks_repeated(text, get_duration_seconds(chunk_path)):
+            return (
+                f"{chunk_path.name}: {model} returned {len(text.split())} words, "
+                "more than could be spoken in this chunk (likely repeated text)"
+            )
+    repeat = find_repeated_passage(text)
+    if repeat:
+        length, opening = repeat
+        return (
+            f'{chunk_path.name}: {model} repeated a passage of about {length} words, '
+            f'starting "{opening}…" (check this part of the transcript)'
+        )
+    return None
+
+
 def transcribe_chunk_checked(
     client: OpenAI,
     chunk_path: Path,
     *,
     model: str,
     languages: list[str] | None = None,
+    context: str | None = None,
+    previous_tail: str | None = None,
     on_log: Callable[[str], None] | None = None,
 ) -> tuple[str, str | None]:
     """
     Transcribe one chunk and return (text, warning or None). Always uses the selected model.
-    gpt-transcribe output is checked; empty or implausibly long results are retried with gpt-transcribe,
-    and a warning is returned if the last attempt still fails the check.
+    Every model's output is checked for a repeated passage; gpt-transcribe output is also checked for
+    empty or implausibly long results. A failed check is retried with the same model, and if the last
+    attempt still fails, its text is kept and a warning is returned.
+    `context` and `previous_tail` form the prompt; retries after a failed check drop `previous_tail`
+    so the carried-over excerpt can't cause the same failure twice.
     """
-    if model != MODEL_GPT_TRANSCRIBE:
-        return transcribe_chunk_text(client, chunk_path, model=model, languages=languages, on_log=on_log), None
-
     log = on_log or (lambda _message: None)
+    prompting = context is not None or previous_tail is not None
+    prompt = build_chunk_prompt(context, previous_tail)
+    if prompting:
+        _log_chunk_prompt(log, chunk_path, prompt)
+
     attempts = 1 + GPT_TRANSCRIBE_RETRIES
     warning = None
     text = ""
+    tail = previous_tail
     for attempt in range(1, attempts + 1):
-        resp = create_transcription_with_retry(
-            client,
-            chunk_path,
-            model=MODEL_GPT_TRANSCRIBE,
-            response_format="json",
-            languages=languages or DEFAULT_LANGUAGES,
-            on_log=on_log,
-        )
-        text = extract_transcription_text(resp).strip()
-        if not text:
-            warning = f"{chunk_path.name}: {MODEL_GPT_TRANSCRIBE} returned no text"
-        elif _looks_repeated(text, get_duration_seconds(chunk_path)):
-            warning = (
-                f"{chunk_path.name}: {MODEL_GPT_TRANSCRIBE} returned {len(text.split())} words, "
-                "more than could be spoken in this chunk (likely repeated text)"
+        if attempt > 1 and tail:
+            tail = None
+            prompt = build_chunk_prompt(context, None)
+            log(f"Retrying {chunk_path.name} without the previous chunk's excerpt.")
+            _log_chunk_prompt(log, chunk_path, prompt)
+        if model == MODEL_GPT_TRANSCRIBE:
+            resp = create_transcription_with_retry(
+                client,
+                chunk_path,
+                model=MODEL_GPT_TRANSCRIBE,
+                response_format="json",
+                languages=languages or DEFAULT_LANGUAGES,
+                prompt=prompt,
+                on_log=on_log,
             )
+            raw_text = extract_transcription_text(resp).strip()
         else:
+            raw_text = transcribe_chunk_text(
+                client, chunk_path, model=model, languages=languages, prompt=prompt, on_log=on_log
+            )
+        text = _remove_echo(raw_text, tail, chunk_path, log)
+        warning = _chunk_check_failure(text, chunk_path, model)
+        if warning is None:
             return text, None
         log(f"{warning} (attempt {attempt}/{attempts}).")
 
@@ -853,6 +1070,7 @@ def transcribe_chunk_text(
     *,
     model: str = MODEL_NORMAL,
     languages: list[str] | None = None,
+    prompt: str | None = None,
     on_log: Callable[[str], None] | None = None,
 ) -> str:
     text = create_transcription_with_retry(
@@ -861,6 +1079,7 @@ def transcribe_chunk_text(
         model=model,
         response_format="text",
         languages=languages,
+        prompt=prompt,
         on_log=on_log,
     )
     return str(text)
@@ -900,6 +1119,7 @@ def create_transcription_with_retry(
     response_format: str,
     chunking_strategy: str | None = None,
     languages: list[str] | None = None,
+    prompt: str | None = None,
     on_log: Callable[[str], None] | None = None,
 ):
     log = on_log or (lambda _message: None)
@@ -924,6 +1144,8 @@ def create_transcription_with_retry(
                     kwargs["language"] = language
                 if chunking_strategy is not None:
                     kwargs["chunking_strategy"] = chunking_strategy
+                if prompt and model in PROMPT_MODELS:
+                    kwargs["prompt"] = prompt
 
                 try:
                     return client.audio.transcriptions.create(**kwargs)
@@ -938,6 +1160,11 @@ def create_transcription_with_retry(
                         continue
 
                     if attempt == MAX_TRANSCRIBE_RETRIES or not is_retryable_transcription_error(e):
+                        if "prompt" in kwargs and "prompt" in str(e).lower():
+                            log(
+                                f"The API rejected the prompt for {active_audio_path.name} "
+                                f"({len(prompt or '')} characters). Try a shorter Context in Settings."
+                            )
                         raise
 
                     delay = RETRY_BASE_SECONDS * (2 ** (attempt - 1))
