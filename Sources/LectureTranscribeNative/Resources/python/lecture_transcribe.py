@@ -7,6 +7,7 @@ import time
 import shutil
 import subprocess
 import platform
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -64,12 +65,18 @@ AUDIO_BITRATE = "128k"
 # dialogue in the center channel, which can get lost when the API receives unlabeled 5.1 audio.
 AUDIO_CHANNELS = "1"
 MAX_COPY_CHANNELS = 2               # sources with more channels are always re-encoded, never copied
+# The API rejects uploads over 25 MB. Copied chunks keep the source bitrate, so any bigger than this
+# are re-encoded instead (mono 128k AAC stays under it for every chunk length used here).
+MAX_UPLOAD_BYTES = 24 * 1024 * 1024
 
 # Chunk boundaries move back to the quietest moment in the stretch before each cut, so a
 # sentence isn't sliced in half (the model can't transcribe half a word on either side).
 SPLIT_SEARCH_SECONDS = 60           # how far back from each nominal cut to look for a pause
 SPLIT_FRAME_SECONDS = 0.1           # loudness is measured per frame of this length
 SPLIT_PAUSE_FRAMES = 5              # frames averaged together, so the cut lands in a ~0.5s pause
+# Share of split_audio_to_chunks' reported progress spent finding pauses; ffmpeg writing chunks gets the
+# rest. On a 21-minute surround episode finding pauses took 0.6s and converting and splitting 6.3s.
+SPLIT_PLAN_SHARE = 0.1
 
 # Cleanup chunk files after successful run
 CLEANUP_CHUNKS = True
@@ -399,11 +406,20 @@ def safe_stem_from_path(p: Path) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", p.stem)
 
 
+# Where one sentence ends and the next begins. Besides punctuation followed by a space, this breaks where
+# the model left the space out ("why not?What if"). It never breaks after a title ("Dr. Doom") or before a
+# lowercase word ("U.S.A. is"), since neither starts a new sentence.
+SENTENCE_BREAK = re.compile(
+    r"(?<!\bMr\.)(?<!\bMrs\.)(?<!\bMs\.)(?<!\bDr\.)(?<!\bSt\.)(?<!\bJr\.)(?<!\bProf\.)"
+    r"(?:(?<=[.!?])\s+(?![a-z])|(?<=[a-z0-9][.!?])(?=[A-Z])|(?<=[a-z0-9]\.\.\.)(?=[A-Z]))"
+)
+
+
 def sentence_lines(text: str) -> list[str]:
     cleaned = " ".join(str(text or "").split())
     if not cleaned:
         return []
-    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", cleaned) if s.strip()]
+    return [s.strip() for s in SENTENCE_BREAK.split(cleaned) if s.strip()]
 
 
 def extract_transcription_text(resp: Any) -> str:
@@ -472,8 +488,11 @@ def build_transcript_header(
     local_chunk_seconds: int | None = None,
     duration_seconds: float | None = None,
     languages: list[str] | None = None,
+    context: str | None = None,
+    consistency_mode: bool | None = None,
     chunk_warnings: list[str] | None = None,
 ) -> str:
+    """context: the prompt sent with each chunk ("" if none); None leaves the line out (e.g. speaker labels)."""
     lines = [
         f"INPUT: {input_path}",
         f"WORKING_INPUT: {working_input_path}",
@@ -489,6 +508,11 @@ def build_transcript_header(
         lines.append(f"DURATION_SECONDS: {duration_seconds:.3f}")
     if languages:
         lines.append(f"LANGUAGES: {', '.join(languages)}")
+    if context is not None:
+        # One line, so a multi-line context can't push the header into the transcript.
+        lines.append(f"CONTEXT: {' '.join(context.split()) or 'none'}")
+    if consistency_mode is not None:
+        lines.append(f"CONSISTENCY_MODE: {'on' if consistency_mode else 'off'}")
     for warning in chunk_warnings or []:
         lines.append(f"WARNING: {warning}")
     return "\n".join(lines) + "\n\n"
@@ -519,10 +543,8 @@ def get_duration_seconds(path: Path) -> float:
         return -1.0
 
 
-def _copied_m4a_chunk_is_transcribable(path: Path) -> bool:
-    """
-    Stream-copying into .m4a is only safe when the resulting audio stream is AAC.
-    """
+def audio_codec_name(path: Path) -> str | None:
+    """Codec of the first audio stream (e.g. "aac", "mp3"), or None if ffprobe can't tell."""
     try:
         r = subprocess.run(
             [
@@ -540,10 +562,16 @@ def _copied_m4a_chunk_is_transcribable(path: Path) -> bool:
             stdin=subprocess.DEVNULL,
             timeout=30,
         )
-        codec_name = str(r.stdout or "").strip().lower()
-        return codec_name == "aac"
+        return str(r.stdout or "").strip().lower() or None
     except Exception:
-        return False
+        return None
+
+
+def _copied_m4a_chunk_is_transcribable(path: Path) -> bool:
+    """
+    Stream-copying into .m4a is only safe when the resulting audio stream is AAC.
+    """
+    return audio_codec_name(path) == "aac"
 
 
 def audio_channel_count(path: Path) -> int | None:
@@ -624,10 +652,15 @@ def _quietest_point(input_path: Path, window_start: float, window_seconds: float
     return window_start + (best_index + SPLIT_PAUSE_FRAMES / 2) * SPLIT_FRAME_SECONDS
 
 
-def plan_chunk_cuts(input_path: Path, chunk_seconds: int) -> list[float]:
+def plan_chunk_cuts(
+    input_path: Path,
+    chunk_seconds: int,
+    on_progress: Callable[[float], None] | None = None,
+) -> list[float]:
     """
     Cut times (seconds) for splitting into chunks of at most chunk_seconds, each moved back to the
     quietest moment before the nominal cut. Empty when the audio fits in one chunk or its length is unknown.
+    on_progress receives the share of the audio planned so far (0 to 1).
     """
     total = get_duration_seconds(input_path)
     if total <= chunk_seconds:
@@ -644,18 +677,89 @@ def plan_chunk_cuts(input_path: Path, chunk_seconds: int) -> list[float]:
             cut = target
         cuts.append(cut)
         previous = cut
+        if on_progress:
+            on_progress(previous / total)
     return cuts
 
 
-def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds: int) -> list[Path]:
+def _run_ffmpeg_with_progress(
+    cmd: list[str],
+    total_seconds: float,
+    on_progress: Callable[[float], None] | None,
+    *,
+    quiet: bool = False,
+) -> None:
+    """
+    Run an ffmpeg command that includes `-progress pipe:1`, passing the share of the input processed so
+    far (0 to 1) to on_progress. Raises like subprocess.run(cmd, check=True, timeout=...). quiet hides
+    ffmpeg's error output.
+    """
+    timed_out = threading.Event()
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL if quiet else None,
+        text=True,
+        errors="replace",
+    ) as proc:
+
+        def kill_after_timeout() -> None:
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(MEDIA_PROCESS_TIMEOUT_SECONDS, kill_after_timeout)
+        timer.start()
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                # out_time_us is the position reached in the input; it keeps counting across segments.
+                if on_progress and total_seconds > 0 and line.startswith("out_time_us="):
+                    try:
+                        done_seconds = int(line.split("=", 1)[1]) / 1_000_000
+                    except ValueError:
+                        continue  # "N/A" until the first audio is written
+                    on_progress(min(max(done_seconds / total_seconds, 0.0), 1.0))
+            proc.wait()
+        except BaseException:
+            proc.kill()
+            raise
+        finally:
+            timer.cancel()
+    if timed_out.is_set():
+        raise subprocess.TimeoutExpired(cmd, MEDIA_PROCESS_TIMEOUT_SECONDS)
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+
+
+def split_audio_to_chunks(
+    input_path: Path,
+    run_chunks_dir: Path,
+    chunk_seconds: int,
+    on_progress: Callable[[float], None] | None = None,
+) -> list[Path]:
     """
     Split input into pieces of at most chunk_seconds, cutting at pauses (see plan_chunk_cuts).
-    Mono/stereo AAC is stream-copied (no quality loss); anything else, including surround audio,
-    is re-encoded to mono AAC.
+    Mono/stereo AAC is stream-copied (no quality loss) when every piece fits under MAX_UPLOAD_BYTES;
+    anything else, including surround audio, is re-encoded to mono AAC.
+    on_progress receives how far along the split is (0 to 1).
     """
     run_chunks_dir.mkdir(parents=True, exist_ok=True)
 
-    cuts = plan_chunk_cuts(input_path, chunk_seconds)
+    reported = 0.0
+
+    def report(fraction: float) -> None:
+        # Never move backwards, e.g. when a finished copy is rejected and the audio is re-encoded.
+        nonlocal reported
+        if on_progress and fraction > reported:
+            reported = fraction
+            on_progress(fraction)
+
+    def report_writing(fraction: float) -> None:
+        report(SPLIT_PLAN_SHARE + (1 - SPLIT_PLAN_SHARE) * fraction)
+
+    total = get_duration_seconds(input_path)
+    cuts = plan_chunk_cuts(input_path, chunk_seconds, on_progress=lambda f: report(SPLIT_PLAN_SHARE * f))
+    report(SPLIT_PLAN_SHARE)
     if cuts:
         segment_args = ["-segment_times", ",".join(f"{c:.3f}" for c in cuts)]
     else:
@@ -665,12 +769,16 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
         old.unlink()
 
     channels = audio_channel_count(input_path)
-    if channels is None or channels <= MAX_COPY_CHANNELS:
+    # Only AAC can be copied into .m4a. Other codecs skip straight to re-encoding: MP3 would copy
+    # fine but then be rejected, and WAV would fail to copy at all.
+    if (channels is None or channels <= MAX_COPY_CHANNELS) and audio_codec_name(input_path) in (None, "aac"):
         copy_cmd = [
             *ffmpeg_cmd_prefix(),
             "-nostdin",
             "-hide_banner",
             "-loglevel", "error",
+            "-progress", "pipe:1",
+            "-nostats",
             "-i", str(input_path),
             "-vn",
             "-f", "segment",
@@ -681,12 +789,20 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
             str(run_chunks_dir / "part_%03d.m4a"),
         ]
         try:
-            subprocess.run(copy_cmd, check=True, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
+            # A failed copy is handled by re-encoding below, so ffmpeg's error output is kept out of the log.
+            _run_ffmpeg_with_progress(copy_cmd, total, report_writing, quiet=True)
+            copy_finished = True
         except Exception:
-            pass
+            copy_finished = False
 
         parts = sorted(run_chunks_dir.glob("part_*.m4a"))
-        if parts and all(_copied_m4a_chunk_is_transcribable(p) for p in parts[: min(2, len(parts))]):
+        # A copy that stopped partway leaves only the first chunks, which would silently drop the rest.
+        if (
+            copy_finished
+            and parts
+            and all(p.stat().st_size <= MAX_UPLOAD_BYTES for p in parts)
+            and all(_copied_m4a_chunk_is_transcribable(p) for p in parts[: min(2, len(parts))])
+        ):
             return parts
 
     for old in run_chunks_dir.glob("part_*.m4a"):
@@ -697,6 +813,8 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
         "-nostdin",
         "-hide_banner",
         "-loglevel", "error",
+        "-progress", "pipe:1",
+        "-nostats",
         "-i", str(input_path),
         "-vn",
         "-f", "segment",
@@ -709,7 +827,7 @@ def split_audio_to_chunks(input_path: Path, run_chunks_dir: Path, chunk_seconds:
         str(run_chunks_dir / "part_%03d.m4a"),
     ]
     try:
-        subprocess.run(reencode_cmd, check=True, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
+        _run_ffmpeg_with_progress(reencode_cmd, total, report_writing)
     except subprocess.TimeoutExpired:
         raise SystemExit(
             "Chunking audio timed out while running ffmpeg. "
@@ -773,35 +891,6 @@ def convert_qta_to_m4a_copy(input_path: Path, run_id: str) -> Path:
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise SystemExit("Failed to convert .qta to .m4a.")
     return out_path
-
-
-def downmix_to_mono_m4a(input_path: Path, output_path: Path) -> Path:
-    """Write the first audio stream of input_path as mono AAC .m4a (used for surround sources)."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        *ffmpeg_cmd_prefix(),
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-y",
-        "-i", str(input_path),
-        "-vn",
-        "-map", "0:a:0",
-        "-c:a", "aac",
-        "-ac", AUDIO_CHANNELS,
-        "-b:a", AUDIO_BITRATE,
-        str(output_path),
-    ]
-    try:
-        subprocess.run(cmd, check=True, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        raise SystemExit("Timed out mixing surround audio down to mono.") from None
-    except Exception as exc:
-        raise SystemExit(f"Could not mix surround audio down to mono: {exc}") from None
-
-    if not output_path.exists() or output_path.stat().st_size == 0:
-        raise SystemExit("Mixing surround audio down to mono produced no audio.")
-    return output_path
 
 
 def repair_audio_for_api(input_path: Path) -> Path:

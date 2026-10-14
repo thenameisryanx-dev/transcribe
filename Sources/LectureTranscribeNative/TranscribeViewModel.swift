@@ -38,9 +38,9 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
         case .gptTranscribe:
             return "Experimental · $0.0045/min"
         case .gpt4oTranscribe:
-            return "Accurate · $0.006/min"
+            return "Supports speaker labels · $0.006/min"
         case .gpt4oMiniTranscribe:
-            return "Accurate, lowest cost · $0.003/min"
+            return "Half the price, no speaker labels · $0.003/min"
         }
     }
 
@@ -146,6 +146,11 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             }
             guard oldValue != selectedTranscriptionModel else { return }
             UserDefaults.standard.set(selectedTranscriptionModel.rawValue, forKey: Self.selectedModelDefaultsKey)
+            // Picking another model after a finished run means transcribing the same recording again,
+            // so the finished result gives way to a ready draft (file and context stay).
+            if hasTranscribedCurrentRecording {
+                resetRunResult()
+            }
         }
     }
     /// ISO-639-1 code of the spoken language; empty means auto-detect.
@@ -430,6 +435,17 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         ] + extraVideoTypes
 
         if panel.runModal() == .OK, let path = panel.url?.path {
+            selectAudioFile(path)
+        }
+    }
+
+    /// Choosing a file always gives a ready draft. Re-choosing the recording that was just transcribed
+    /// (e.g. to run it with another model) doesn't change `audioFilePath`, so reset the result here.
+    private func selectAudioFile(_ path: String) {
+        guard !isRunning else { return }
+        if path == audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines) {
+            resetRunResult()
+        } else {
             audioFilePath = path
         }
     }
@@ -453,7 +469,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             return
         }
 
-        audioFilePath = path
+        selectAudioFile(path)
     }
 
     func reportDroppedAudioFileReadFailure(details: String? = nil) {
@@ -718,7 +734,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         backend.cancelActiveRun()
     }
 
-    private func apply(event: BackendStreamEvent) {
+    // Internal (not private) so tests can play back a finished run.
+    func apply(event: BackendStreamEvent) {
         switch event {
         case let .log(message):
             appendLog(message)
