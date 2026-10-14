@@ -12,6 +12,7 @@ from lecture_transcribe import (
     DEFAULT_CHUNK_SECONDS,
     DEFAULT_LANGUAGES,
     DIARIZE_CHUNK_SECONDS,
+    DIARIZE_MAX_SECONDS,
     DIARIZE_SINGLE_BUFFER,
     MAX_COPY_CHANNELS,
     MODEL_DIARIZE,
@@ -24,7 +25,6 @@ from lecture_transcribe import (
     convert_qta_to_m4a_copy,
     diarize_chunk,
     diarize_whole_file,
-    downmix_to_mono_m4a,
     extract_diarization_segments,
     extract_transcription_text,
     format_diarized_lines,
@@ -42,6 +42,19 @@ from lecture_transcribe import (
 )
 
 T = TypeVar("T")
+
+# Overall progress (percent) given to preparing the audio; transcribing the chunks fills the rest.
+# Preparing a 21-minute episode took about 7s, roughly this share of a whole run.
+PREPARE_PROGRESS = 15.0
+
+
+def _prepare_progress(push_event) -> Callable[[float], None]:
+    """Progress callback for split_audio_to_chunks that fills the preparing share of the bar."""
+    return lambda fraction: push_event("progress", PREPARE_PROGRESS * fraction)
+
+
+def _chunks_done_progress(done: int, total: int) -> float:
+    return PREPARE_PROGRESS + (100.0 - PREPARE_PROGRESS) * done / total
 
 
 def _chunk_spans(parts: list[Path], fallback_seconds: int) -> list[tuple[float, float]]:
@@ -82,7 +95,7 @@ def _run_chunks_in_parallel(
             done += 1
             push_event("log", f"Finished chunk {i + 1}/{total}: {parts[i].name}")
             push_event("status", f"{label}: {done}/{total} chunks done")
-            push_event("progress", (done / total) * 100.0)
+            push_event("progress", _chunks_done_progress(done, total))
     finally:
         # On failure or cancellation, drop queued chunks instead of waiting for them.
         executor.shutdown(wait=False, cancel_futures=True)
@@ -110,7 +123,7 @@ def _run_chunks_in_order(
         results.append(previous)
         push_event("log", f"Finished chunk {i + 1}/{total}: {part.name}")
         push_event("status", f"{label}: {i + 1}/{total} chunks done")
-        push_event("progress", ((i + 1) / total) * 100.0)
+        push_event("progress", _chunks_done_progress(i + 1, total))
     return results
 
 
@@ -184,7 +197,7 @@ def run_transcription_job(
             working_input_path = converted_temp_path
             push_event("log", f"Converted .qta to: {working_input_path.name}")
 
-        # Surround sources keep dialogue in the center channel; chunks and single requests get a mono mix.
+        # Surround sources keep dialogue in the center channel; split_audio_to_chunks mixes them to mono.
         channels = audio_channel_count(working_input_path)
         is_surround = channels is not None and channels > MAX_COPY_CHANNELS
         if is_surround:
@@ -195,17 +208,21 @@ def run_transcription_job(
         if diarize:
             dur = get_duration_seconds(working_input_path)
             if 0 < dur <= DIARIZE_SINGLE_BUFFER:
-                push_event("status", "Diarizing (single request)...")
-                diarize_input_path = working_input_path
-                mono_dir = CHUNKS_ROOT_DIR / f"{stem}_{run_id}_mono"
+                push_event("status", "Preparing audio...")
+                single_dir = CHUNKS_ROOT_DIR / f"{stem}_{run_id}_single"
                 try:
-                    if is_surround:
-                        diarize_input_path = downmix_to_mono_m4a(working_input_path, mono_dir / "part_mono.m4a")
-                    content = diarize_whole_file(
-                        client, diarize_input_path, languages=chunk_languages, on_log=log
+                    # The original file can be too big (WAV, video) or in a format the API rejects, so it
+                    # goes through the same copy-or-convert step as chunks. The audio is shorter than
+                    # DIARIZE_MAX_SECONDS, so this yields exactly one piece.
+                    parts = split_audio_to_chunks(
+                        working_input_path, single_dir, DIARIZE_MAX_SECONDS, on_progress=_prepare_progress(push_event)
                     )
+                    if len(parts) != 1:
+                        raise SystemExit(f"Expected one audio piece for a single diarize request, got {len(parts)}.")
+                    push_event("status", "Diarizing (single request)...")
+                    content = diarize_whole_file(client, parts[0], languages=chunk_languages, on_log=log)
                 finally:
-                    cleanup_dir(mono_dir)
+                    cleanup_dir(single_dir)
                 header = build_transcript_header(
                     input_path=input_path,
                     working_input_path=working_input_path,
@@ -224,7 +241,9 @@ def run_transcription_job(
             # Splitting sits inside the try so a cancel or ffmpeg failure mid-split
             # still removes any partial chunks.
             try:
-                parts = split_audio_to_chunks(working_input_path, run_chunks_dir, DIARIZE_CHUNK_SECONDS)
+                parts = split_audio_to_chunks(
+                    working_input_path, run_chunks_dir, DIARIZE_CHUNK_SECONDS, on_progress=_prepare_progress(push_event)
+                )
                 push_event("log", f"Prepared {len(parts)} chunk(s) for diarization.")
 
                 # Offsets depend on earlier chunks' real lengths, so measure them before fanning out.
@@ -267,7 +286,9 @@ def run_transcription_job(
         run_chunks_dir = CHUNKS_ROOT_DIR / f"{stem}_{run_id}"
         push_event("status", "Preparing audio chunks...")
         try:
-            parts = split_audio_to_chunks(working_input_path, run_chunks_dir, chunk_seconds)
+            parts = split_audio_to_chunks(
+                working_input_path, run_chunks_dir, chunk_seconds, on_progress=_prepare_progress(push_event)
+            )
             push_event("log", f"Prepared {len(parts)} chunk(s) for transcription.")
             # Chunks are cut at pauses, so their lengths vary; measure them for the section headers.
             spans = _chunk_spans(parts, chunk_seconds)
@@ -321,6 +342,8 @@ def run_transcription_job(
                 model=transcription_model,
                 local_chunk_seconds=chunk_seconds,
                 languages=chunk_languages,
+                context=context or "",
+                consistency_mode=carry_context,
                 chunk_warnings=chunk_warnings,
             )
         ]
