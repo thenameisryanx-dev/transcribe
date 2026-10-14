@@ -19,6 +19,10 @@ final class TranscriptionModelTests: XCTestCase {
         XCTAssertEqual(TranscriptionModel.allCases.filter(\.supportsConsistencyMode), [.gptTranscribe])
     }
 
+    func testOnlyGPTTranscribeSupportsKeywords() {
+        XCTAssertEqual(TranscriptionModel.allCases.filter(\.supportsKeywords), [.gptTranscribe])
+    }
+
     func testOnlyGPTTranscribeRequiresSpokenLanguages() {
         XCTAssertEqual(TranscriptionModel.allCases.filter(\.requiresSpokenLanguages), [.gptTranscribe])
     }

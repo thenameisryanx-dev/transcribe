@@ -403,6 +403,14 @@ private struct RunDetailView: View {
                     }
                 }
 
+                if let keywords = entry.keywords, !keywords.isEmpty {
+                    LabeledContent("Keywords") {
+                        Text(KeywordList.displayText(keywords))
+                            .textSelection(.enabled)
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
+
                 if let chunkSeconds = entry.chunkSeconds {
                     LabeledContent("Chunk Length") {
                         Text("\(chunkSeconds / 60) min")

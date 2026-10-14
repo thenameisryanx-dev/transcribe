@@ -14,6 +14,7 @@ from lecture_transcribe import (
     DIARIZE_CHUNK_SECONDS,
     DIARIZE_MAX_SECONDS,
     DIARIZE_SINGLE_BUFFER,
+    KEYWORD_MODELS,
     MAX_COPY_CHANNELS,
     MODEL_DIARIZE,
     MODEL_GPT_TRANSCRIBE,
@@ -137,6 +138,7 @@ def run_transcription_job(
     context: str | None = None,
     carry_context: bool = False,
     chunk_seconds: int | None = None,
+    keywords: list[str] | None = None,
 ) -> Path:
     require_ffmpeg()
     require_ffprobe()
@@ -166,13 +168,19 @@ def run_transcription_job(
             push_event("log", "Chunk length setting isn't used with speaker labels; their own chunk size applies.")
         if context or carry_context:
             push_event("log", "Context prompt isn't supported with speaker labels, so it won't be sent.")
-        context, carry_context = None, False
+        if keywords:
+            push_event("log", "Keywords aren't supported with speaker labels, so they won't be sent.")
+        context, carry_context, keywords = None, False, None
     else:
         if carry_context and transcription_model != MODEL_GPT_TRANSCRIBE:
             # The GPT-4o models tend to loop or invent text at chunk ends when given the excerpt.
             push_event("log", f"Consistency mode is only used with {MODEL_GPT_TRANSCRIBE}, so it is off for this run.")
             carry_context = False
         push_event("log", f"Context prompt: {f'{len(context)} characters' if context else 'none'}")
+        if keywords and transcription_model not in KEYWORD_MODELS:
+            push_event("log", f"Keywords are only used with {MODEL_GPT_TRANSCRIBE}, so they won't be sent.")
+            keywords = None
+        push_event("log", f"Keywords: {', '.join(keywords) if keywords else 'none'}")
         push_event("log", f"Consistency mode (carry context between chunks): {'on' if carry_context else 'off'}")
 
     def log(message: str) -> None:
@@ -309,6 +317,7 @@ def run_transcription_job(
                         model=transcription_model,
                         languages=chunk_languages,
                         context=context,
+                        keywords=keywords,
                         previous_tail=tail,
                         on_log=log,
                     )
@@ -323,6 +332,7 @@ def run_transcription_job(
                         model=transcription_model,
                         languages=chunk_languages,
                         context=context,
+                        keywords=keywords,
                         on_log=log,
                     ),
                     push_event,
@@ -343,6 +353,7 @@ def run_transcription_job(
                 local_chunk_seconds=chunk_seconds,
                 languages=chunk_languages,
                 context=context or "",
+                keywords=keywords,
                 consistency_mode=carry_context,
                 chunk_warnings=chunk_warnings,
             )

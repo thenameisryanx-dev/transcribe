@@ -37,6 +37,8 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     var log: String? = nil
     // Optional so older history still decodes. The context prompt and whether consistency mode was on.
     var context: String? = nil
+    // Optional so older history still decodes. Keywords sent to GPT Transcribe; nil when none were sent.
+    var keywords: [String]? = nil
     var consistencyMode: Bool? = nil
     // Optional so older history still decodes. Seconds of audio per request; nil for diarized runs.
     var chunkSeconds: Int? = nil

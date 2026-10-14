@@ -11,6 +11,7 @@ from pathlib import Path
 from lecture_transcribe import (
     CHUNK_SECONDS_CHOICES,
     DEFAULT_LANGUAGES,
+    parse_keywords,
     parse_language_codes,
     get_last_keychain_error,
     is_valid_api_key,
@@ -152,6 +153,12 @@ def command_run(args: argparse.Namespace) -> int:
         emit("error", f"Invalid spoken languages: {exc}")
         return 2
 
+    try:
+        keywords = parse_keywords(args.keywords or "")
+    except ValueError as exc:
+        emit("error", f"Invalid keywords: {exc}")
+        return 2
+
     if resolve_api_key_status() == "required":
         emit("error_kind", ERROR_KIND_API_KEY)
         emit("error", "Add your OpenAI API key to start transcribing.")
@@ -171,6 +178,7 @@ def command_run(args: argparse.Namespace) -> int:
             context=args.context,
             carry_context=bool(args.carry_context),
             chunk_seconds=args.chunk_seconds,
+            keywords=keywords,
         )
         emit("done", str(out_path.resolve()))
         return 0
@@ -272,6 +280,14 @@ def parse_args() -> argparse.Namespace:
         "--context",
         default="",
         help="Description of the recording sent as the prompt with every chunk (not used with --diarize).",
+    )
+    run.add_argument(
+        "--keywords",
+        default="",
+        help=(
+            f"Names and terms the recording uses, separated by commas or new lines. Sent with every chunk; "
+            f"only {MODEL_GPT_TRANSCRIBE} uses them (not used with --diarize)."
+        ),
     )
     run.add_argument(
         "--carry-context",

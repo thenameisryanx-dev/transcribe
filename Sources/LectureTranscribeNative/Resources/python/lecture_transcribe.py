@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
@@ -52,6 +53,20 @@ REPEAT_MATCH_SHARE = 0.7            # share of a passage's phrases that must rep
 PROMPT_MODELS = {MODEL_GPT_TRANSCRIBE, MODEL_NORMAL, MODEL_MINI}
 CONTEXT_TAIL_CHARS = 300            # how much of the previous chunk's transcript is carried over
 ECHO_MIN_WORDS = 4                  # shortest repeat of that excerpt removed from the next chunk's start
+
+# Keywords: literal terms (names, jargon) gpt-transcribe should expect to hear. Only gpt-transcribe accepts
+# them, and the API rejects the whole request if a keyword contains one of these characters.
+KEYWORD_MODELS = {MODEL_GPT_TRANSCRIBE}
+KEYWORD_FORBIDDEN_CHARS = "<>"
+
+# GPT-4o output cap. gpt-4o-transcribe and gpt-4o-mini-transcribe stop writing after 2,048 output tokens
+# (about 1,550 words) and return what they have without an error: a 20-minute test chunk came back with
+# output_tokens == 2048 and the last 40% missing. A chunk that reaches the cap is split at a pause and
+# each piece is transcribed on its own. gpt-transcribe has no such cap (the same chunk came back whole).
+GPT4O_OUTPUT_TOKEN_LIMIT = 2048
+GPT4O_OUTPUT_LIMITED_MODELS = {MODEL_NORMAL, MODEL_MINI}
+MAX_OUTPUT_SPLIT_DEPTH = 2          # halve a capped chunk at most twice (a 10-minute chunk becomes 2.5-minute pieces)
+MIN_OUTPUT_SPLIT_SECONDS = 60       # pieces shorter than this that still hit the cap are looping, not long
 
 # API request behavior
 API_TIMEOUT_SECONDS = 20 * 60       # per-request timeout (seconds)
@@ -489,10 +504,14 @@ def build_transcript_header(
     duration_seconds: float | None = None,
     languages: list[str] | None = None,
     context: str | None = None,
+    keywords: list[str] | None = None,
     consistency_mode: bool | None = None,
     chunk_warnings: list[str] | None = None,
 ) -> str:
-    """context: the prompt sent with each chunk ("" if none); None leaves the line out (e.g. speaker labels)."""
+    """
+    context: the prompt sent with each chunk ("" if none); None leaves the line out (e.g. speaker labels).
+    keywords: the keywords sent with each chunk; empty or None leaves the line out.
+    """
     lines = [
         f"INPUT: {input_path}",
         f"WORKING_INPUT: {working_input_path}",
@@ -511,6 +530,8 @@ def build_transcript_header(
     if context is not None:
         # One line, so a multi-line context can't push the header into the transcript.
         lines.append(f"CONTEXT: {' '.join(context.split()) or 'none'}")
+    if keywords:
+        lines.append(f"KEYWORDS: {', '.join(keywords)}")
     if consistency_mode is not None:
         lines.append(f"CONSISTENCY_MODE: {'on' if consistency_mode else 'off'}")
     for warning in chunk_warnings or []:
@@ -969,6 +990,25 @@ def parse_language_codes(raw: str) -> list[str]:
     return codes
 
 
+def parse_keywords(raw: str) -> list[str]:
+    """
+    Parse keywords separated by commas or new lines, dropping blanks and repeats (ignoring case).
+    Raises ValueError for a keyword the API would reject.
+    """
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for token in re.split(r"[,\r\n]+", raw):
+        keyword = " ".join(token.split())
+        if not keyword:
+            continue
+        if any(c in keyword for c in KEYWORD_FORBIDDEN_CHARS):
+            raise ValueError(f"'{keyword}' contains < or >, which OpenAI doesn't accept in keywords.")
+        if keyword.casefold() not in seen:
+            seen.add(keyword.casefold())
+            keywords.append(keyword)
+    return keywords
+
+
 def single_language_hint(languages: list[str] | None) -> str | None:
     """
     The `language` to force on models that take only one (GPT-4o and diarize). Several languages,
@@ -1121,8 +1161,10 @@ def transcribe_chunk_checked(
     model: str,
     languages: list[str] | None = None,
     context: str | None = None,
+    keywords: list[str] | None = None,
     previous_tail: str | None = None,
     on_log: Callable[[str], None] | None = None,
+    split_depth: int = 0,
 ) -> tuple[str, str | None]:
     """
     Transcribe one chunk and return (text, warning or None). Always uses the selected model.
@@ -1130,7 +1172,9 @@ def transcribe_chunk_checked(
     empty or implausibly long results. A failed check is retried with the same model, and if the last
     attempt still fails, its text is kept and a warning is returned.
     `context` and `previous_tail` form the prompt; retries after a failed check drop `previous_tail`
-    so the carried-over excerpt can't cause the same failure twice.
+    so the carried-over excerpt can't cause the same failure twice. `keywords` go only to gpt-transcribe.
+    A GPT-4o chunk that reaches the output cap is split and transcribed in pieces (see
+    _transcribe_in_pieces); `split_depth` counts how many times this audio was already split.
     """
     log = on_log or (lambda _message: None)
     prompting = context is not None or previous_tail is not None
@@ -1156,13 +1200,25 @@ def transcribe_chunk_checked(
                 response_format="json",
                 languages=languages or DEFAULT_LANGUAGES,
                 prompt=prompt,
+                keywords=keywords,
                 on_log=on_log,
             )
             raw_text = extract_transcription_text(resp).strip()
         else:
-            raw_text = transcribe_chunk_text(
+            raw_text, output_tokens = transcribe_chunk_text(
                 client, chunk_path, model=model, languages=languages, prompt=prompt, on_log=on_log
             )
+            if model in GPT4O_OUTPUT_LIMITED_MODELS and (output_tokens or 0) >= GPT4O_OUTPUT_TOKEN_LIMIT:
+                return _transcribe_in_pieces(
+                    client,
+                    chunk_path,
+                    capped_text=raw_text,
+                    model=model,
+                    languages=languages,
+                    context=context,
+                    on_log=on_log,
+                    split_depth=split_depth,
+                )
         text = _remove_echo(raw_text, tail, chunk_path, log)
         warning = _chunk_check_failure(text, chunk_path, model)
         if warning is None:
@@ -1170,6 +1226,84 @@ def transcribe_chunk_checked(
         log(f"{warning} (attempt {attempt}/{attempts}).")
 
     return text, f"{warning} after {attempts} attempts."
+
+
+def _transcribe_in_pieces(
+    client: OpenAI,
+    chunk_path: Path,
+    *,
+    capped_text: str,
+    model: str,
+    languages: list[str] | None,
+    context: str | None,
+    on_log: Callable[[str], None] | None,
+    split_depth: int,
+) -> tuple[str, str | None]:
+    """
+    Re-transcribe a chunk whose transcript hit the GPT-4o output cap, as smaller pieces cut at pauses.
+    Pieces are named after the chunk (part_002 -> part_002a, part_002b). If the chunk can't be split
+    further, the capped text is kept with a warning that its end is missing.
+    """
+    log = on_log or (lambda _message: None)
+    capped_warning = (
+        f"{chunk_path.name}: {model} hit its {GPT4O_OUTPUT_TOKEN_LIMIT}-token output limit, "
+        "so the end of this part is likely missing"
+    )
+    duration = get_duration_seconds(chunk_path)
+    if split_depth >= MAX_OUTPUT_SPLIT_DEPTH or duration < 2 * MIN_OUTPUT_SPLIT_SECONDS:
+        log(f"{capped_warning}.")
+        return capped_text, capped_warning
+
+    log(
+        f"{chunk_path.name}: {model} stopped at its {GPT4O_OUTPUT_TOKEN_LIMIT}-token output limit "
+        f"({len(capped_text.split())} words), so the end was cut off. Splitting it and transcribing the pieces..."
+    )
+    pieces_dir = chunk_path.parent / f"{chunk_path.stem}_pieces"
+    pieces: list[Path] = []
+    try:
+        try:
+            parts = split_audio_to_chunks(chunk_path, pieces_dir, math.ceil(duration / 2))
+        except (Exception, SystemExit) as exc:
+            log(f"{chunk_path.name}: couldn't split it ({exc}). {capped_warning}.")
+            return capped_text, capped_warning
+        for i, part in enumerate(parts):
+            piece = part.with_name(f"{chunk_path.stem}{chr(ord('a') + i)}.m4a")
+            part.rename(piece)
+            pieces.append(piece)
+        log(f"{chunk_path.name}: split into {len(pieces)} pieces.")
+
+        texts: list[str] = []
+        warnings: list[str] = []
+        for piece in pieces:
+            piece_text, piece_warning = transcribe_chunk_checked(
+                client,
+                piece,
+                model=model,
+                languages=languages,
+                context=context,
+                on_log=on_log,
+                split_depth=split_depth + 1,
+            )
+            texts.append(piece_text)
+            if piece_warning:
+                warnings.append(piece_warning)
+        return " ".join(t for t in texts if t), "; ".join(warnings) or None
+    finally:
+        # The renamed pieces only match cleanup_dir's part_*.m4a pattern when the chunk itself is a part_ file.
+        if CLEANUP_CHUNKS:
+            for piece in pieces:
+                piece.unlink(missing_ok=True)
+        cleanup_dir(pieces_dir)
+
+
+def _output_tokens(resp: Any) -> int | None:
+    """Output tokens the model generated, from the response's token usage (None if not reported)."""
+    usage = resp.get("usage") if isinstance(resp, dict) else getattr(resp, "usage", None)
+    value = usage.get("output_tokens") if isinstance(usage, dict) else getattr(usage, "output_tokens", None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def transcribe_chunk_text(
@@ -1180,17 +1314,18 @@ def transcribe_chunk_text(
     languages: list[str] | None = None,
     prompt: str | None = None,
     on_log: Callable[[str], None] | None = None,
-) -> str:
-    text = create_transcription_with_retry(
+) -> tuple[str, int | None]:
+    """Transcribe one chunk; returns (text, output tokens used). JSON, unlike plain text, reports token usage."""
+    resp = create_transcription_with_retry(
         client,
         chunk_path,
         model=model,
-        response_format="text",
+        response_format="json",
         languages=languages,
         prompt=prompt,
         on_log=on_log,
     )
-    return str(text)
+    return extract_transcription_text(resp).strip(), _output_tokens(resp)
 
 
 def is_retryable_transcription_error(exc: Exception) -> bool:
@@ -1228,6 +1363,7 @@ def create_transcription_with_retry(
     chunking_strategy: str | None = None,
     languages: list[str] | None = None,
     prompt: str | None = None,
+    keywords: list[str] | None = None,
     on_log: Callable[[str], None] | None = None,
 ):
     log = on_log or (lambda _message: None)
@@ -1243,13 +1379,19 @@ def create_transcription_with_retry(
                     "response_format": response_format,
                     "timeout": API_TIMEOUT_SECONDS,
                 }
+                extra_body = {}
                 if model == MODEL_GPT_TRANSCRIBE:
                     # gpt-transcribe takes a `languages` list instead of `language`; the SDK doesn't expose it yet.
                     hint = languages or ([LANGUAGE] if LANGUAGE else None)
                     if hint:
-                        kwargs["extra_body"] = {"languages": hint}
+                        extra_body["languages"] = hint
                 elif language := single_language_hint(languages):
                     kwargs["language"] = language
+                if keywords and model in KEYWORD_MODELS:
+                    # Not exposed by the SDK yet either.
+                    extra_body["keywords"] = keywords
+                if extra_body:
+                    kwargs["extra_body"] = extra_body
                 if chunking_strategy is not None:
                     kwargs["chunking_strategy"] = chunking_strategy
                 if prompt and model in PROMPT_MODELS:
@@ -1272,6 +1414,11 @@ def create_transcription_with_retry(
                             log(
                                 f"The API rejected the prompt for {active_audio_path.name} "
                                 f"({len(prompt or '')} characters). Try a shorter Context in Settings."
+                            )
+                        if "extra_body" in kwargs and "keyword" in str(e).lower():
+                            log(
+                                f"The API rejected the keywords for {active_audio_path.name} "
+                                f"({len(keywords or [])} keywords). Try fewer or shorter keywords."
                             )
                         raise
 
