@@ -197,6 +197,7 @@ final class BackendClient: @unchecked Sendable {
         context: String = "",
         carryContext: Bool = false,
         chunkSeconds: Int? = nil,
+        keywords: [String] = [],
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
     ) async throws {
         var args = ["run", "--input", inputPath, "--output", outputDirectory]
@@ -206,6 +207,9 @@ final class BackendClient: @unchecked Sendable {
         }
         if !context.isEmpty {
             args.append(contentsOf: ["--context", context])
+        }
+        if !keywords.isEmpty {
+            args.append(contentsOf: ["--keywords", keywords.joined(separator: "\n")])
         }
         if carryContext {
             args.append("--carry-context")

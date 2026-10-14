@@ -365,6 +365,37 @@ struct TranscribePaneView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            HStack(alignment: .firstTextBaseline) {
+                Text("Keywords (optional)")
+                    .font(.headline)
+                Spacer()
+                Menu("Recent") {
+                    ForEach(viewModel.recentKeywords, id: \.self) { keywords in
+                        Button(RecentContextPrompts.menuTitle(for: keywords)) {
+                            viewModel.keywordsText = keywords
+                        }
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(viewModel.recentKeywords.isEmpty || viewModel.isRunning || !viewModel.isKeywordsAvailable)
+                .help("Reuse the keywords from an earlier run.")
+            }
+            .padding(.top, 4)
+            TextField(
+                "Keywords",
+                text: $viewModel.keywordsText,
+                prompt: Text("e.g. Okonkwo, mitochondria, ATP synthase"),
+                axis: .vertical
+            )
+            .textFieldStyle(.roundedBorder)
+            .lineLimit(1...3)
+            .labelsHidden()
+            .disabled(viewModel.isRunning || !viewModel.isKeywordsAvailable)
+            Text("Names and terms you expect to hear, separated by commas. Spelled the way you want them written.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Toggle("Consistency mode", isOn: Binding(
                 get: { viewModel.consistencyModeEnabled && viewModel.isConsistencyModeAvailable },
                 set: { viewModel.consistencyModeEnabled = $0 }
@@ -384,7 +415,7 @@ struct TranscribePaneView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if !viewModel.selectedTranscriptionModel.supportsConsistencyMode {
-                Text("Consistency mode is only available with GPT Transcribe.")
+                Text("Keywords and consistency mode are only available with GPT Transcribe.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

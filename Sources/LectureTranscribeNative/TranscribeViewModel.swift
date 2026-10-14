@@ -55,6 +55,11 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
         self == .gptTranscribe
     }
 
+    /// Only GPT Transcribe accepts keyword hints.
+    var supportsKeywords: Bool {
+        self == .gptTranscribe
+    }
+
     /// GPT Transcribe drops speech without a language list, so it falls back to English when none is set.
     /// The other models auto-detect when no language is set.
     var requiresSpokenLanguages: Bool {
@@ -129,6 +134,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             // Context describes one recording; keep it while choosing a file, but not for the next lecture.
             if completedAudioFilePath != nil {
                 contextPrompt = ""
+                keywordsText = ""
             }
             resetRunResult()
         }
@@ -167,6 +173,15 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published private(set) var recentContextPrompts: [String] {
         didSet {
             UserDefaults.standard.set(recentContextPrompts, forKey: Self.recentContextPromptsDefaultsKey)
+        }
+    }
+    /// Names and terms expected in the current recording, separated by commas or new lines (see `KeywordList`).
+    /// Sent with every chunk to GPT Transcribe. Belongs to the draft, like `contextPrompt`.
+    @Published var keywordsText = ""
+    /// Keyword lists from earlier runs, most recent first, offered in the Recent menu.
+    @Published private(set) var recentKeywords: [String] {
+        didSet {
+            UserDefaults.standard.set(recentKeywords, forKey: Self.recentKeywordsDefaultsKey)
         }
     }
     /// Consistency mode: transcribe chunks in order, adding the end of each chunk's transcript to the
@@ -233,6 +248,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     // Keeps the older key so a language chosen before the dropdown carries over.
     private static let spokenLanguageDefaultsKey = "spokenLanguages"
     private static let recentContextPromptsDefaultsKey = "recentContextPrompts"
+    private static let recentKeywordsDefaultsKey = "recentKeywords"
     private static let consistencyModeDefaultsKey = "consistencyMode"
     private static let chunkLengthDefaultsKey = "chunkLengthSeconds"
     private let defaultOutputFolderPath: String
@@ -261,6 +277,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             UserDefaults.standard.string(forKey: Self.spokenLanguageDefaultsKey)
         )
         recentContextPrompts = UserDefaults.standard.stringArray(forKey: Self.recentContextPromptsDefaultsKey) ?? []
+        recentKeywords = UserDefaults.standard.stringArray(forKey: Self.recentKeywordsDefaultsKey) ?? []
         consistencyModeEnabled = UserDefaults.standard.bool(forKey: Self.consistencyModeDefaultsKey)
         chunkLengthPreference = ChunkLength(rawValue: UserDefaults.standard.integer(forKey: Self.chunkLengthDefaultsKey))
         if let rawModel = UserDefaults.standard.string(forKey: Self.selectedModelDefaultsKey),
@@ -328,6 +345,11 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
     var effectiveChunkLength: ChunkLength {
         chunkLengthPreference ?? .standard
+    }
+
+    /// Keywords only reach GPT Transcribe, and never the diarize model.
+    var isKeywordsAvailable: Bool {
+        isContextAvailable && selectedTranscriptionModel.supportsKeywords
     }
 
     var isConsistencyModeAvailable: Bool {
@@ -634,6 +656,11 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
         let languages = SpokenLanguage.backendCodes(for: spokenLanguage, model: selectedTranscriptionModel)
 
+        if isKeywordsAvailable, let invalid = KeywordList.parse(keywordsText).first(where: KeywordList.isRejected) {
+            showError("The keyword \"\(invalid)\" contains < or >, which OpenAI doesn't accept. Remove those characters, then try again.")
+            return
+        }
+
         let normalizedOutputDirectory = normalizeOutputDirectoryPath(outputFolderPath)
         guard ensureOutputDirectoryAvailable(at: normalizedOutputDirectory) else {
             return
@@ -658,8 +685,12 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         let context = shouldDiarize ? "" : trimmedContextPrompt
         let carryContext = !shouldDiarize && consistencyModeEnabled && model.supportsConsistencyMode
         let chunkSeconds = shouldDiarize ? nil : effectiveChunkLength.seconds
+        let keywords = !shouldDiarize && model.supportsKeywords ? KeywordList.parse(keywordsText) : []
         if !context.isEmpty {
             recentContextPrompts = RecentContextPrompts.adding(context, to: recentContextPrompts)
+        }
+        if !keywords.isEmpty {
+            recentKeywords = RecentContextPrompts.adding(KeywordList.displayText(keywords), to: recentKeywords)
         }
         beginHistoryEntry(
             inputPath: trimmedPath,
@@ -667,6 +698,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             diarize: shouldDiarize,
             model: model,
             context: context,
+            keywords: keywords,
             consistencyMode: carryContext,
             chunkSeconds: chunkSeconds
         )
@@ -693,7 +725,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
                     languages: languages,
                     context: context,
                     carryContext: carryContext,
-                    chunkSeconds: chunkSeconds
+                    chunkSeconds: chunkSeconds,
+                    keywords: keywords
                 ) { event in
                     eventContinuation.yield(event)
                 }
@@ -829,6 +862,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         cancellationRequested = false
         audioFilePath = ""
         contextPrompt = ""
+        keywordsText = ""
         statusText = "Ready"
         progressValue = 0
         logText = ""
@@ -939,6 +973,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         diarize: Bool,
         model: TranscriptionModel,
         context: String,
+        keywords: [String],
         consistencyMode: Bool,
         chunkSeconds: Int?
     ) {
@@ -954,6 +989,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             errorMessage: nil,
             model: model.rawValue,
             context: context.isEmpty ? nil : context,
+            keywords: keywords.isEmpty ? nil : keywords,
             consistencyMode: consistencyMode,
             chunkSeconds: chunkSeconds
         )
@@ -1010,6 +1046,30 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
     private static func sortHistoryEntriesNewestFirst(_ lhs: TranscriptionHistoryEntry, _ rhs: TranscriptionHistoryEntry) -> Bool {
         lhs.startedAt > rhs.startedAt
+    }
+}
+
+/// Keywords typed as one string, separated by commas or new lines. Mirrors `parse_keywords` in the backend.
+enum KeywordList {
+    /// Characters OpenAI rejects in a keyword (the whole request fails).
+    static let rejectedCharacters: Set<Character> = ["<", ">"]
+
+    /// Trimmed keywords with inner whitespace collapsed, dropping blanks and repeats (ignoring case).
+    static func parse(_ text: String) -> [String] {
+        var seen = Set<String>()
+        return text
+            .split(whereSeparator: { $0 == "," || $0.isNewline })
+            .map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
+            .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
+    }
+
+    static func isRejected(_ keyword: String) -> Bool {
+        keyword.contains(where: rejectedCharacters.contains)
+    }
+
+    /// One line for the Runs pane and the Recent menu; parses back to the same keywords.
+    static func displayText(_ keywords: [String]) -> String {
+        keywords.joined(separator: ", ")
     }
 }
 
