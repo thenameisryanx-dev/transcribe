@@ -350,8 +350,10 @@ private struct RunDetailView: View {
 
     @State private var transcriptPreviewText = ""
     @State private var transcriptPreviewNote = "Transcript preview unavailable."
+    @State private var showsFullLog = false
 
     private let previewCharacterLimit = 4000
+    private static let logPreviewLineLimit = 12
 
     private var inputExists: Bool {
         FileManager.default.fileExists(atPath: entry.inputPath)
@@ -460,19 +462,40 @@ private struct RunDetailView: View {
                 }
             }
 
-            Section("Run Log") {
+            // The inspector already scrolls, so the log isn't its own scroll view here
+            // (nested same-direction scroll views hand off scrolling at their edges).
+            // Show the latest lines inline and the whole log in a sheet.
+            Section {
                 if let log = runLog, !log.isEmpty {
-                    ScrollView {
-                        Text(log)
-                            .font(.system(.callout, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 220)
+                    let lines = log.components(separatedBy: "\n")
+                    Text(lines.suffix(Self.logPreviewLineLimit).joined(separator: "\n"))
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     Text("No log was saved for this run. Logs are saved for runs from this version on.")
                         .foregroundStyle(.secondary)
+                }
+            } header: {
+                HStack {
+                    Text("Run Log")
+                    Spacer()
+                    Button("Show Full Log…") {
+                        showsFullLog = true
+                    }
+                    .buttonStyle(.link)
+                    .font(.callout)
+                    .disabled(runLog?.isEmpty ?? true)
+                }
+            } footer: {
+                if let log = runLog {
+                    let lineCount = log.components(separatedBy: "\n").count
+                    if lineCount > Self.logPreviewLineLimit {
+                        Text("Showing the last \(Self.logPreviewLineLimit) of \(lineCount) lines.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -506,6 +529,9 @@ private struct RunDetailView: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showsFullLog) {
+            RunLogSheet(title: entry.recordingName, log: runLog ?? "")
+        }
         .task(id: entry.id) {
             loadTranscriptPreview()
         }
@@ -570,6 +596,62 @@ private struct RunDetailView: View {
         formatter.timeStyle = .medium
         return formatter
     }()
+}
+
+/// The full run log in its own window-level surface, so it scrolls on its own.
+private struct RunLogSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let title: String
+    let log: String
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(title)
+                .font(.headline)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+
+            Divider()
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(log)
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.bottomID)
+                }
+                .onAppear {
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                }
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+
+            Divider()
+
+            HStack {
+                Button("Copy Log") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(log, forType: .string)
+                }
+                Spacer()
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(16)
+        }
+        .frame(minWidth: 620, idealWidth: 760, minHeight: 420, idealHeight: 560)
+    }
+
+    private static let bottomID = "run-log-bottom"
 }
 
 private extension TranscriptionHistoryEntry.Status {
