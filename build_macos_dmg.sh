@@ -529,7 +529,7 @@ find_dmg_background() {
     fi
   done
 
-  local generated_bg="$DIST_DIR/.dmg-background-${DATE_TAG}.png"
+  local generated_bg="$DIST_DIR/.dmg-background-${DATE_TAG}.tiff"
   if generate_default_dmg_background "$generated_bg"; then
     echo "$generated_bg"
     return 0
@@ -538,61 +538,98 @@ find_dmg_background() {
   return 1
 }
 
+# Draws a light background with an arrow between the two icons and an install hint below them,
+# at 1x and 2x, combined into one TIFF so Finder shows it sharply on Retina displays.
 generate_default_dmg_background() {
   local output_path="$1"
-  /usr/bin/env swift - "$output_path" <<'SWIFT' >/dev/null 2>&1
+  local work_dir
+  work_dir="$(mktemp -d)"
+  if ! /usr/bin/env swift - "$work_dir" "$DMG_WINDOW_WIDTH" "$DMG_WINDOW_HEIGHT" "$DMG_APP_ICON_X" "$DMG_APPS_ICON_X" "$DMG_ICON_Y" "$DMG_ICON_SIZE" <<'SWIFT' >/dev/null 2>&1
 import AppKit
 
-let outputPath = CommandLine.arguments[1]
-let size = NSSize(width: 760, height: 460)
+let args = CommandLine.arguments
+let workDir = args[1]
+let width = CGFloat(Double(args[2])!)
+let height = CGFloat(Double(args[3])!)
+let appX = CGFloat(Double(args[4])!)
+let appsX = CGFloat(Double(args[5])!)
+let iconY = CGFloat(Double(args[6])!)
+let iconSize = CGFloat(Double(args[7])!)
 
-guard let rep = NSBitmapImageRep(
-  bitmapDataPlanes: nil,
-  pixelsWide: Int(size.width),
-  pixelsHigh: Int(size.height),
-  bitsPerSample: 8,
-  samplesPerPixel: 4,
-  hasAlpha: true,
-  isPlanar: false,
-  colorSpaceName: .deviceRGB,
-  bitmapFormat: [],
-  bytesPerRow: 0,
-  bitsPerPixel: 0
-) else {
-  exit(1)
-}
+// Finder positions are measured from the top of the window; AppKit draws from the bottom.
+let arrowY = height - iconY
+let hintY = height - (iconY + iconSize / 2 + 80)
 
-NSGraphicsContext.saveGraphicsState()
-NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+for scale in [1, 2] {
+  guard let rep = NSBitmapImageRep(
+    bitmapDataPlanes: nil,
+    pixelsWide: Int(width) * scale,
+    pixelsHigh: Int(height) * scale,
+    bitsPerSample: 8,
+    samplesPerPixel: 4,
+    hasAlpha: true,
+    isPlanar: false,
+    colorSpaceName: .deviceRGB,
+    bitmapFormat: [],
+    bytesPerRow: 0,
+    bitsPerPixel: 0
+  ) else {
+    exit(1)
+  }
+  rep.size = NSSize(width: width, height: height)
 
-let canvas = NSRect(origin: .zero, size: size)
-NSColor(calibratedWhite: 0.96, alpha: 1.0).setFill()
-canvas.fill()
+  NSGraphicsContext.saveGraphicsState()
+  NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
 
-let arrow = NSBezierPath()
-arrow.move(to: NSPoint(x: 305, y: 350))
-arrow.line(to: NSPoint(x: 495, y: 350))
-arrow.line(to: NSPoint(x: 495, y: 380))
-arrow.line(to: NSPoint(x: 620, y: 320))
-arrow.line(to: NSPoint(x: 495, y: 260))
-arrow.line(to: NSPoint(x: 495, y: 290))
-arrow.line(to: NSPoint(x: 305, y: 290))
-arrow.close()
-NSColor(calibratedWhite: 0.73, alpha: 0.32).setFill()
-arrow.fill()
+  NSColor(calibratedWhite: 0.97, alpha: 1.0).setFill()
+  NSRect(x: 0, y: 0, width: width, height: height).fill()
 
-NSGraphicsContext.restoreGraphicsState()
+  let arrowStart = appX + iconSize / 2 + 40
+  let arrowEnd = appsX - iconSize / 2 - 40
+  let arrow = NSBezierPath()
+  arrow.move(to: NSPoint(x: arrowStart, y: arrowY))
+  arrow.line(to: NSPoint(x: arrowEnd, y: arrowY))
+  arrow.move(to: NSPoint(x: arrowEnd - 14, y: arrowY + 14))
+  arrow.line(to: NSPoint(x: arrowEnd, y: arrowY))
+  arrow.line(to: NSPoint(x: arrowEnd - 14, y: arrowY - 14))
+  arrow.lineWidth = 4
+  arrow.lineCapStyle = .round
+  arrow.lineJoinStyle = .round
+  NSColor(calibratedWhite: 0.70, alpha: 1.0).setStroke()
+  arrow.stroke()
 
-guard let pngData = rep.representation(using: .png, properties: [:]) else {
-  exit(1)
-}
+  let hint = NSAttributedString(
+    string: "Drag to Applications to install",
+    attributes: [
+      .font: NSFont.systemFont(ofSize: 14, weight: .medium),
+      .foregroundColor: NSColor(calibratedWhite: 0.45, alpha: 1.0),
+    ]
+  )
+  let hintSize = hint.size()
+  hint.draw(at: NSPoint(x: (width - hintSize.width) / 2, y: hintY - hintSize.height / 2))
 
-do {
-  try pngData.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
-} catch {
-  exit(1)
+  NSGraphicsContext.restoreGraphicsState()
+
+  guard let pngData = rep.representation(using: .png, properties: [:]) else {
+    exit(1)
+  }
+  let name = scale == 1 ? "background.png" : "background@2x.png"
+  do {
+    try pngData.write(to: URL(fileURLWithPath: workDir).appendingPathComponent(name), options: .atomic)
+  } catch {
+    exit(1)
+  }
 }
 SWIFT
+  then
+    rm -rf "$work_dir"
+    return 1
+  fi
+
+  tiffutil -cathidpicheck "$work_dir/background.png" "$work_dir/background@2x.png" -out "$output_path" >/dev/null 2>&1
+  local status=$?
+  rm -rf "$work_dir"
+  return $status
 }
 
 create_dmg_with_finder_layout() {
@@ -654,8 +691,8 @@ create_dmg_with_native_layout() {
 
   if [[ -n "$dmg_background" && -f "$dmg_background" ]]; then
     mkdir -p "$mount_point/.background"
-    cp "$dmg_background" "$mount_point/.background/background.png"
-    background_line='set background picture of viewOptions to file ".background:background.png"'
+    cp "$dmg_background" "$mount_point/.background/background.${dmg_background##*.}"
+    background_line="set background picture of viewOptions to file \".background:background.${dmg_background##*.}\""
   fi
 
   while [[ "$layout_attempt" -le 2 ]]; do
