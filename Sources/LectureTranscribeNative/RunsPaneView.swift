@@ -338,6 +338,7 @@ private extension TranscriptionHistoryEntry {
     }
 
     var modelName: String {
+        if subtitles == true { return TranscribeViewModel.subtitlesModelDisplayName }
         guard let model else { return "—" }
         return TranscriptionModel(rawValue: model)?.displayName ?? model
     }
@@ -386,12 +387,12 @@ private struct RunDetailView: View {
                 }
 
                 LabeledContent("Mode") {
-                    Text(entry.diarize ? "Diarized" : "Standard")
+                    Text(entry.subtitles == true ? "Subtitles" : entry.diarize ? "Diarized" : "Standard")
                 }
 
-                if let rawModel = entry.model {
+                if entry.model != nil || entry.subtitles == true {
                     LabeledContent("Model") {
-                        Text(TranscriptionModel(rawValue: rawModel)?.displayName ?? rawModel)
+                        Text(entry.modelName)
                     }
                 }
 
@@ -408,6 +409,12 @@ private struct RunDetailView: View {
                         Text(KeywordList.displayText(keywords))
                             .textSelection(.enabled)
                             .multilineTextAlignment(.trailing)
+                    }
+                }
+
+                if let audioTrack = entry.audioTrack {
+                    LabeledContent("Audio Track") {
+                        Text("\(audioTrack + 1)")
                     }
                 }
 

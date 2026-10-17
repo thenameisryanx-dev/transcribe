@@ -15,6 +15,7 @@ from lecture_transcribe import (
     parse_language_codes,
     get_last_keychain_error,
     is_valid_api_key,
+    list_audio_tracks,
     load_api_key_from_keyring,
     save_api_key_to_keyring,
 )
@@ -120,6 +121,15 @@ def command_set_key(args: argparse.Namespace) -> int:
     return 2
 
 
+def command_audio_tracks(args: argparse.Namespace) -> int:
+    input_path = Path(args.input).expanduser()
+    if not input_path.exists():
+        print(json.dumps({"error": f"Input file not found: {input_path}"}, ensure_ascii=False))
+        return 2
+    print(json.dumps({"tracks": list_audio_tracks(input_path)}, ensure_ascii=False))
+    return 0
+
+
 def _raise_keyboard_interrupt(_signum, _frame) -> None:
     raise KeyboardInterrupt
 
@@ -133,13 +143,15 @@ def command_run(args: argparse.Namespace) -> int:
     input_path = Path(args.input).expanduser()
     output_dir = Path(args.output).expanduser()
     diarize = bool(args.diarize)
+    subtitles = bool(args.subtitles)
     model = str(args.model or MODEL_GPT4O_TRANSCRIBE).strip()
 
     if not input_path.exists():
         emit("error", f"Input file not found: {input_path}")
         return 2
 
-    if diarize and model == MODEL_GPT4O_MINI_TRANSCRIBE:
+    # Subtitles always run on the diarize model and drop speaker labels, so the selected model doesn't matter.
+    if diarize and not subtitles and model == MODEL_GPT4O_MINI_TRANSCRIBE:
         emit(
             "error",
             "Speaker diarization is not supported with gpt-4o-mini-transcribe. "
@@ -179,6 +191,8 @@ def command_run(args: argparse.Namespace) -> int:
             carry_context=bool(args.carry_context),
             chunk_seconds=args.chunk_seconds,
             keywords=keywords,
+            subtitles=subtitles,
+            audio_track=args.audio_track,
         )
         emit("done", str(out_path.resolve()))
         return 0
@@ -258,10 +272,24 @@ def parse_args() -> argparse.Namespace:
     set_key.add_argument("--save", action="store_true", help="Persist to system keychain.")
     set_key.add_argument("--skip-check", action="store_true", help="Don't check the key with OpenAI first.")
 
+    audio_tracks = sub.add_parser("audio-tracks", help="List a file's audio tracks as JSON.")
+    audio_tracks.add_argument("--input", required=True, help="Input media file path.")
+
     run = sub.add_parser("run", help="Run a transcription job.")
     run.add_argument("--input", required=True, help="Input media file path.")
     run.add_argument("--output", required=True, help="Output directory path.")
     run.add_argument("--diarize", action="store_true", help="Enable speaker diarization.")
+    run.add_argument(
+        "--audio-track",
+        type=int,
+        default=0,
+        help="Which audio track to transcribe, counting audio tracks only from 0 (default: the first).",
+    )
+    run.add_argument(
+        "--subtitles",
+        action="store_true",
+        help="Write timed subtitles (.srt) instead of a transcript. Always uses the diarize model; overrides --diarize.",
+    )
     run.add_argument(
         "--model",
         default=MODEL_GPT4O_TRANSCRIBE,
@@ -312,6 +340,8 @@ def main() -> int:
         return command_key_status(args)
     if args.command == "set-key":
         return command_set_key(args)
+    if args.command == "audio-tracks":
+        return command_audio_tracks(args)
     if args.command == "run":
         code = command_run(args)
         # In-flight chunk requests run on worker threads that a normal exit would wait on;

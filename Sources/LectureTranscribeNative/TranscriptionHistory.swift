@@ -42,6 +42,10 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     var consistencyMode: Bool? = nil
     // Optional so older history still decodes. Seconds of audio per request; nil for diarized runs.
     var chunkSeconds: Int? = nil
+    // Optional so older history still decodes. True when the run wrote timed subtitles (.srt) instead of a transcript.
+    var subtitles: Bool? = nil
+    // Optional so older history still decodes. Audio track transcribed (0 = first); nil means the first.
+    var audioTrack: Int? = nil
 
     var hasWarnings: Bool {
         !(warnings ?? []).isEmpty

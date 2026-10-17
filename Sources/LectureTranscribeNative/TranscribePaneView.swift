@@ -25,23 +25,38 @@ struct TranscribePaneView: View {
                     .howToTarget(.account)
             }
 
-            VStack(spacing: 18) {
-                recordingView
-                    .howToTarget(.inputOutput)
+            // Scrolls when the options and an open Run Log don't fit; otherwise stays centered. Without this the
+            // content's height sets the window's minimum height (.contentSize), pushing the window past the screen.
+            GeometryReader { proxy in
+                ScrollView {
+                    VStack(spacing: 18) {
+                        recordingView
+                            .howToTarget(.inputOutput)
 
-                if !viewModel.hasTranscribedCurrentRecording {
-                    VStack(spacing: 14) {
-                        if !trimmedAudioPath.isEmpty {
-                            contextOption
+                        if !viewModel.hasTranscribedCurrentRecording {
+                            VStack(spacing: 14) {
+                                // Subtitles are their own mode: options they don't use are hidden rather than shown
+                                // switched off, so nothing on screen contradicts the mode.
+                                if !trimmedAudioPath.isEmpty && !viewModel.subtitlesEnabled {
+                                    contextOption
+                                }
+                                if viewModel.hasMultipleAudioTracks {
+                                    audioTrackOption
+                                }
+                                spokenLanguageOption
+                                subtitlesOption
+                                if !viewModel.subtitlesEnabled {
+                                    speakerLabelsOption
+                                    chunkLengthOption
+                                }
+                            }
+                            .howToTarget(.options)
                         }
-                        speakerLabelsOption
-                        chunkLengthOption
                     }
-                    .howToTarget(.options)
+                    .padding(20)
+                    .frame(maxWidth: .infinity, minHeight: proxy.size.height)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(20)
             .overlay {
                 if isAudioFileDropTargeted && !viewModel.isRunning {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -71,9 +86,12 @@ struct TranscribePaneView: View {
             ToolbarItem(placement: .primaryAction) {
                 ModelSelectionMenu(
                     selectedModel: $viewModel.selectedTranscriptionModel,
-                    isDisabled: viewModel.isRunning
+                    isDisabled: viewModel.isRunning,
+                    fixedModelName: viewModel.subtitlesEnabled ? TranscribeViewModel.subtitlesModelDisplayName : nil
                 )
-                .help("Transcription model")
+                .help(viewModel.subtitlesEnabled
+                    ? "Subtitles always use \(TranscribeViewModel.subtitlesModelDisplayName), the model that returns timing for each line."
+                    : "Transcription model")
             }
 
             if #available(macOS 26.0, *) {
@@ -101,12 +119,14 @@ struct TranscribePaneView: View {
                 .help("Stops the active transcription run.")
 
                 if viewModel.hasTranscribedCurrentRecording {
-                    Button("Open Transcript") {
+                    Button(viewModel.latestOutputIsSubtitles ? "Open Subtitles" : "Open Transcript") {
                         viewModel.openLatestTranscript()
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .help("Open the finished transcript (Return)")
+                    .help(viewModel.latestOutputIsSubtitles
+                        ? "Open the finished subtitle file (Return)"
+                        : "Open the finished transcript (Return)")
                 } else {
                     Button("Start Transcribing") {
                         viewModel.startTranscription()
@@ -277,7 +297,7 @@ struct TranscribePaneView: View {
             }
 
             if !viewModel.hasTranscribedCurrentRecording {
-                Text("Transcripts are saved to \(outputFolder).")
+                Text("\(viewModel.subtitlesEnabled ? "Subtitles" : "Transcripts") are saved to \(outputFolder).")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -292,7 +312,7 @@ struct TranscribePaneView: View {
         VStack(spacing: 12) {
             if viewModel.runWarnings.isEmpty {
                 Label {
-                    Text("Transcription Complete")
+                    Text(viewModel.latestOutputIsSubtitles ? "Subtitles Complete" : "Transcription Complete")
                 } icon: {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
@@ -321,6 +341,17 @@ struct TranscribePaneView: View {
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
+            }
+
+            if viewModel.latestOutputIsSubtitles {
+                Text(
+                    "Open the video in IINA or VLC and drag this file onto it. Kept next to the video "
+                        + "with the same name, it loads on its own. QuickTime Player can't load .srt files."
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
             }
 
             HStack(spacing: 10) {
@@ -434,9 +465,66 @@ struct TranscribePaneView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Text("Spoken language: \(viewModel.spokenLanguageSummary). Change in Settings.")
+        }
+    }
+
+    private var audioTrackOption: some View {
+        VStack(spacing: 4) {
+            Picker("Audio track", selection: $viewModel.selectedAudioTrack) {
+                ForEach(viewModel.audioTracks) { track in
+                    Text(track.displayName).tag(track.index)
+                }
+            }
+            .fixedSize()
+            .disabled(viewModel.isRunning)
+            .help("Videos can have one audio track per language. Only the chosen track is transcribed.")
+            if let mismatch = viewModel.audioTrackLanguageMismatch {
+                Label(mismatch, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+            } else {
+                Text("This file has \(viewModel.audioTracks.count) audio tracks. Only the chosen one is transcribed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// The same setting as Settings ▸ Spoken Language, here so it can be changed per recording.
+    private var spokenLanguageOption: some View {
+        VStack(spacing: 4) {
+            Picker("Spoken language", selection: $viewModel.effectiveSpokenLanguage) {
+                ForEach(SpokenLanguage.all) { language in
+                    Text(language.displayName)
+                        .tag(language.code)
+                        .unselectable(language == .autoDetect && !viewModel.isAutoDetectAvailable)
+                }
+            }
+            .fixedSize()
+            .disabled(viewModel.isRunning)
+            .help("The language spoken in the recording. Also in Settings.")
+            Text(
+                viewModel.isAutoDetectAvailable
+                    ? "The language spoken in the recording, or Auto-detect."
+                    : "\(viewModel.languageModelDisplayName) can't auto-detect, so pick the language spoken."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var subtitlesOption: some View {
+        VStack(spacing: 4) {
+            Toggle("Make subtitles (.srt)", isOn: $viewModel.subtitlesEnabled)
+                .toggleStyle(.checkbox)
+                .disabled(viewModel.isRunning)
+                .accessibilityLabel("Make subtitles")
+            Text("Timed captions for a video, instead of a transcript. Uses \(TranscribeViewModel.subtitlesModelDisplayName) · $0.006/min.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
     }
 
@@ -666,6 +754,8 @@ struct TranscribePaneView: View {
 private struct ModelSelectionMenu: View {
     @Binding var selectedModel: TranscriptionModel
     let isDisabled: Bool
+    /// Shown instead of the selected model, with the menu locked, when the run uses a fixed model (subtitles).
+    var fixedModelName: String? = nil
 
     var body: some View {
         Menu {
@@ -686,11 +776,11 @@ private struct ModelSelectionMenu: View {
                 .help(model.hoverDescription)
             }
         } label: {
-            Text(selectedModel.displayName)
+            Text(fixedModelName ?? selectedModel.displayName)
         }
         .accessibilityLabel("Transcription Model")
         .fixedSize()
-        .disabled(isDisabled)
+        .disabled(isDisabled || fixedModelName != nil)
     }
 }
 

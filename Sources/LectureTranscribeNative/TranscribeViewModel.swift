@@ -23,7 +23,7 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
     var hoverDescription: String {
         switch self {
         case .gptTranscribe:
-            return "Experimental. Uses the spoken language set in Settings (English if auto-detect). Supports speaker diarization. In testing it sometimes skipped quiet or whispered speech."
+            return "Experimental. Uses the spoken language you pick (English if auto-detect). Supports speaker diarization. In testing it sometimes skipped quiet or whispered speech."
         case .gpt4oTranscribe:
             return "Accurate and supports speaker diarization."
         case .gpt4oMiniTranscribe:
@@ -122,12 +122,75 @@ struct SpokenLanguage: Identifiable, Hashable {
     }
 }
 
+/// One audio track in the selected file, as listed by the backend's `audio-tracks` command.
+/// Videos often carry one track per language (e.g. Italian first, English second).
+struct AudioTrack: Identifiable, Equatable, Sendable, Decodable {
+    /// Position among the file's audio tracks, from 0 (ffmpeg's `0:a:N`).
+    let index: Int
+    /// The file's language tag, usually three letters ("eng"); empty when untagged.
+    let language: String
+    let title: String
+    let codec: String
+    let channels: Int?
+    let `default`: Bool
+
+    var id: Int { index }
+
+    /// Older three-letter tags that `Locale` doesn't map to two-letter codes.
+    private static let bibliographicCodes = [
+        "alb": "sq", "arm": "hy", "baq": "eu", "bur": "my", "chi": "zh", "cze": "cs", "dut": "nl", "fre": "fr",
+        "geo": "ka", "ger": "de", "gre": "el", "ice": "is", "mac": "mk", "may": "ms", "per": "fa", "rum": "ro",
+        "slo": "sk", "tib": "bo", "wel": "cy",
+    ]
+
+    /// Two-letter code comparable with `SpokenLanguage` codes, or nil when the track has no language tag.
+    var languageCode: String? {
+        guard !language.isEmpty else { return nil }
+        if let code = Self.bibliographicCodes[language] { return code }
+        return Locale.Language(identifier: language).languageCode?.identifier ?? language
+    }
+
+    var languageName: String? {
+        languageCode.flatMap { Locale.current.localizedString(forLanguageCode: $0)?.capitalized }
+    }
+
+    /// e.g. "Track 2: English · 5.1"
+    var displayName: String {
+        var parts: [String] = []
+        let name = languageName ?? (title.isEmpty ? "Unknown language" : title)
+        parts.append(name)
+        if !title.isEmpty && title.caseInsensitiveCompare(name) != .orderedSame {
+            parts.append(title)
+        }
+        switch channels {
+        case 1: parts.append("Mono")
+        case 2: parts.append("Stereo")
+        case 6: parts.append("5.1")
+        case 8: parts.append("7.1")
+        case let count?: parts.append("\(count) channels")
+        case nil: break
+        }
+        return "Track \(index + 1): " + parts.joined(separator: " · ")
+    }
+
+    /// The track to start on: the one in the spoken language when there is one, else the file's default track.
+    static func preferredIndex(in tracks: [AudioTrack], spokenLanguage: String) -> Int {
+        if !spokenLanguage.isEmpty, let match = tracks.first(where: { $0.languageCode == spokenLanguage }) {
+            return match.index
+        }
+        return tracks.first(where: \.default)?.index ?? 0
+    }
+}
+
 @MainActor
 final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published var selectedPane: NavigationPane? = .transcribe
 
     @Published var audioFilePath = "" {
         didSet {
+            if oldValue != audioFilePath {
+                loadAudioTracks()
+            }
             // A different recording starts a fresh draft, so results from the previous
             // file no longer drive the toolbar's primary action.
             guard oldValue != audioFilePath, !isRunning else { return }
@@ -210,8 +273,27 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             if diarizeEnabled && !selectedTranscriptionModel.supportsDiarization {
                 diarizeEnabled = false
             }
+            if diarizeEnabled && subtitlesEnabled {
+                subtitlesEnabled = false
+            }
         }
     }
+    /// The model subtitle runs use whatever model is selected (the backend's MODEL_DIARIZE).
+    nonisolated static let subtitlesModelDisplayName = "GPT-4o Transcribe Diarize"
+    /// Write timed subtitles (.srt) for a video instead of a transcript. Subtitles always use the diarize model,
+    /// the only one that returns timing, so this works with any selected model and turns speaker labels off.
+    @Published var subtitlesEnabled = false {
+        didSet {
+            if subtitlesEnabled && diarizeEnabled {
+                diarizeEnabled = false
+            }
+        }
+    }
+
+    /// Audio tracks in the selected file; the picker only appears when there is more than one.
+    @Published private(set) var audioTracks: [AudioTrack] = []
+    /// Index of the audio track to transcribe (see `AudioTrack.index`).
+    @Published var selectedAudioTrack = 0
 
     @Published var apiKeyStatusText = "API key: checking..."
     @Published var statusText = "Ready"
@@ -253,6 +335,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private static let chunkLengthDefaultsKey = "chunkLengthSeconds"
     private let defaultOutputFolderPath: String
     private var runTask: Task<Void, Never>?
+    private var audioTracksTask: Task<Void, Never>?
     private var cancellationRequested = false
     private var activeHistoryEntryID: UUID?
     private var activeHistoryEntryFinalized = false
@@ -314,15 +397,32 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         "\(Int(progressValue.rounded()))%"
     }
 
-    /// The language the selected model will use. Auto-detect becomes English for GPT Transcribe, but the
-    /// stored choice stays auto-detect so switching back to a GPT-4o model restores it.
+    /// Whether the model that will run needs a language. GPT Transcribe does, but subtitle runs use the
+    /// diarize model whatever is selected, and it can auto-detect.
+    var runRequiresSpokenLanguage: Bool {
+        !subtitlesEnabled && selectedTranscriptionModel.requiresSpokenLanguages
+    }
+
+    /// The model whose language rules apply: the one that will run.
+    var languageModelDisplayName: String {
+        subtitlesEnabled ? Self.subtitlesModelDisplayName : selectedTranscriptionModel.displayName
+    }
+
+    /// Language codes sent to the backend. Auto-detect becomes English when the model needs a language.
+    var spokenLanguageCodesForRun: [String] {
+        if !spokenLanguage.isEmpty { return [spokenLanguage] }
+        return runRequiresSpokenLanguage ? [SpokenLanguage.fallbackCode] : []
+    }
+
+    /// The language the run will use. Auto-detect shows as English when the model needs a language, but the
+    /// stored choice stays auto-detect so switching to a model (or subtitles) that can detect it restores it.
     var effectiveSpokenLanguage: String {
-        get { SpokenLanguage.backendCodes(for: spokenLanguage, model: selectedTranscriptionModel).first ?? "" }
+        get { spokenLanguageCodesForRun.first ?? "" }
         set { spokenLanguage = newValue }
     }
 
     var isAutoDetectAvailable: Bool {
-        !selectedTranscriptionModel.requiresSpokenLanguages
+        !runRequiresSpokenLanguage
     }
 
     var spokenLanguageSummary: String {
@@ -333,14 +433,34 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         contextPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// The diarize model doesn't accept a prompt, so context and consistency mode don't apply.
+    /// The diarize model (used for speaker labels and subtitles) doesn't accept a prompt, so context and
+    /// consistency mode don't apply.
     var isContextAvailable: Bool {
-        !diarizeEnabled
+        !diarizeEnabled && !subtitlesEnabled
     }
 
-    /// Diarized runs use their own chunk size.
+    /// Diarized and subtitle runs use their own chunk size.
     var isChunkLengthAvailable: Bool {
-        !diarizeEnabled
+        !diarizeEnabled && !subtitlesEnabled
+    }
+
+    var hasMultipleAudioTracks: Bool {
+        audioTracks.count > 1
+    }
+
+    /// Set when the chosen track is tagged with a language other than the spoken language the model is told.
+    var audioTrackLanguageMismatch: String? {
+        guard hasMultipleAudioTracks,
+              let track = audioTracks.first(where: { $0.index == selectedAudioTrack }),
+              let trackCode = track.languageCode, let trackName = track.languageName,
+              !effectiveSpokenLanguage.isEmpty, trackCode != effectiveSpokenLanguage
+        else { return nil }
+        return "This track is \(trackName), but the spoken language is \(spokenLanguageSummary). Pick another track, or change the spoken language."
+    }
+
+    /// True when the finished run wrote subtitles rather than a transcript.
+    var latestOutputIsSubtitles: Bool {
+        latestOutputPath.map { ($0 as NSString).pathExtension.lowercased() == "srt" } ?? false
     }
 
     var effectiveChunkLength: ChunkLength {
@@ -528,7 +648,16 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             showError("Transcript file no longer exists:\n\(latestOutputPath ?? "")")
             return
         }
-        NSWorkspace.shared.open(URL(fileURLWithPath: latestOutputPath))
+        Self.openOrReveal(URL(fileURLWithPath: latestOutputPath))
+    }
+
+    /// Opens a file in its default app, or shows it in Finder when no app opens that type (e.g. .srt files).
+    private static func openOrReveal(_ url: URL) {
+        if NSWorkspace.shared.urlForApplication(toOpen: url) == nil {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     func revealLatestTranscript() {
@@ -550,7 +679,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             return
         }
 
-        NSWorkspace.shared.open(URL(fileURLWithPath: outputPath))
+        Self.openOrReveal(URL(fileURLWithPath: outputPath))
     }
 
     func revealHistoryOutput(_ entry: TranscriptionHistoryEntry) {
@@ -578,6 +707,9 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             selectedTranscriptionModel = entryModel
         }
         diarizeEnabled = entry.diarize
+        subtitlesEnabled = entry.subtitles ?? false
+        // Set after audioFilePath, whose change resets the track; the track list loading afterwards keeps it.
+        selectedAudioTrack = entry.audioTrack ?? 0
         if let chunkLength = entry.chunkSeconds.flatMap(ChunkLength.init(rawValue:)) {
             chunkLengthPreference = chunkLength
         }
@@ -654,7 +786,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             return
         }
 
-        let languages = SpokenLanguage.backendCodes(for: spokenLanguage, model: selectedTranscriptionModel)
+        let languages = spokenLanguageCodesForRun
 
         if isKeywordsAvailable, let invalid = KeywordList.parse(keywordsText).first(where: KeywordList.isRejected) {
             showError("The keyword \"\(invalid)\" contains < or >, which OpenAI doesn't accept. Remove those characters, then try again.")
@@ -677,15 +809,19 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         canOpenOutputFolder = false
         runFailedForAPIKey = false
         isRunning = true
-        let shouldDiarize = diarizeEnabled && selectedTranscriptionModel.supportsDiarization
+        let makeSubtitles = subtitlesEnabled
+        let shouldDiarize = diarizeEnabled && selectedTranscriptionModel.supportsDiarization && !makeSubtitles
         if diarizeEnabled != shouldDiarize {
             diarizeEnabled = shouldDiarize
         }
+        // Speaker labels and subtitles both run on the diarize model, which takes no prompt or chunk length.
+        let usesDiarizeModel = shouldDiarize || makeSubtitles
         let model = selectedTranscriptionModel
-        let context = shouldDiarize ? "" : trimmedContextPrompt
-        let carryContext = !shouldDiarize && consistencyModeEnabled && model.supportsConsistencyMode
-        let chunkSeconds = shouldDiarize ? nil : effectiveChunkLength.seconds
-        let keywords = !shouldDiarize && model.supportsKeywords ? KeywordList.parse(keywordsText) : []
+        let context = usesDiarizeModel ? "" : trimmedContextPrompt
+        let carryContext = !usesDiarizeModel && consistencyModeEnabled && model.supportsConsistencyMode
+        let chunkSeconds = usesDiarizeModel ? nil : effectiveChunkLength.seconds
+        let keywords = !usesDiarizeModel && model.supportsKeywords ? KeywordList.parse(keywordsText) : []
+        let audioTrack = selectedAudioTrack
         if !context.isEmpty {
             recentContextPrompts = RecentContextPrompts.adding(context, to: recentContextPrompts)
         }
@@ -696,6 +832,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             inputPath: trimmedPath,
             outputDirectory: normalizedOutputDirectory,
             diarize: shouldDiarize,
+            subtitles: makeSubtitles,
+            audioTrack: audioTrack,
             model: model,
             context: context,
             keywords: keywords,
@@ -721,6 +859,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
                     inputPath: trimmedPath,
                     outputDirectory: normalizedOutputDirectory,
                     diarize: shouldDiarize,
+                    subtitles: makeSubtitles,
+                    audioTrack: audioTrack,
                     model: model.rawValue,
                     languages: languages,
                     context: context,
@@ -875,6 +1015,26 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         showingClearDraftConfirmation = false
     }
 
+    /// Lists the selected file's audio tracks and picks the one to transcribe.
+    private func loadAudioTracks() {
+        audioTracksTask?.cancel()
+        audioTracks = []
+        selectedAudioTrack = 0
+        let path = audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return }
+        audioTracksTask = Task { [weak self, backend] in
+            let tracks = (try? await backend.fetchAudioTracks(inputPath: path)) ?? []
+            guard let self, !Task.isCancelled,
+                  self.audioFilePath.trimmingCharacters(in: .whitespacesAndNewlines) == path
+            else { return }
+            self.audioTracks = tracks
+            // A run that already started (e.g. Re-run) keeps the track it was given.
+            if !self.isRunning {
+                self.selectedAudioTrack = AudioTrack.preferredIndex(in: tracks, spokenLanguage: self.effectiveSpokenLanguage)
+            }
+        }
+    }
+
     private func resetRunResult() {
         runWarnings = []
         statusText = "Ready"
@@ -971,6 +1131,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         inputPath: String,
         outputDirectory: String,
         diarize: Bool,
+        subtitles: Bool,
+        audioTrack: Int,
         model: TranscriptionModel,
         context: String,
         keywords: [String],
@@ -991,7 +1153,9 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             context: context.isEmpty ? nil : context,
             keywords: keywords.isEmpty ? nil : keywords,
             consistencyMode: consistencyMode,
-            chunkSeconds: chunkSeconds
+            chunkSeconds: chunkSeconds,
+            subtitles: subtitles ? true : nil,
+            audioTrack: audioTrack > 0 ? audioTrack : nil
         )
 
         activeHistoryEntryID = entry.id

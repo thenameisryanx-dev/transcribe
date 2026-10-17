@@ -216,10 +216,10 @@ private struct SettingsPaneView: View {
 
     private var spokenLanguageFooter: String {
         if viewModel.isAutoDetectAvailable {
-            return "The language spoken in your recordings. \(viewModel.selectedTranscriptionModel.displayName) "
+            return "The language spoken in your recordings. \(viewModel.languageModelDisplayName) "
                 + "can detect it automatically."
         }
-        return "The language spoken in your recordings. \(viewModel.selectedTranscriptionModel.displayName) "
+        return "The language spoken in your recordings. \(viewModel.languageModelDisplayName) "
             + "can't auto-detect, so it uses English unless you pick another language."
     }
 
@@ -232,7 +232,7 @@ private struct SettingsPaneView: View {
     }
 }
 
-private extension View {
+extension View {
     /// Greys out a picker option. `.disabled` has no effect on items in a macOS menu picker.
     @ViewBuilder
     func unselectable(_ isUnselectable: Bool) -> some View {

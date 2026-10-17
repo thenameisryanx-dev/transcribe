@@ -188,10 +188,24 @@ final class BackendClient: @unchecked Sendable {
         throw BackendError.invalidResponse("Unexpected response while setting API key.")
     }
 
+    func fetchAudioTracks(inputPath: String) async throws -> [AudioTrack] {
+        let output = try runSimpleCommand(["audio-tracks", "--input", inputPath])
+        if let error = output["error"] as? String {
+            throw BackendError.commandFailed(error)
+        }
+        guard let tracks = output["tracks"] else {
+            throw BackendError.invalidResponse("Could not parse audio track list.")
+        }
+        let data = try JSONSerialization.data(withJSONObject: tracks)
+        return try JSONDecoder().decode([AudioTrack].self, from: data)
+    }
+
     func startTranscription(
         inputPath: String,
         outputDirectory: String,
         diarize: Bool,
+        subtitles: Bool = false,
+        audioTrack: Int = 0,
         model: String,
         languages: [String] = [],
         context: String = "",
@@ -219,6 +233,12 @@ final class BackendClient: @unchecked Sendable {
         }
         if diarize {
             args.append("--diarize")
+        }
+        if subtitles {
+            args.append("--subtitles")
+        }
+        if audioTrack > 0 {
+            args.append(contentsOf: ["--audio-track", String(audioTrack)])
         }
 
         try await runStreamCommand(args: args, onEvent: onEvent)

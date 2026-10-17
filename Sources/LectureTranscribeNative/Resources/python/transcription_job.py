@@ -20,6 +20,7 @@ from lecture_transcribe import (
     MODEL_GPT_TRANSCRIBE,
     MODEL_MINI,
     MODEL_NORMAL,
+    SubtitleCue,
     audio_channel_count,
     build_transcript_header,
     cleanup_dir,
@@ -29,8 +30,10 @@ from lecture_transcribe import (
     extract_diarization_segments,
     extract_transcription_text,
     format_diarized_lines,
+    format_srt,
     get_duration_seconds,
     hhmmss,
+    list_audio_tracks,
     max_parallel_requests,
     require_ffmpeg,
     require_ffprobe,
@@ -38,6 +41,7 @@ from lecture_transcribe import (
     sentence_lines,
     single_language_hint,
     split_audio_to_chunks,
+    subtitle_cues,
     transcribe_chunk_checked,
     transcript_tail,
 )
@@ -139,9 +143,26 @@ def run_transcription_job(
     carry_context: bool = False,
     chunk_seconds: int | None = None,
     keywords: list[str] | None = None,
+    subtitles: bool = False,
+    audio_track: int = 0,
 ) -> Path:
     require_ffmpeg()
     require_ffprobe()
+
+    # Videos can carry one audio track per language; only the chosen one (0 = the first) is transcribed.
+    tracks = list_audio_tracks(input_path)
+    if tracks and not 0 <= audio_track < len(tracks):
+        raise SystemExit(
+            f"Audio track {audio_track + 1} doesn't exist; this file has {len(tracks)} audio track(s)."
+        )
+    if len(tracks) > 1:
+        track = tracks[audio_track]
+        details = ", ".join(str(v) for v in (track["language"], track["title"]) if v) or "no language tag"
+        push_event("log", f"Audio track: {audio_track + 1} of {len(tracks)} ({details}).")
+
+    if subtitles and diarize:
+        push_event("log", "Subtitles don't include speaker labels, so diarization is off for this run.")
+        diarize = False
 
     if transcription_model not in {MODEL_GPT_TRANSCRIBE, MODEL_NORMAL, MODEL_MINI}:
         push_event("log", f"Unknown model '{transcription_model}'. Falling back to {MODEL_NORMAL}.")
@@ -153,9 +174,12 @@ def run_transcription_job(
             "Select gpt-transcribe or gpt-4o-transcribe, or disable diarization."
         )
 
-    push_event("log", f"Using transcription model: {transcription_model}")
+    if subtitles:
+        push_event("log", f"Making subtitles with {MODEL_DIARIZE}, the model that returns timing for each line.")
+    else:
+        push_event("log", f"Using transcription model: {transcription_model}")
     # gpt-transcribe takes the whole list; the GPT-4o and diarize models take at most one `language`.
-    if transcription_model == MODEL_GPT_TRANSCRIBE and not diarize:
+    if transcription_model == MODEL_GPT_TRANSCRIBE and not diarize and not subtitles:
         chunk_languages = languages or list(DEFAULT_LANGUAGES)
         push_event("log", f"Spoken languages: {', '.join(chunk_languages)}")
     else:
@@ -163,13 +187,15 @@ def run_transcription_job(
         push_event("log", f"Spoken language: {single_language_hint(chunk_languages) or 'auto-detect'}")
 
     context = (context or "").strip() or None
-    if diarize:
+    if diarize or subtitles:
+        # Both run on the diarize model, which takes no prompt or keywords and has its own chunk size.
+        mode = "subtitles" if subtitles else "speaker labels"
         if chunk_seconds is not None:
-            push_event("log", "Chunk length setting isn't used with speaker labels; their own chunk size applies.")
+            push_event("log", f"Chunk length setting isn't used with {mode}; their own chunk size applies.")
         if context or carry_context:
-            push_event("log", "Context prompt isn't supported with speaker labels, so it won't be sent.")
+            push_event("log", f"Context prompt isn't supported with {mode}, so it won't be sent.")
         if keywords:
-            push_event("log", "Keywords aren't supported with speaker labels, so they won't be sent.")
+            push_event("log", f"Keywords aren't supported with {mode}, so they won't be sent.")
         context, carry_context, keywords = None, False, None
     else:
         if carry_context and transcription_model != MODEL_GPT_TRANSCRIBE:
@@ -192,6 +218,12 @@ def run_transcription_job(
 
     out_suffix = "_diarize" if diarize else ""
     out_path = output_dir / f"{stem}_{run_id}{out_suffix}.txt"
+    if subtitles:
+        # Video players load subtitles named after the video when they sit next to it, so use its exact name
+        # when that file doesn't exist yet. Players that match loosely also find the run-stamped name.
+        out_path = output_dir / f"{input_path.stem}.srt"
+        if out_path.exists():
+            out_path = output_dir / f"{input_path.stem}.{run_id}.srt"
 
     client = OpenAI()
     working_input_path = input_path
@@ -201,18 +233,32 @@ def run_transcription_job(
         if input_path.suffix.lower() == ".qta":
             push_event("log", "Detected .qta input. Converting to .m4a...")
             push_event("status", "Converting .qta input...")
-            converted_temp_path = convert_qta_to_m4a_copy(input_path, run_id)
+            converted_temp_path = convert_qta_to_m4a_copy(input_path, run_id, audio_track)
             working_input_path = converted_temp_path
+            # The converted file holds only the chosen track.
+            audio_track = 0
             push_event("log", f"Converted .qta to: {working_input_path.name}")
 
         # Surround sources keep dialogue in the center channel; split_audio_to_chunks mixes them to mono.
-        channels = audio_channel_count(working_input_path)
+        channels = audio_channel_count(working_input_path, audio_track)
         is_surround = channels is not None and channels > MAX_COPY_CHANNELS
         if is_surround:
             push_event("log", f"Source audio has {channels} channels. Mixing down to mono for transcription.")
 
         # Transcripts are written only after every chunk succeeds, so a failed or
         # cancelled run never leaves a partial file in the output folder.
+        if subtitles:
+            _write_subtitles(
+                client,
+                working_input_path,
+                out_path,
+                chunks_dir=CHUNKS_ROOT_DIR / f"{stem}_{run_id}_subtitles",
+                languages=chunk_languages,
+                audio_track=audio_track,
+                push_event=push_event,
+            )
+            return out_path
+
         if diarize:
             dur = get_duration_seconds(working_input_path)
             if 0 < dur <= DIARIZE_SINGLE_BUFFER:
@@ -223,7 +269,11 @@ def run_transcription_job(
                     # goes through the same copy-or-convert step as chunks. The audio is shorter than
                     # DIARIZE_MAX_SECONDS, so this yields exactly one piece.
                     parts = split_audio_to_chunks(
-                        working_input_path, single_dir, DIARIZE_MAX_SECONDS, on_progress=_prepare_progress(push_event)
+                        working_input_path,
+                        single_dir,
+                        DIARIZE_MAX_SECONDS,
+                        on_progress=_prepare_progress(push_event),
+                        audio_track=audio_track,
                     )
                     if len(parts) != 1:
                         raise SystemExit(f"Expected one audio piece for a single diarize request, got {len(parts)}.")
@@ -250,7 +300,11 @@ def run_transcription_job(
             # still removes any partial chunks.
             try:
                 parts = split_audio_to_chunks(
-                    working_input_path, run_chunks_dir, DIARIZE_CHUNK_SECONDS, on_progress=_prepare_progress(push_event)
+                    working_input_path,
+                    run_chunks_dir,
+                    DIARIZE_CHUNK_SECONDS,
+                    on_progress=_prepare_progress(push_event),
+                    audio_track=audio_track,
                 )
                 push_event("log", f"Prepared {len(parts)} chunk(s) for diarization.")
 
@@ -295,7 +349,11 @@ def run_transcription_job(
         push_event("status", "Preparing audio chunks...")
         try:
             parts = split_audio_to_chunks(
-                working_input_path, run_chunks_dir, chunk_seconds, on_progress=_prepare_progress(push_event)
+                working_input_path,
+                run_chunks_dir,
+                chunk_seconds,
+                on_progress=_prepare_progress(push_event),
+                audio_track=audio_track,
             )
             push_event("log", f"Prepared {len(parts)} chunk(s) for transcription.")
             # Chunks are cut at pauses, so their lengths vary; measure them for the section headers.
@@ -373,3 +431,51 @@ def run_transcription_job(
                 converted_temp_path.unlink()
             except Exception:
                 pass
+
+
+def _write_subtitles(
+    client: OpenAI,
+    working_input_path: Path,
+    out_path: Path,
+    *,
+    chunks_dir: Path,
+    languages: list[str] | None,
+    audio_track: int,
+    push_event,
+) -> None:
+    """Transcribes the audio with the diarize model, whose segments are timed, and writes them as an .srt file."""
+
+    def log(message: str) -> None:
+        push_event("log", message)
+
+    push_event("status", "Preparing audio chunks...")
+    try:
+        parts = split_audio_to_chunks(
+            working_input_path,
+            chunks_dir,
+            DIARIZE_CHUNK_SECONDS,
+            on_progress=_prepare_progress(push_event),
+            audio_track=audio_track,
+        )
+        push_event("log", f"Prepared {len(parts)} chunk(s) for subtitles.")
+        offsets = [start for start, _ in _chunk_spans(parts, DIARIZE_CHUNK_SECONDS)]
+        responses = _run_chunks_in_parallel(
+            parts,
+            lambda p: diarize_chunk(client, p, languages=languages, on_log=log),
+            push_event,
+            "Transcribing",
+        )
+    finally:
+        cleanup_dir(chunks_dir)
+
+    cues: list[SubtitleCue] = []
+    for chunk, (p, resp, offset) in enumerate(zip(parts, responses, offsets)):
+        chunk_cues = subtitle_cues(extract_diarization_segments(resp), offset, chunk)
+        if not chunk_cues and extract_transcription_text(resp).strip():
+            push_event("warning", f"{p.name}: the model returned text without timing, so this part has no subtitles.")
+        cues.extend(chunk_cues)
+
+    if not cues:
+        raise SystemExit("No speech was found in this file, so there are no subtitles to write.")
+    out_path.write_text(format_srt(cues), encoding="utf-8")
+    push_event("log", f"Wrote {len(cues)} subtitle lines.")
