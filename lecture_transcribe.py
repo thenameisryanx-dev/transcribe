@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import platform
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,6 +35,24 @@ MODEL_DIARIZE = "gpt-4o-transcribe-diarize"
 DIARIZE_MAX_SECONDS = 1400          # hard cap observed from API error
 DIARIZE_SINGLE_BUFFER = 1300        # be conservative: single request only if <= 1300s
 DIARIZE_CHUNK_SECONDS = 10 * 60     # smaller chunks reduce timeout risk on long recordings
+
+# Subtitles (.srt). Only the diarize model returns a start and end time for what it hears (the GPT-4o and
+# gpt-transcribe models return text alone), so subtitle runs always use it. Its segments can run long, so
+# each one is split into cues that fit on screen, with the segment's time shared out by length of text.
+# Limits follow Netflix's English (USA) Timed Text Style Guide and its Subtitle Timing Guidelines.
+SUBTITLE_LINE_CHARS = 42            # characters per line
+SUBTITLE_MAX_LINES = 2
+SUBTITLE_MAX_SECONDS = 7.0          # longest a cue stays on screen
+SUBTITLE_MIN_SECONDS = 5 / 6        # shortest a cue stays on screen (20 frames at 24fps)
+SUBTITLE_READING_CPS = 20.0         # adult reading speed, characters per second; slower text stays up longer
+SUBTITLE_LINGER_SECONDS = 0.5       # a cue stays up this long after its speech ends, so it isn't gone mid-read
+SUBTITLE_MIN_GAP_SECONDS = 2 / 24   # 2 frames between cues, so the eye sees one cue replace another
+SUBTITLE_CHAIN_GAP_SECONDS = 0.5    # shorter gaps than this look like flicker, so the earlier cue is held to the next
+# When a short line would be replaced before it can be read, it shares a cue with the next line: as one
+# block of text if the same person keeps talking, or one dash-prefixed line per speaker ("-Where were you?" /
+# "-Out.") when someone answers.
+SUBTITLE_DIALOGUE_DASH = "-"        # Netflix English style: a hyphen with no space
+SUBTITLE_SENTENCE_ENDS = (".", "?", "!", "…", '"', "”")
 
 # gpt-transcribe safeguards. Without a `languages` hint it drops speech; even with one it can
 # occasionally return no text (reported as `"languages": []`) or loop on repeated phrases.
@@ -493,6 +513,281 @@ def format_diarized_lines(segments: list[Any], offset_seconds: float = 0.0) -> l
     return lines
 
 
+def srt_timestamp(seconds: float) -> str:
+    ms = max(0, int(round(seconds * 1000)))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+# Where a subtitle may break, after Netflix's English line-break rules: break after punctuation, before a
+# conjunction or preposition; never between an article and its noun, a preposition and its object, a subject
+# pronoun or auxiliary and its verb, a verb and "not", or a first and last name. Lower cost is better.
+_BREAK_CONJUNCTIONS = frozenset(
+    "and but or nor so yet because that which who whom whose when whenever while if unless until although "
+    "though since where whether than".split()
+)
+_BREAK_PREPOSITIONS = frozenset(
+    "to in on at with from for of about into onto over under after before through without between around "
+    "across against during behind near toward towards like by".split()
+)
+_BREAK_DETERMINERS = frozenset(
+    "the a an this these those my your his her its our their some any no every each".split()
+)
+_BREAK_SUBJECT_PRONOUNS = frozenset("i we they he she".split())
+_BREAK_AUXILIARIES = frozenset(
+    "am is are was were be been being have has had do does did will would shall should can could may might "
+    "must i'm you're we're they're he's she's it's i've you've we've they've i'll you'll we'll they'll i'd "
+    "you'd we'd they'd don't doesn't didn't won't wouldn't can't couldn't shouldn't isn't aren't wasn't "
+    "weren't haven't hasn't hadn't not".split()
+)
+_SENTENCE_END_PUNCTUATION = (".", "?", "!", "…")
+_PAUSE_PUNCTUATION = (",", ";", ":", "—", "–", "-")
+_QUOTE_CHARS = "\"'“”‘’()[]"
+BREAK_BALANCE_CHARS = 10            # this many characters of uneven length cost as much as one rule point
+
+
+def _bare_word(word: str) -> str:
+    return word.strip(_QUOTE_CHARS).lower().replace("’", "'")
+
+
+def _break_cost(left: str, right: str) -> float:
+    """Cost of ending a line or cue after `left` and starting the next with `right`."""
+    tail = left.rstrip(_QUOTE_CHARS)
+    if tail.endswith(_SENTENCE_END_PUNCTUATION):
+        return -6.0
+    if tail.endswith(_PAUSE_PUNCTUATION):
+        return -4.0
+    before, after = _bare_word(left), _bare_word(right)
+    cost = 0.0
+    if after in _BREAK_CONJUNCTIONS:
+        cost -= 2.0
+    elif after in _BREAK_PREPOSITIONS:
+        cost -= 1.0
+    if before in _BREAK_DETERMINERS:
+        cost += 6.0
+    if before in _BREAK_PREPOSITIONS or before in _BREAK_SUBJECT_PRONOUNS or before in _BREAK_AUXILIARIES:
+        cost += 4.0
+    if before in _BREAK_CONJUNCTIONS:
+        cost += 3.0  # "and" belongs at the start of the next line, not the end of this one
+    if after == "not":
+        cost += 4.0
+    if left[:1].isupper() and right[:1].isupper() and before != "i":
+        cost += 3.0  # likely a name ("John | Smith")
+    return cost
+
+
+def _joined_length(words: list[str], start: int, stop: int) -> int:
+    return sum(len(w) for w in words[start:stop]) + max(0, stop - start - 1)
+
+
+def _length_cost(length: int, target: float, limit: int) -> float:
+    return abs(length - target) / BREAK_BALANCE_CHARS + 100.0 * max(0, length - limit)
+
+
+def wrap_subtitle_text(text: str, line_chars: int = SUBTITLE_LINE_CHARS) -> list[str]:
+    """
+    One line if it fits, otherwise two lines broken at the best place (see _break_cost), keeping both lines
+    within the limit and close in length, with the bottom line the longer one when it's a close call.
+    """
+    words = text.split()
+    if len(text) <= line_chars or len(words) < 2:
+        return [text]
+    total = _joined_length(words, 0, len(words))
+
+    def cost(k: int) -> float:
+        top, bottom = _joined_length(words, 0, k), _joined_length(words, k, len(words))
+        shape = 0.5 if top > bottom else 0.0  # Netflix prefers a bottom-heavy pyramid
+        return (
+            _break_cost(words[k - 1], words[k])
+            + _length_cost(top, total / 2, line_chars)
+            + _length_cost(bottom, total / 2, line_chars)
+            + shape
+        )
+
+    k = min(range(1, len(words)), key=cost)
+    return [" ".join(words[:k]), " ".join(words[k:])]
+
+
+def _split_at_best_breaks(text: str, parts: int, max_chars: int) -> list[str]:
+    """Splits text into `parts` pieces of at most max_chars, choosing breaks by _break_cost and even length."""
+    words = text.split()
+    if parts <= 1 or len(words) < parts:
+        return [text]
+    target = _joined_length(words, 0, len(words)) / parts
+    m = len(words)
+    # best[j][k]: lowest cost of splitting words[:k] into j pieces; back[j][k]: where the last piece starts.
+    best = [[math.inf] * (m + 1) for _ in range(parts + 1)]
+    back = [[0] * (m + 1) for _ in range(parts + 1)]
+    best[0][0] = 0.0
+    for j in range(1, parts + 1):
+        for k in range(j, m - (parts - j) + 1):
+            for a in range(j - 1, k):
+                if best[j - 1][a] == math.inf:
+                    continue
+                c = best[j - 1][a] + _length_cost(_joined_length(words, a, k), target, max_chars)
+                if a > 0:
+                    c += _break_cost(words[a - 1], words[a])
+                if c < best[j][k]:
+                    best[j][k], back[j][k] = c, a
+    pieces: list[str] = []
+    k = m
+    for j in range(parts, 0, -1):
+        a = back[j][k]
+        pieces.append(" ".join(words[a:k]))
+        k = a
+    return pieces[::-1]
+
+
+def subtitle_pieces(text: str, max_chars: int = SUBTITLE_LINE_CHARS * SUBTITLE_MAX_LINES) -> list[str]:
+    """Splits one segment's text into cue texts: whole sentences packed together, long ones split at natural breaks."""
+    groups: list[str] = []
+    for sentence in sentence_lines(text):
+        if groups and len(groups[-1]) + 1 + len(sentence) <= max_chars:
+            groups[-1] += " " + sentence
+        else:
+            groups.append(sentence)
+    pieces: list[str] = []
+    for group in groups:
+        pieces.extend(_split_at_best_breaks(group, math.ceil(len(group) / max_chars), max_chars))
+    return pieces
+
+
+@dataclass
+class SubtitleCue:
+    start: float
+    # When the cue's speech ends (estimated when a long segment was split); the on-screen end is set by format_srt.
+    end: float
+    text: str
+    # Who speaks, scoped to one chunk (the diarize model's labels restart in every request); None if unknown.
+    speaker: Any = None
+    # Set for a two-speaker cue: one dash-prefixed line per speaker, shown as is.
+    lines: tuple[str, ...] | None = None
+
+
+def subtitle_cues(segments: list[Any], offset_seconds: float = 0.0, chunk: int = 0) -> list[SubtitleCue]:
+    """Cues for timed diarize segments, shifted by the chunk's offset in the recording."""
+    cues: list[SubtitleCue] = []
+    for seg in segments:
+        speaker, start, end, text = _segment_fields(seg)
+        text = " ".join(text.split())
+        if start is None or end is None or not text:
+            continue
+        end = max(end, start)
+        speaker_key = (chunk, speaker) if speaker is not None else None
+        pieces = subtitle_pieces(text)
+        total_chars = sum(len(p) for p in pieces)
+        t = start
+        for piece in pieces:
+            share = (end - start) * len(piece) / total_chars
+            cues.append(SubtitleCue(offset_seconds + t, offset_seconds + t + share, piece, speaker_key))
+            t += share
+    return cues
+
+
+def _reading_seconds(chars: int) -> float:
+    """How long a cue with this many characters needs on screen to be read."""
+    return max(SUBTITLE_MIN_SECONDS, chars / SUBTITLE_READING_CPS)
+
+
+def _cue_chars(cue: SubtitleCue) -> int:
+    return sum(len(line) for line in cue.lines) if cue.lines else len(cue.text)
+
+
+def merge_quick_cues(cues: list[SubtitleCue]) -> list[SubtitleCue]:
+    """
+    Joins a cue with the next one when the next starts before the first can be read, if both fit in one cue
+    and in the longest time a cue may stay up (a joined cue can join the next one again). The same speaker's lines are joined as text. Two speakers
+    (in the same chunk, since labels restart in each) get one dash-prefixed line each, when each line is one
+    whole sentence that fits on a line with its dash.
+    """
+    def fits_dialogue_line(cue: SubtitleCue) -> bool:
+        return (
+            len(cue.text) + len(SUBTITLE_DIALOGUE_DASH) <= SUBTITLE_LINE_CHARS
+            and cue.text.endswith(SUBTITLE_SENTENCE_ENDS)
+            and len(sentence_lines(cue.text)) == 1
+        )
+
+    ordered = sorted(cues, key=lambda cue: cue.start)
+    merged: list[SubtitleCue] = []
+    i = 0
+    while i < len(ordered):
+        first = ordered[i]
+        second = ordered[i + 1] if i + 1 < len(ordered) else None
+        quick = (
+            second is not None
+            and first.speaker is not None
+            and second.speaker is not None
+            and first.lines is None
+            and second.lines is None
+            # The first line gets less time than it needs before the next one starts.
+            and second.start - first.start < _reading_seconds(len(first.text)) + SUBTITLE_LINGER_SECONDS
+            and second.end - first.start <= SUBTITLE_MAX_SECONDS
+        )
+        if quick and first.speaker == second.speaker and (
+            len(first.text) + 1 + len(second.text) <= SUBTITLE_LINE_CHARS * SUBTITLE_MAX_LINES
+        ):
+            # The joined cue takes the next one's place, so a run of quick lines can keep joining while it fits.
+            ordered[i + 1] = SubtitleCue(
+                first.start, max(first.end, second.end), f"{first.text} {second.text}", first.speaker
+            )
+            i += 1
+        elif (
+            quick
+            and first.speaker[0] == second.speaker[0]  # same chunk
+            and fits_dialogue_line(first)
+            and fits_dialogue_line(second)
+        ):
+            merged.append(SubtitleCue(
+                start=first.start,
+                end=max(first.end, second.end),
+                text=f"{first.text} {second.text}",
+                speaker=None,
+                lines=(SUBTITLE_DIALOGUE_DASH + first.text, SUBTITLE_DIALOGUE_DASH + second.text),
+            ))
+            i += 2
+        else:
+            merged.append(first)
+            i += 1
+    return merged
+
+
+def time_subtitle_cues(cues: list[SubtitleCue]) -> list[tuple[float, float, SubtitleCue]]:
+    """
+    (start, on-screen end, cue) for each cue, in order. A cue appears when its speech starts and stays up
+    until its speech ends plus a short linger, or longer if its text needs more reading time, but never past
+    7 seconds or into the next cue (a 2-frame gap is kept). A gap shorter than half a second is closed, since
+    a cue blinking off and straight back on reads as flicker. Speech that overlaps the next cue keeps its time.
+    """
+    ordered = sorted(cues, key=lambda cue: cue.start)
+    timed: list[tuple[float, float, SubtitleCue]] = []
+    for i, cue in enumerate(ordered):
+        start = cue.start
+        next_start = ordered[i + 1].start if i + 1 < len(ordered) else math.inf
+        latest = start + SUBTITLE_MAX_SECONDS
+        speech_end = min(cue.end, latest)
+        wanted = min(max(speech_end + SUBTITLE_LINGER_SECONDS, start + _reading_seconds(_cue_chars(cue))), latest)
+        limit = next_start - SUBTITLE_MIN_GAP_SECONDS
+        # Only speech that really overlaps the next cue (two people talking at once) runs into it; pieces of one
+        # segment, which end exactly where the next begins, keep the 2-frame gap.
+        floor = speech_end if speech_end > next_start + SUBTITLE_MIN_GAP_SECONDS else min(speech_end, limit)
+        end = max(min(wanted, limit), floor)
+        if 0 < limit - end < SUBTITLE_CHAIN_GAP_SECONDS - SUBTITLE_MIN_GAP_SECONDS and limit <= latest:
+            end = limit
+        timed.append((start, end, cue))
+    return timed
+
+
+def format_srt(cues: list[SubtitleCue]) -> str:
+    """SubRip text for the cues: quick two-speaker exchanges merged, then timed to the standards above."""
+    blocks: list[str] = []
+    for n, (start, end, cue) in enumerate(time_subtitle_cues(merge_quick_cues(cues)), start=1):
+        lines = "\n".join(cue.lines or wrap_subtitle_text(cue.text))
+        blocks.append(f"{n}\n{srt_timestamp(start)} --> {srt_timestamp(end)}\n{lines}")
+    return "\n\n".join(blocks) + "\n"
+
+
 def build_transcript_header(
     *,
     input_path: Path,
@@ -564,14 +859,56 @@ def get_duration_seconds(path: Path) -> float:
         return -1.0
 
 
-def audio_codec_name(path: Path) -> str | None:
-    """Codec of the first audio stream (e.g. "aac", "mp3"), or None if ffprobe can't tell."""
+def list_audio_tracks(path: Path) -> list[dict[str, Any]]:
+    """
+    The file's audio tracks in order, as {"index", "language", "title", "codec", "channels", "default"}.
+    `index` counts audio tracks only (0 is the first), matching ffmpeg's `0:a:N`. Empty if ffprobe can't read it.
+    """
     try:
         r = subprocess.run(
             [
                 *ffprobe_cmd_prefix(),
                 "-v", "error",
-                "-select_streams", "a:0",
+                "-select_streams", "a",
+                "-show_entries", "stream=codec_name,channels:stream_tags=language,title:stream_disposition=default",
+                "-of", "json",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            # ffprobe has no -nostdin flag (it made every call fail); keep it off stdin this way instead.
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+        streams = json.loads(r.stdout or "{}").get("streams") or []
+    except Exception:
+        return []
+
+    tracks: list[dict[str, Any]] = []
+    for i, stream in enumerate(streams):
+        tags = stream.get("tags") or {}
+        language = str(tags.get("language") or "").strip().lower()
+        tracks.append({
+            "index": i,
+            # "und" is how containers mark an unknown language.
+            "language": "" if language in ("", "und") else language,
+            "title": str(tags.get("title") or "").strip(),
+            "codec": str(stream.get("codec_name") or ""),
+            "channels": stream.get("channels"),
+            "default": bool((stream.get("disposition") or {}).get("default")),
+        })
+    return tracks
+
+
+def audio_codec_name(path: Path, audio_track: int = 0) -> str | None:
+    """Codec of the given audio track (e.g. "aac", "mp3"), or None if ffprobe can't tell."""
+    try:
+        r = subprocess.run(
+            [
+                *ffprobe_cmd_prefix(),
+                "-v", "error",
+                "-select_streams", f"a:{audio_track}",
                 "-show_entries", "stream=codec_name",
                 "-of", "default=nk=1:nw=1",
                 str(path),
@@ -595,14 +932,14 @@ def _copied_m4a_chunk_is_transcribable(path: Path) -> bool:
     return audio_codec_name(path) == "aac"
 
 
-def audio_channel_count(path: Path) -> int | None:
-    """Channels in the first audio stream, or None if ffprobe can't tell."""
+def audio_channel_count(path: Path, audio_track: int = 0) -> int | None:
+    """Channels in the given audio track, or None if ffprobe can't tell."""
     try:
         r = subprocess.run(
             [
                 *ffprobe_cmd_prefix(),
                 "-v", "error",
-                "-select_streams", "a:0",
+                "-select_streams", f"a:{audio_track}",
                 "-show_entries", "stream=channels",
                 "-of", "default=nk=1:nw=1",
                 str(path),
@@ -619,7 +956,9 @@ def audio_channel_count(path: Path) -> int | None:
         return None
 
 
-def _quietest_point(input_path: Path, window_start: float, window_seconds: float) -> float | None:
+def _quietest_point(
+    input_path: Path, window_start: float, window_seconds: float, audio_track: int = 0
+) -> float | None:
     """
     Return the absolute time of the quietest ~0.5s inside [window_start, window_start + window_seconds],
     or None if the window can't be analyzed.
@@ -635,7 +974,7 @@ def _quietest_point(input_path: Path, window_start: float, window_seconds: float
         "-t", f"{window_seconds:.3f}",
         "-i", str(input_path),
         "-vn",
-        "-map", "0:a:0",
+        "-map", f"0:a:{audio_track}",
         "-af",
         f"aresample={sample_rate},asetnsamples=n={frame_samples}:p=0,astats=metadata=1:reset=1,"
         "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
@@ -677,6 +1016,7 @@ def plan_chunk_cuts(
     input_path: Path,
     chunk_seconds: int,
     on_progress: Callable[[float], None] | None = None,
+    audio_track: int = 0,
 ) -> list[float]:
     """
     Cut times (seconds) for splitting into chunks of at most chunk_seconds, each moved back to the
@@ -693,7 +1033,7 @@ def plan_chunk_cuts(
     while total - previous > chunk_seconds:
         target = previous + chunk_seconds
         window_start = target - search
-        cut = _quietest_point(input_path, window_start, search)
+        cut = _quietest_point(input_path, window_start, search, audio_track)
         if cut is None or not (window_start <= cut <= target):
             cut = target
         cuts.append(cut)
@@ -757,9 +1097,11 @@ def split_audio_to_chunks(
     run_chunks_dir: Path,
     chunk_seconds: int,
     on_progress: Callable[[float], None] | None = None,
+    audio_track: int = 0,
 ) -> list[Path]:
     """
     Split input into pieces of at most chunk_seconds, cutting at pauses (see plan_chunk_cuts).
+    Only `audio_track` (0 = the first audio track) is used; videos can carry one track per language.
     Mono/stereo AAC is stream-copied (no quality loss) when every piece fits under MAX_UPLOAD_BYTES;
     anything else, including surround audio, is re-encoded to mono AAC.
     on_progress receives how far along the split is (0 to 1).
@@ -779,7 +1121,9 @@ def split_audio_to_chunks(
         report(SPLIT_PLAN_SHARE + (1 - SPLIT_PLAN_SHARE) * fraction)
 
     total = get_duration_seconds(input_path)
-    cuts = plan_chunk_cuts(input_path, chunk_seconds, on_progress=lambda f: report(SPLIT_PLAN_SHARE * f))
+    cuts = plan_chunk_cuts(
+        input_path, chunk_seconds, on_progress=lambda f: report(SPLIT_PLAN_SHARE * f), audio_track=audio_track
+    )
     report(SPLIT_PLAN_SHARE)
     if cuts:
         segment_args = ["-segment_times", ",".join(f"{c:.3f}" for c in cuts)]
@@ -789,10 +1133,10 @@ def split_audio_to_chunks(
     for old in run_chunks_dir.glob("part_*.m4a"):
         old.unlink()
 
-    channels = audio_channel_count(input_path)
+    channels = audio_channel_count(input_path, audio_track)
     # Only AAC can be copied into .m4a. Other codecs skip straight to re-encoding: MP3 would copy
     # fine but then be rejected, and WAV would fail to copy at all.
-    if (channels is None or channels <= MAX_COPY_CHANNELS) and audio_codec_name(input_path) in (None, "aac"):
+    if (channels is None or channels <= MAX_COPY_CHANNELS) and audio_codec_name(input_path, audio_track) in (None, "aac"):
         copy_cmd = [
             *ffmpeg_cmd_prefix(),
             "-nostdin",
@@ -805,7 +1149,7 @@ def split_audio_to_chunks(
             "-f", "segment",
             *segment_args,
             "-reset_timestamps", "1",
-            "-map", "0:a:0",
+            "-map", f"0:a:{audio_track}",
             "-c:a", "copy",
             str(run_chunks_dir / "part_%03d.m4a"),
         ]
@@ -841,7 +1185,7 @@ def split_audio_to_chunks(
         "-f", "segment",
         *segment_args,
         "-reset_timestamps", "1",
-        "-map", "0:a:0",
+        "-map", f"0:a:{audio_track}",
         "-c:a", "aac",
         "-ac", AUDIO_CHANNELS,
         "-b:a", AUDIO_BITRATE,
@@ -861,9 +1205,10 @@ def split_audio_to_chunks(
     return parts
 
 
-def convert_qta_to_m4a_copy(input_path: Path, run_id: str) -> Path:
+def convert_qta_to_m4a_copy(input_path: Path, run_id: str, audio_track: int = 0) -> Path:
     """
     Convert .qta (QuickTime container) to .m4a with stream copy to avoid quality loss.
+    The result holds only `audio_track`, so it is the converted file's first (and only) track.
     """
     CONVERTED_ROOT_DIR.mkdir(parents=True, exist_ok=True)
     out_path = CONVERTED_ROOT_DIR / f"{safe_stem_from_path(input_path)}_{run_id}.m4a"
@@ -878,7 +1223,7 @@ def convert_qta_to_m4a_copy(input_path: Path, run_id: str) -> Path:
         "-f", "mov",
         "-i", str(input_path),
         "-vn",
-        "-map", "0:a:0",
+        "-map", f"0:a:{audio_track}",
         "-c:a", "copy",
         str(out_path),
     ]
@@ -896,7 +1241,7 @@ def convert_qta_to_m4a_copy(input_path: Path, run_id: str) -> Path:
             "-f", "mov",
             "-i", str(input_path),
             "-vn",
-            "-map", "0:a:0",
+            "-map", f"0:a:{audio_track}",
             "-c:a", "aac",
             "-b:a", AUDIO_BITRATE,
             str(out_path),
