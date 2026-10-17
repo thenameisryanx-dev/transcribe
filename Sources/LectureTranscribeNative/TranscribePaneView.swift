@@ -383,6 +383,10 @@ struct TranscribePaneView: View {
                     Button("Open Video", action: viewModel.openLatestSubtitledVideo)
                         .help("Open the copy of the video with subtitles built in")
                 }
+                if viewModel.latestOutputIsSubtitles {
+                    Button("Edit Tracks…", action: viewModel.editTracksOfLatestRun)
+                        .help("Open the video in Tracks with these subtitles added, to choose which tracks to keep")
+                }
                 Button("Choose Another File…", action: viewModel.browseAudioFile)
             }
         }

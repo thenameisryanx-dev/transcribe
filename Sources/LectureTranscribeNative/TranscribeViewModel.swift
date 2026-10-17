@@ -145,9 +145,14 @@ struct AudioTrack: Identifiable, Equatable, Sendable, Decodable {
 
     /// Two-letter code comparable with `SpokenLanguage` codes, or nil when the track has no language tag.
     var languageCode: String? {
-        guard !language.isEmpty else { return nil }
-        if let code = Self.bibliographicCodes[language] { return code }
-        return Locale.Language(identifier: language).languageCode?.identifier ?? language
+        Self.languageCode(forTag: language)
+    }
+
+    /// Two-letter code for a file's language tag ("eng" → "en"), or nil when the tag is empty.
+    static func languageCode(forTag tag: String) -> String? {
+        guard !tag.isEmpty else { return nil }
+        if let code = bibliographicCodes[tag] { return code }
+        return Locale.Language(identifier: tag).languageCode?.identifier ?? tag
     }
 
     var languageName: String? {
@@ -332,6 +337,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published var howToGuideRequestToken = 0
 
     private let backend = BackendClient()
+    /// The Tracks pane's editor; kept here so a finished subtitle run can open its video there.
+    let trackEditor = TrackEditorModel()
     private let historyStore = TranscriptionHistoryStore()
     private let maxHistoryEntries = 200
     private static let selectedModelDefaultsKey = "selectedTranscriptionModel"
@@ -658,6 +665,17 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             return
         }
         Self.openOrReveal(URL(fileURLWithPath: latestOutputPath))
+    }
+
+    /// Opens the video just subtitled in the Tracks pane, with the new subtitles added as the default track.
+    func editTracksOfLatestRun() {
+        guard let completedAudioFilePath, let latestOutputPath, latestOutputIsSubtitles else { return }
+        selectedPane = .tracks
+        trackEditor.requestOpen(
+            videoPath: completedAudioFilePath,
+            addingSubtitleFile: latestOutputPath,
+            language: effectiveSpokenLanguage
+        )
     }
 
     func openLatestSubtitledVideo() {
