@@ -193,6 +193,7 @@ def command_run(args: argparse.Namespace) -> int:
             keywords=keywords,
             subtitles=subtitles,
             audio_track=args.audio_track,
+            embed_subtitles=bool(args.embed_subtitles),
         )
         emit("done", str(out_path.resolve()))
         return 0
@@ -289,6 +290,14 @@ def parse_args() -> argparse.Namespace:
         "--subtitles",
         action="store_true",
         help="Write timed subtitles (.srt) instead of a transcript. Always uses the diarize model; overrides --diarize.",
+    )
+    run.add_argument(
+        "--embed-subtitles",
+        action="store_true",
+        help=(
+            "With --subtitles, also save a copy of the video (.mp4, .m4v, .mov or .mkv, kept in the same format) "
+            "with the subtitles built in and shown by default, for players like QuickTime that can't load an .srt file."
+        ),
     )
     run.add_argument(
         "--model",

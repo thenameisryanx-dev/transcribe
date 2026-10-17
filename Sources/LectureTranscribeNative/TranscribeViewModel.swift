@@ -289,6 +289,13 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             }
         }
     }
+    /// With subtitles, also save a copy of the video with them built in, for QuickTime Player (which can't
+    /// load an .srt file). Kept when subtitles are switched off, but only used with them.
+    @Published var embedSubtitlesEnabled = false
+    /// Whether the next run saves a subtitled copy of the video.
+    var embedsSubtitlesForRun: Bool {
+        subtitlesEnabled && embedSubtitlesEnabled
+    }
 
     /// Audio tracks in the selected file; the picker only appears when there is more than one.
     @Published private(set) var audioTracks: [AudioTrack] = []
@@ -305,6 +312,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published var isRunning = false
     @Published var canOpenOutputFolder = false
     @Published var latestOutputPath: String?
+    /// The copy of the video with subtitles built in that the finished run saved, if any.
+    @Published private(set) var latestSubtitledVideoPath: String?
     /// The recording that produced `latestOutputPath`.
     @Published private(set) var completedAudioFilePath: String?
 
@@ -651,6 +660,14 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         Self.openOrReveal(URL(fileURLWithPath: latestOutputPath))
     }
 
+    func openLatestSubtitledVideo() {
+        guard let latestSubtitledVideoPath, FileManager.default.fileExists(atPath: latestSubtitledVideoPath) else {
+            showError("Video file no longer exists:\n\(latestSubtitledVideoPath ?? "")")
+            return
+        }
+        Self.openOrReveal(URL(fileURLWithPath: latestSubtitledVideoPath))
+    }
+
     /// Opens a file in its default app, or shows it in Finder when no app opens that type (e.g. .srt files).
     private static func openOrReveal(_ url: URL) {
         if NSWorkspace.shared.urlForApplication(toOpen: url) == nil {
@@ -708,6 +725,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         }
         diarizeEnabled = entry.diarize
         subtitlesEnabled = entry.subtitles ?? false
+        embedSubtitlesEnabled = entry.embedSubtitles ?? false
         // Set after audioFilePath, whose change resets the track; the track list loading afterwards keeps it.
         selectedAudioTrack = entry.audioTrack ?? 0
         if let chunkLength = entry.chunkSeconds.flatMap(ChunkLength.init(rawValue:)) {
@@ -805,11 +823,13 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         logText = ""
         runWarnings = []
         latestOutputPath = nil
+        latestSubtitledVideoPath = nil
         completedAudioFilePath = nil
         canOpenOutputFolder = false
         runFailedForAPIKey = false
         isRunning = true
         let makeSubtitles = subtitlesEnabled
+        let embedSubtitles = embedsSubtitlesForRun
         let shouldDiarize = diarizeEnabled && selectedTranscriptionModel.supportsDiarization && !makeSubtitles
         if diarizeEnabled != shouldDiarize {
             diarizeEnabled = shouldDiarize
@@ -833,6 +853,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             outputDirectory: normalizedOutputDirectory,
             diarize: shouldDiarize,
             subtitles: makeSubtitles,
+            embedSubtitles: embedSubtitles,
             audioTrack: audioTrack,
             model: model,
             context: context,
@@ -860,6 +881,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
                     outputDirectory: normalizedOutputDirectory,
                     diarize: shouldDiarize,
                     subtitles: makeSubtitles,
+                    embedSubtitles: embedSubtitles,
                     audioTrack: audioTrack,
                     model: model.rawValue,
                     languages: languages,
@@ -928,6 +950,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             canOpenOutputFolder = true
             appendLog("Done. Wrote: \(path)")
             finalizeActiveHistoryEntry(status: .success, outputPath: path, errorMessage: nil)
+        case let .subtitledCopy(path):
+            latestSubtitledVideoPath = path
         case .apiKeyProblem:
             runFailedForAPIKey = true
         case let .error(message):
@@ -1008,6 +1032,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         logText = ""
         runWarnings = []
         latestOutputPath = nil
+        latestSubtitledVideoPath = nil
         completedAudioFilePath = nil
         canOpenOutputFolder = false
         showingErrorAlert = false
@@ -1040,6 +1065,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         statusText = "Ready"
         progressValue = 0
         latestOutputPath = nil
+        latestSubtitledVideoPath = nil
         completedAudioFilePath = nil
         canOpenOutputFolder = false
     }
@@ -1132,6 +1158,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         outputDirectory: String,
         diarize: Bool,
         subtitles: Bool,
+        embedSubtitles: Bool,
         audioTrack: Int,
         model: TranscriptionModel,
         context: String,
@@ -1155,7 +1182,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             consistencyMode: consistencyMode,
             chunkSeconds: chunkSeconds,
             subtitles: subtitles ? true : nil,
-            audioTrack: audioTrack > 0 ? audioTrack : nil
+            audioTrack: audioTrack > 0 ? audioTrack : nil,
+            embedSubtitles: embedSubtitles ? true : nil
         )
 
         activeHistoryEntryID = entry.id

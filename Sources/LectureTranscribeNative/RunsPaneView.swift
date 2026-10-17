@@ -390,6 +390,12 @@ private struct RunDetailView: View {
                     Text(entry.subtitles == true ? "Subtitles" : entry.diarize ? "Diarized" : "Standard")
                 }
 
+                if entry.embedSubtitles == true {
+                    LabeledContent("Video Copy") {
+                        Text("Subtitles built in")
+                    }
+                }
+
                 if entry.model != nil || entry.subtitles == true {
                     LabeledContent("Model") {
                         Text(entry.modelName)

@@ -14,6 +14,7 @@ from lecture_transcribe import (
     DIARIZE_CHUNK_SECONDS,
     DIARIZE_MAX_SECONDS,
     DIARIZE_SINGLE_BUFFER,
+    EMBED_SUBTITLE_CODECS,
     KEYWORD_MODELS,
     MAX_COPY_CHANNELS,
     MODEL_DIARIZE,
@@ -27,6 +28,7 @@ from lecture_transcribe import (
     convert_qta_to_m4a_copy,
     diarize_chunk,
     diarize_whole_file,
+    embed_subtitles_copy,
     extract_diarization_segments,
     extract_transcription_text,
     format_diarized_lines,
@@ -145,6 +147,7 @@ def run_transcription_job(
     keywords: list[str] | None = None,
     subtitles: bool = False,
     audio_track: int = 0,
+    embed_subtitles: bool = False,
 ) -> Path:
     require_ffmpeg()
     require_ffprobe()
@@ -163,6 +166,9 @@ def run_transcription_job(
     if subtitles and diarize:
         push_event("log", "Subtitles don't include speaker labels, so diarization is off for this run.")
         diarize = False
+    if embed_subtitles and not subtitles:
+        push_event("log", "A subtitled copy of the video is only made with subtitles, so none will be saved.")
+        embed_subtitles = False
 
     if transcription_model not in {MODEL_GPT_TRANSCRIBE, MODEL_NORMAL, MODEL_MINI}:
         push_event("log", f"Unknown model '{transcription_model}'. Falling back to {MODEL_NORMAL}.")
@@ -257,6 +263,16 @@ def run_transcription_job(
                 audio_track=audio_track,
                 push_event=push_event,
             )
+            if embed_subtitles:
+                _save_subtitled_copy(
+                    input_path,
+                    out_path,
+                    output_dir,
+                    run_id=run_id,
+                    language=single_language_hint(chunk_languages),
+                    audio_track=audio_track,
+                    push_event=push_event,
+                )
             return out_path
 
         if diarize:
@@ -479,3 +495,56 @@ def _write_subtitles(
         raise SystemExit("No speech was found in this file, so there are no subtitles to write.")
     out_path.write_text(format_srt(cues), encoding="utf-8")
     push_event("log", f"Wrote {len(cues)} subtitle lines.")
+
+
+def _save_subtitled_copy(
+    input_path: Path,
+    srt_path: Path,
+    output_dir: Path,
+    *,
+    run_id: str,
+    language: str | None,
+    audio_track: int,
+    push_event,
+) -> None:
+    """
+    Saves a copy of the original video with the .srt built in as a subtitle track, for players like QuickTime
+    which can't load an .srt file. The .srt is already written, so a failed copy is a warning, not a failed run.
+    """
+    if input_path.suffix.lower() not in EMBED_SUBTITLE_CODECS:
+        kinds = ", ".join(sorted(EMBED_SUBTITLE_CODECS))
+        push_event(
+            "log",
+            f"Subtitles can only be built into {kinds} videos, "
+            f"so no copy of this {input_path.suffix.lower() or 'file'} was saved.",
+        )
+        return
+
+    # Named after the video like the .srt; a run-stamped name keeps an earlier copy from being overwritten.
+    out_path = output_dir / f"{input_path.stem}.subtitled{input_path.suffix}"
+    if out_path.exists():
+        out_path = output_dir / f"{input_path.stem}.subtitled.{run_id}{input_path.suffix}"
+    if out_path.exists():
+        push_event("warning", f"{out_path.name} already exists, so no copy of the video with subtitles was saved.")
+        return
+
+    push_event("status", "Saving a copy of the video with subtitles...")
+    reported = -1
+
+    def report(fraction: float) -> None:
+        # The progress bar is already full from transcribing, so the copy's progress goes in the status.
+        nonlocal reported
+        percent = int(fraction * 100)
+        if percent >= reported + 10:
+            reported = percent
+            push_event("status", f"Saving a copy of the video with subtitles ({percent}%)...")
+
+    try:
+        embed_subtitles_copy(
+            input_path, srt_path, out_path, language=language, audio_track=audio_track, on_progress=report
+        )
+    except SystemExit as exc:
+        push_event("warning", f"Couldn't save a copy of the video with subtitles: {exc} The .srt file was saved.")
+        return
+    push_event("log", f"Saved a copy of the video with subtitles: {out_path}")
+    push_event("subtitled_copy", str(out_path.resolve()))

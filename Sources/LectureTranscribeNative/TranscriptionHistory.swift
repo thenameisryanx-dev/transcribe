@@ -46,6 +46,9 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     var subtitles: Bool? = nil
     // Optional so older history still decodes. Audio track transcribed (0 = first); nil means the first.
     var audioTrack: Int? = nil
+    // Optional so older history still decodes. True when a subtitle run also saved a copy of the video
+    // with the subtitles built in.
+    var embedSubtitles: Bool? = nil
 
     var hasWarnings: Bool {
         !(warnings ?? []).isEmpty
