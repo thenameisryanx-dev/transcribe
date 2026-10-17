@@ -2,6 +2,7 @@ import SwiftUI
 
 enum NavigationPane: String, CaseIterable, Identifiable {
     case transcribe = "Transcribe"
+    case tracks = "Tracks"
     case runs = "Runs"
     case settings = "Settings"
 
@@ -11,6 +12,8 @@ enum NavigationPane: String, CaseIterable, Identifiable {
         switch self {
         case .transcribe:
             return "waveform.badge.mic"
+        case .tracks:
+            return "list.bullet.rectangle"
         case .runs:
             return "clock.arrow.circlepath"
         case .settings:
@@ -43,6 +46,8 @@ struct RootView: View {
                     TranscribePaneView()
                 case .transcribe:
                     TranscribePaneView()
+                case .tracks:
+                    TracksPaneView(editor: viewModel.trackEditor)
                 case .runs:
                     RunsPaneView()
                 case .settings:

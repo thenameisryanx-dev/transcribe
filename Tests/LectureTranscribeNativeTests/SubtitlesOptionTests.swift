@@ -85,4 +85,63 @@ final class SubtitlesOptionTests: XCTestCase {
         let entry = try decoder.decode(TranscriptionHistoryEntry.self, from: Data(json.utf8))
         XCTAssertNil(entry.subtitles)
     }
+
+    @MainActor
+    func testSubtitledCopyIsOnlyMadeWithSubtitles() {
+        let viewModel = TranscribeViewModel()
+        viewModel.embedSubtitlesEnabled = true
+        viewModel.subtitlesEnabled = false
+        XCTAssertFalse(viewModel.embedsSubtitlesForRun)
+        viewModel.subtitlesEnabled = true
+        XCTAssertTrue(viewModel.embedsSubtitlesForRun)
+        // Speaker labels switch subtitles off, and the copy with them.
+        viewModel.selectedTranscriptionModel = .gpt4oTranscribe
+        viewModel.diarizeEnabled = true
+        XCTAssertFalse(viewModel.embedsSubtitlesForRun)
+    }
+
+    func testEmbedSubtitlesArgumentNeedsSubtitles() {
+        func arguments(subtitles: Bool, embedSubtitles: Bool) -> [String] {
+            BackendClient.transcriptionArguments(
+                inputPath: "/tmp/Episode 3.mp4",
+                outputDirectory: "/tmp",
+                diarize: false,
+                subtitles: subtitles,
+                embedSubtitles: embedSubtitles,
+                model: "gpt-4o-transcribe"
+            )
+        }
+        let both = arguments(subtitles: true, embedSubtitles: true)
+        XCTAssertTrue(both.contains("--subtitles"))
+        XCTAssertTrue(both.contains("--embed-subtitles"))
+        XCTAssertFalse(arguments(subtitles: true, embedSubtitles: false).contains("--embed-subtitles"))
+        XCTAssertFalse(arguments(subtitles: false, embedSubtitles: true).contains("--embed-subtitles"))
+    }
+
+    @MainActor
+    func testSubtitledCopyEventIsShownAndClearedByTheNextRun() {
+        let viewModel = TranscribeViewModel()
+        viewModel.apply(event: .subtitledCopy("/tmp/Episode 3.subtitled.mp4"))
+        XCTAssertEqual(viewModel.latestSubtitledVideoPath, "/tmp/Episode 3.subtitled.mp4")
+        viewModel.clearDraft()
+        XCTAssertNil(viewModel.latestSubtitledVideoPath)
+    }
+
+    func testHistoryEntryRecordsEmbedSubtitlesAndOldEntriesStillDecode() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        let old = """
+        {"id":"11111111-2222-3333-4444-555555555555","startedAt":"2026-01-01T00:00:00Z",
+         "inputPath":"/tmp/a.mp4","outputDirectory":"/tmp","diarize":false,"status":"success","subtitles":true}
+        """
+        var entry = try decoder.decode(TranscriptionHistoryEntry.self, from: Data(old.utf8))
+        XCTAssertNil(entry.embedSubtitles)
+
+        entry.embedSubtitles = true
+        let roundTripped = try decoder.decode(TranscriptionHistoryEntry.self, from: encoder.encode(entry))
+        XCTAssertEqual(roundTripped.embedSubtitles, true)
+    }
 }

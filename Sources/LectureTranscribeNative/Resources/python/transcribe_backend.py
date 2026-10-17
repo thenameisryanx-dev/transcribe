@@ -11,6 +11,9 @@ from pathlib import Path
 from lecture_transcribe import (
     CHUNK_SECONDS_CHOICES,
     DEFAULT_LANGUAGES,
+    EMBED_SUBTITLE_CODECS,
+    list_media_tracks,
+    save_edited_tracks,
     parse_keywords,
     parse_language_codes,
     get_last_keychain_error,
@@ -130,6 +133,63 @@ def command_audio_tracks(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_tracks(args: argparse.Namespace) -> int:
+    input_path = Path(args.input).expanduser()
+    if not input_path.exists():
+        print(json.dumps({"error": f"Input file not found: {input_path}"}, ensure_ascii=False))
+        return 2
+    try:
+        tracks = list_media_tracks(input_path)
+    except SystemExit as exc:
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+        return 2
+    editable = input_path.suffix.lower() in EMBED_SUBTITLE_CODECS
+    print(json.dumps({"tracks": tracks, "editable": editable}, ensure_ascii=False))
+    return 0
+
+
+def command_save_tracks(args: argparse.Namespace) -> int:
+    # Cancelled like a run (see command_run), so the partial copy is removed.
+    signal.signal(signal.SIGINT, _raise_keyboard_interrupt)
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    input_path = Path(args.input).expanduser()
+    out_path = Path(args.output_file).expanduser()
+    try:
+        plan = json.loads(args.plan)
+        if not isinstance(plan, list):
+            raise ValueError("expected a list")
+    except ValueError as exc:
+        emit("error", f"Invalid track list: {exc}")
+        return 2
+    if not input_path.exists():
+        emit("error", f"Input file not found: {input_path}")
+        return 2
+
+    emit("status", "Saving...")
+    reported = -1
+
+    def report(fraction: float) -> None:
+        nonlocal reported
+        percent = int(fraction * 100)
+        if percent > reported:
+            reported = percent
+            emit("progress", float(percent))
+
+    try:
+        save_edited_tracks(input_path, out_path, plan, on_progress=report, replace_original=bool(args.replace_original))
+    except KeyboardInterrupt:
+        return 130
+    except SystemExit as exc:
+        emit("error", str(exc))
+        return 1
+    except Exception as exc:
+        emit("log", traceback.format_exc().rstrip())
+        emit("error", describe_run_error(exc))
+        return 1
+    emit("done", str(out_path.resolve()))
+    return 0
+
+
 def _raise_keyboard_interrupt(_signum, _frame) -> None:
     raise KeyboardInterrupt
 
@@ -193,6 +253,7 @@ def command_run(args: argparse.Namespace) -> int:
             keywords=keywords,
             subtitles=subtitles,
             audio_track=args.audio_track,
+            embed_subtitles=bool(args.embed_subtitles),
         )
         emit("done", str(out_path.resolve()))
         return 0
@@ -275,6 +336,28 @@ def parse_args() -> argparse.Namespace:
     audio_tracks = sub.add_parser("audio-tracks", help="List a file's audio tracks as JSON.")
     audio_tracks.add_argument("--input", required=True, help="Input media file path.")
 
+    tracks = sub.add_parser("tracks", help="List every track in a video as JSON.")
+    tracks.add_argument("--input", required=True, help="Video file path.")
+
+    save_tracks = sub.add_parser("save-tracks", help="Save a video with an edited list of tracks.")
+    save_tracks.add_argument("--input", required=True, help="Video file path.")
+    save_tracks.add_argument(
+        "--output-file", required=True, help="Where to save (same format as the video; the video itself with --replace-original)."
+    )
+    save_tracks.add_argument(
+        "--replace-original",
+        action="store_true",
+        help="Save into the video itself (--output-file must be --input). It's replaced only once the new file is complete.",
+    )
+    save_tracks.add_argument(
+        "--plan",
+        required=True,
+        help=(
+            'JSON list of the audio and subtitle tracks to keep, in order: {"kind", "index" or "file", '
+            '"language", "title", "default", "forced"}.'
+        ),
+    )
+
     run = sub.add_parser("run", help="Run a transcription job.")
     run.add_argument("--input", required=True, help="Input media file path.")
     run.add_argument("--output", required=True, help="Output directory path.")
@@ -289,6 +372,14 @@ def parse_args() -> argparse.Namespace:
         "--subtitles",
         action="store_true",
         help="Write timed subtitles (.srt) instead of a transcript. Always uses the diarize model; overrides --diarize.",
+    )
+    run.add_argument(
+        "--embed-subtitles",
+        action="store_true",
+        help=(
+            "With --subtitles, also save a copy of the video (.mp4, .m4v, .mov or .mkv, kept in the same format) "
+            "with the subtitles built in and shown by default, for players like QuickTime that can't load an .srt file."
+        ),
     )
     run.add_argument(
         "--model",
@@ -342,6 +433,10 @@ def main() -> int:
         return command_set_key(args)
     if args.command == "audio-tracks":
         return command_audio_tracks(args)
+    if args.command == "tracks":
+        return command_tracks(args)
+    if args.command == "save-tracks":
+        return command_save_tracks(args)
     if args.command == "run":
         code = command_run(args)
         # In-flight chunk requests run on worker threads that a normal exit would wait on;

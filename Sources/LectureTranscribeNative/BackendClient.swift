@@ -6,6 +6,8 @@ enum BackendStreamEvent: Sendable {
     case status(String)
     case progress(Double)
     case done(String)
+    /// A copy of the video with the subtitles built in was saved at this path.
+    case subtitledCopy(String)
     case error(String)
     /// The run failed because the API key is missing or OpenAI rejected it.
     case apiKeyProblem
@@ -200,11 +202,41 @@ final class BackendClient: @unchecked Sendable {
         return try JSONDecoder().decode([AudioTrack].self, from: data)
     }
 
+    /// Every track in a video, in file order.
+    func fetchMediaTracks(inputPath: String) async throws -> [MediaTrack] {
+        let output = try runSimpleCommand(["tracks", "--input", inputPath])
+        if let error = output["error"] as? String {
+            throw BackendError.commandFailed(error)
+        }
+        guard let tracks = output["tracks"] else {
+            throw BackendError.invalidResponse("Could not parse the track list.")
+        }
+        let data = try JSONSerialization.data(withJSONObject: tracks)
+        return try JSONDecoder().decode([MediaTrack].self, from: data)
+    }
+
+    /// Saves a video with the tracks in `planJSON` (see the backend's `save-tracks`), into the video itself
+    /// when `replaceOriginal` is set. Cancel with `cancelActiveRun()`.
+    func saveTracks(
+        inputPath: String,
+        outputPath: String,
+        planJSON: String,
+        replaceOriginal: Bool = false,
+        onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
+    ) async throws {
+        var args = ["save-tracks", "--input", inputPath, "--output-file", outputPath, "--plan", planJSON]
+        if replaceOriginal {
+            args.append("--replace-original")
+        }
+        try await runStreamCommand(args: args, onEvent: onEvent)
+    }
+
     func startTranscription(
         inputPath: String,
         outputDirectory: String,
         diarize: Bool,
         subtitles: Bool = false,
+        embedSubtitles: Bool = false,
         audioTrack: Int = 0,
         model: String,
         languages: [String] = [],
@@ -214,6 +246,38 @@ final class BackendClient: @unchecked Sendable {
         keywords: [String] = [],
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
     ) async throws {
+        let args = Self.transcriptionArguments(
+            inputPath: inputPath,
+            outputDirectory: outputDirectory,
+            diarize: diarize,
+            subtitles: subtitles,
+            embedSubtitles: embedSubtitles,
+            audioTrack: audioTrack,
+            model: model,
+            languages: languages,
+            context: context,
+            carryContext: carryContext,
+            chunkSeconds: chunkSeconds,
+            keywords: keywords
+        )
+        try await runStreamCommand(args: args, onEvent: onEvent)
+    }
+
+    /// The backend's `run` arguments for a transcription.
+    static func transcriptionArguments(
+        inputPath: String,
+        outputDirectory: String,
+        diarize: Bool,
+        subtitles: Bool = false,
+        embedSubtitles: Bool = false,
+        audioTrack: Int = 0,
+        model: String,
+        languages: [String] = [],
+        context: String = "",
+        carryContext: Bool = false,
+        chunkSeconds: Int? = nil,
+        keywords: [String] = []
+    ) -> [String] {
         var args = ["run", "--input", inputPath, "--output", outputDirectory]
         args.append(contentsOf: ["--model", model])
         if !languages.isEmpty {
@@ -236,12 +300,15 @@ final class BackendClient: @unchecked Sendable {
         }
         if subtitles {
             args.append("--subtitles")
+            // The copy is made from the subtitles, so it's only asked for with them.
+            if embedSubtitles {
+                args.append("--embed-subtitles")
+            }
         }
         if audioTrack > 0 {
             args.append(contentsOf: ["--audio-track", String(audioTrack)])
         }
-
-        try await runStreamCommand(args: args, onEvent: onEvent)
+        return args
     }
 
     func cancelActiveRun() {
@@ -332,6 +399,8 @@ final class BackendClient: @unchecked Sendable {
                     onEvent(.progress(number))
                 case "done":
                     onEvent(.done(String(describing: object["payload"] ?? "")))
+                case "subtitled_copy":
+                    onEvent(.subtitledCopy(String(describing: object["payload"] ?? "")))
                 case "error":
                     onEvent(.error(String(describing: object["payload"] ?? "")))
                 case "error_kind":

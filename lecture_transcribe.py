@@ -54,6 +54,24 @@ SUBTITLE_CHAIN_GAP_SECONDS = 0.5    # shorter gaps than this look like flicker, 
 SUBTITLE_DIALOGUE_DASH = "-"        # Netflix English style: a hyphen with no space
 SUBTITLE_SENTENCE_ENDS = (".", "?", "!", "…", '"', "”")
 
+# Subtitled copies of a video, in the same container, for players that don't load an .srt file (QuickTime
+# Player can't). The .srt is added without re-encoding, so only containers that hold text subtitles qualify,
+# each with the format it takes. The subtitles are the copy's only subtitle track: QuickTime showed none at
+# all for an episode that also carried its 32 original subtitle tracks.
+EMBED_SUBTITLE_CODECS = {".mp4": "mov_text", ".m4v": "mov_text", ".mov": "mov_text", ".mkv": "srt"}
+# MP4 and QuickTime files need three-letter ISO 639-2 language codes (ffmpeg silently drops "en"). These cover
+# the languages the app offers; Matroska asks for the bibliographic form where it differs.
+ISO639_2_CODES = {
+    "ar": "ara", "cs": "ces", "da": "dan", "de": "deu", "el": "ell", "en": "eng", "es": "spa", "fa": "fas",
+    "fi": "fin", "fr": "fra", "he": "heb", "hi": "hin", "hu": "hun", "id": "ind", "it": "ita", "ja": "jpn",
+    "ko": "kor", "ms": "msa", "nl": "nld", "no": "nor", "pl": "pol", "pt": "por", "ro": "ron", "ru": "rus",
+    "sv": "swe", "th": "tha", "tl": "tgl", "tr": "tur", "uk": "ukr", "ur": "urd", "vi": "vie", "zh": "zho",
+}
+ISO639_2_BIBLIOGRAPHIC = {
+    "ces": "cze", "deu": "ger", "ell": "gre", "fas": "per", "fra": "fre", "msa": "may", "nld": "dut",
+    "ron": "rum", "zho": "chi",
+}
+
 # gpt-transcribe safeguards. Without a `languages` hint it drops speech; even with one it can
 # occasionally return no text (reported as `"languages": []`) or loop on repeated phrases.
 DEFAULT_LANGUAGES = ["en"]
@@ -695,6 +713,31 @@ def _cue_chars(cue: SubtitleCue) -> int:
     return sum(len(line) for line in cue.lines) if cue.lines else len(cue.text)
 
 
+def join_flash_cues(cues: list[SubtitleCue]) -> list[SubtitleCue]:
+    """
+    Joins a cue with the next one when the next starts before the first could stay up for the shortest time
+    allowed, whoever speaks, if both fit in one cue and in the longest time a cue may stay up. The diarize model
+    sometimes returns single words a tenth of a second apart, often with changing speaker labels, which would
+    otherwise flash by unread (or end before they start). A joined cue can join the next one again.
+    """
+    ordered = sorted(cues, key=lambda cue: cue.start)
+    joined: list[SubtitleCue] = []
+    for cue in ordered:
+        if joined:
+            last = joined[-1]
+            if (
+                cue.start - last.start < SUBTITLE_MIN_SECONDS + SUBTITLE_MIN_GAP_SECONDS
+                and last.lines is None
+                and cue.lines is None
+                and len(last.text) + 1 + len(cue.text) <= SUBTITLE_LINE_CHARS * SUBTITLE_MAX_LINES
+                and max(last.end, cue.end) - last.start <= SUBTITLE_MAX_SECONDS
+            ):
+                joined[-1] = SubtitleCue(last.start, max(last.end, cue.end), f"{last.text} {cue.text}", last.speaker)
+                continue
+        joined.append(cue)
+    return joined
+
+
 def merge_quick_cues(cues: list[SubtitleCue]) -> list[SubtitleCue]:
     """
     Joins a cue with the next one when the next starts before the first can be read, if both fit in one cue
@@ -758,7 +801,9 @@ def time_subtitle_cues(cues: list[SubtitleCue]) -> list[tuple[float, float, Subt
     (start, on-screen end, cue) for each cue, in order. A cue appears when its speech starts and stays up
     until its speech ends plus a short linger, or longer if its text needs more reading time, but never past
     7 seconds or into the next cue (a 2-frame gap is kept). A gap shorter than half a second is closed, since
-    a cue blinking off and straight back on reads as flicker. Speech that overlaps the next cue keeps its time.
+    a cue blinking off and straight back on reads as flicker. Speech that overlaps the next cue keeps its time,
+    and so does the shortest time on screen: a cue the next one follows too closely to join (see
+    join_flash_cues) overlaps it rather than flashing by or ending before it starts.
     """
     ordered = sorted(cues, key=lambda cue: cue.start)
     timed: list[tuple[float, float, SubtitleCue]] = []
@@ -772,7 +817,7 @@ def time_subtitle_cues(cues: list[SubtitleCue]) -> list[tuple[float, float, Subt
         # Only speech that really overlaps the next cue (two people talking at once) runs into it; pieces of one
         # segment, which end exactly where the next begins, keep the 2-frame gap.
         floor = speech_end if speech_end > next_start + SUBTITLE_MIN_GAP_SECONDS else min(speech_end, limit)
-        end = max(min(wanted, limit), floor)
+        end = max(min(wanted, limit), floor, start + SUBTITLE_MIN_SECONDS)
         if 0 < limit - end < SUBTITLE_CHAIN_GAP_SECONDS - SUBTITLE_MIN_GAP_SECONDS and limit <= latest:
             end = limit
         timed.append((start, end, cue))
@@ -780,9 +825,9 @@ def time_subtitle_cues(cues: list[SubtitleCue]) -> list[tuple[float, float, Subt
 
 
 def format_srt(cues: list[SubtitleCue]) -> str:
-    """SubRip text for the cues: quick two-speaker exchanges merged, then timed to the standards above."""
+    """SubRip text for the cues: flashes and quick two-speaker exchanges merged, then timed to the standards above."""
     blocks: list[str] = []
-    for n, (start, end, cue) in enumerate(time_subtitle_cues(merge_quick_cues(cues)), start=1):
+    for n, (start, end, cue) in enumerate(time_subtitle_cues(merge_quick_cues(join_flash_cues(cues))), start=1):
         lines = "\n".join(cue.lines or wrap_subtitle_text(cue.text))
         blocks.append(f"{n}\n{srt_timestamp(start)} --> {srt_timestamp(end)}\n{lines}")
     return "\n\n".join(blocks) + "\n"
@@ -1049,11 +1094,13 @@ def _run_ffmpeg_with_progress(
     on_progress: Callable[[float], None] | None,
     *,
     quiet: bool = False,
+    total_bytes: int | None = None,
 ) -> None:
     """
     Run an ffmpeg command that includes `-progress pipe:1`, passing the share of the input processed so
     far (0 to 1) to on_progress. Raises like subprocess.run(cmd, check=True, timeout=...). quiet hides
-    ffmpeg's error output.
+    ffmpeg's error output. ffmpeg reports no position when it copies an attachment (a font or cover art);
+    then, if total_bytes (the expected output size) is given, the share of it written so far is used.
     """
     timed_out = threading.Event()
     with subprocess.Popen(
@@ -1072,6 +1119,7 @@ def _run_ffmpeg_with_progress(
         timer.start()
         try:
             assert proc.stdout is not None
+            has_position = False
             for line in proc.stdout:
                 # out_time_us is the position reached in the input; it keeps counting across segments.
                 if on_progress and total_seconds > 0 and line.startswith("out_time_us="):
@@ -1079,7 +1127,14 @@ def _run_ffmpeg_with_progress(
                         done_seconds = int(line.split("=", 1)[1]) / 1_000_000
                     except ValueError:
                         continue  # "N/A" until the first audio is written
+                    has_position = True
                     on_progress(min(max(done_seconds / total_seconds, 0.0), 1.0))
+                elif on_progress and total_bytes and not has_position and line.startswith("total_size="):
+                    try:
+                        written = int(line.split("=", 1)[1])
+                    except ValueError:
+                        continue
+                    on_progress(min(max(written / total_bytes, 0.0), 1.0))
             proc.wait()
         except BaseException:
             proc.kill()
@@ -1257,6 +1312,290 @@ def convert_qta_to_m4a_copy(input_path: Path, run_id: str, audio_track: int = 0)
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise SystemExit("Failed to convert .qta to .m4a.")
     return out_path
+
+
+def subtitle_track_language(code: str | None, container_suffix: str) -> str | None:
+    """Three-letter language tag for a subtitle track in this container, or None if the code isn't known."""
+    code = (code or "").strip().lower()
+    tag = ISO639_2_CODES.get(code) or (code if re.fullmatch(r"[a-z]{3}", code) else None)
+    if tag and container_suffix.lower() == ".mkv":
+        tag = ISO639_2_BIBLIOGRAPHIC.get(tag, tag)
+    return tag
+
+
+def video_codec_names(path: Path) -> list[str]:
+    """Codecs of the file's video tracks, leaving out cover art (empty if ffprobe can't tell)."""
+    try:
+        r = subprocess.run(
+            [
+                *ffprobe_cmd_prefix(),
+                "-v", "error",
+                "-select_streams", "V",
+                "-show_entries", "stream=codec_name",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            # ffprobe has no -nostdin flag (it made every call fail); keep it off stdin this way instead.
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+        # Side data (e.g. a Dolby Vision record) adds empty fields after the codec: "hevc,".
+        return [line.split(",")[0].strip().lower() for line in r.stdout.splitlines() if line.strip()]
+    except Exception:
+        return []
+
+
+def embed_subtitles_copy(
+    video_path: Path,
+    srt_path: Path,
+    out_path: Path,
+    language: str | None = None,
+    audio_track: int = 0,
+    on_progress: Callable[[float], None] | None = None,
+) -> None:
+    """
+    Write a copy of video_path, in the same container, with srt_path as its only subtitle track, shown by
+    default. Video and every audio track are copied without re-encoding; `audio_track` (the one the
+    subtitles were made from) becomes the default audio. out_path's extension must be in
+    EMBED_SUBTITLE_CODECS and the file must not exist yet; it is never overwritten. `language` is a
+    spoken-language code ("en") that tags the subtitles when known. A failed or cancelled run removes the
+    partial copy. on_progress receives how far along it is (0 to 1).
+    """
+    suffix = out_path.suffix.lower()
+    track_options = ["-c:s", EMBED_SUBTITLE_CODECS[suffix], "-disposition:s:0", "default"]
+    if suffix != ".mkv":
+        # QuickTime only plays HEVC tagged hvc1 in these containers; ffmpeg's default tag for it is hev1.
+        for index, codec in enumerate(video_codec_names(video_path)):
+            if codec == "hevc":
+                track_options += [f"-tag:v:{index}", "hvc1"]
+    # Play the language the subtitles were made from; the others stay selectable.
+    audio_count = len(list_audio_tracks(video_path))
+    if audio_count > 1 and 0 <= audio_track < audio_count:
+        for index in range(audio_count):
+            track_options += [f"-disposition:a:{index}", "default" if index == audio_track else "-default"]
+    tag = subtitle_track_language(language, suffix)
+    if tag:
+        track_options += ["-metadata:s:s:0", f"language={tag}"]
+
+    cmd = [
+        *ffmpeg_cmd_prefix(),
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-progress", "pipe:1",
+        "-nostats",
+        # Refuse to overwrite, in case a file appeared at out_path after it was chosen.
+        "-n",
+        "-i", str(video_path),
+        "-i", str(srt_path),
+        # Video (not cover art) and audio from the original, then the subtitles. The original's own
+        # subtitle and data tracks are left out (see EMBED_SUBTITLE_CODECS); chapters are kept.
+        "-map", "0:V",
+        "-map", "0:a?",
+        "-map", "1:0",
+        "-c", "copy",
+        *track_options,
+        str(out_path),
+    ]
+    try:
+        _run_ffmpeg_with_progress(cmd, get_duration_seconds(video_path), on_progress)
+    except BaseException as exc:
+        if out_path.exists():
+            out_path.unlink()
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise SystemExit("Timed out saving the copy of the video with subtitles.") from None
+        if isinstance(exc, subprocess.CalledProcessError):
+            raise SystemExit(
+                f"ffmpeg couldn't copy this video's tracks into {out_path.suffix} (exit code {exc.returncode})."
+            ) from None
+        raise
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise SystemExit("ffmpeg didn't write the copy of the video with subtitles.")
+
+
+# Subtitle codecs stored as text. Others (PGS, VobSub) are pictures, which only some containers hold.
+TEXT_SUBTITLE_CODECS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+# Subtitle files that can be added to a video in the track editor.
+ADDABLE_SUBTITLE_SUFFIXES = {".srt", ".ass", ".ssa", ".vtt"}
+
+
+def list_media_tracks(path: Path) -> list[dict[str, Any]]:
+    """
+    Every track in the file, in order, as {"index", "kind", "codec", "language", "title", "default", "forced",
+    "channels", "text"}. `index` is the stream's position in the whole file (ffmpeg's `0:N`); `kind` is
+    "video", "audio", "subtitle", "attachment" or "data", and cover art counts as an attachment. `text` is
+    True for subtitles stored as text. Raises SystemExit if ffprobe can't read the file.
+    """
+    try:
+        r = subprocess.run(
+            [
+                *ffprobe_cmd_prefix(),
+                "-v", "error",
+                "-show_entries",
+                "stream=index,codec_type,codec_name,channels"
+                ":stream_tags=language,title:stream_disposition=default,forced,attached_pic",
+                "-of", "json",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            # ffprobe has no -nostdin flag (it made every call fail); keep it off stdin this way instead.
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+        streams = json.loads(r.stdout or "{}").get("streams") or []
+    except Exception:
+        raise SystemExit(f"Couldn't read the tracks in {path.name}. Is it a video file?") from None
+
+    tracks: list[dict[str, Any]] = []
+    for stream in streams:
+        tags = stream.get("tags") or {}
+        disposition = stream.get("disposition") or {}
+        kind = str(stream.get("codec_type") or "data")
+        if kind == "video" and disposition.get("attached_pic"):
+            kind = "attachment"
+        elif kind not in ("video", "audio", "subtitle", "attachment"):
+            kind = "data"
+        codec = str(stream.get("codec_name") or "").lower()
+        language = str(tags.get("language") or "").strip().lower()
+        tracks.append({
+            "index": int(stream.get("index", len(tracks))),
+            "kind": kind,
+            "codec": codec,
+            # "und" is how containers mark an unknown language.
+            "language": "" if language in ("", "und") else language,
+            "title": str(tags.get("title") or "").strip(),
+            "default": bool(disposition.get("default")),
+            "forced": bool(disposition.get("forced")),
+            "channels": stream.get("channels"),
+            "text": kind == "subtitle" and codec in TEXT_SUBTITLE_CODECS,
+        })
+    return tracks
+
+
+def save_edited_tracks(
+    video_path: Path,
+    out_path: Path,
+    plan: list[dict[str, Any]],
+    on_progress: Callable[[float], None] | None = None,
+    *,
+    replace_original: bool = False,
+) -> None:
+    """
+    Write video_path with the audio and subtitle tracks in `plan`, in that order, without re-encoding.
+    Each entry is {"kind": "audio" | "subtitle", "language", "title", "default", "forced"} plus either
+    {"index": N} for a track of the original (see list_media_tracks) or {"file": path} for a subtitle file to
+    add. Tracks of the original that aren't in the plan are left out. Video, cover art, fonts and chapters are
+    kept. out_path must have video_path's extension. It is video_path itself only with replace_original (Save);
+    otherwise it must be another file (Save As). Either way the new file is written under a temporary name next
+    to out_path and moved into place only once complete, so a failed or cancelled run leaves out_path as it
+    was and nothing else behind.
+    """
+    suffix = video_path.suffix.lower()
+    if suffix not in EMBED_SUBTITLE_CODECS:
+        raise SystemExit(f"Tracks can only be edited in {', '.join(sorted(EMBED_SUBTITLE_CODECS))} videos.")
+    if out_path.suffix.lower() != suffix:
+        raise SystemExit(f"Save the video as a {suffix} file, the same format as the original.")
+    is_original = out_path.resolve() == video_path.resolve()
+    if is_original and not replace_original:
+        raise SystemExit("Saving under the video's own name replaces it. Use Save to do that, or choose another name.")
+    if replace_original and not is_original:
+        raise SystemExit("Save replaces the video itself, so it can't be given another name.")
+    # The new file sits next to the destination until it's complete, so there must be room for both.
+    needed = int(video_path.stat().st_size * 1.02) + 50 * 1024 * 1024
+    free = shutil.disk_usage(out_path.parent).free
+    if free < needed:
+        raise SystemExit(
+            f"Not enough disk space to save: it needs about {needed / 1e9:.1f} GB free while saving, "
+            f"and there's {free / 1e9:.1f} GB."
+        )
+
+    originals = {t["index"]: t for t in list_media_tracks(video_path)}
+    is_mov = suffix != ".mkv"
+    inputs = ["-i", str(video_path)]
+    maps: list[str] = []
+    options: list[str] = []
+    # Video, cover art and fonts are kept as they are; data tracks (timecodes, iPhone metadata) are left out.
+    for track in originals.values():
+        if track["kind"] in ("video", "attachment"):
+            maps += ["-map", f"0:{track['index']}"]
+    if is_mov:
+        # QuickTime only plays HEVC tagged hvc1 in these containers; ffmpeg's default tag for it is hev1.
+        videos = [t for t in originals.values() if t["kind"] in ("video", "attachment")]
+        for n, track in enumerate(videos):
+            if track["codec"] == "hevc":
+                options += [f"-tag:v:{n}", "hvc1"]
+
+    counts = {"audio": 0, "subtitle": 0}
+    extra_inputs = 0
+    for entry in plan:
+        kind = entry.get("kind")
+        if kind not in counts:
+            raise SystemExit(f"Unknown track kind: {kind!r}.")
+        if "file" in entry:
+            sub_path = Path(str(entry["file"])).expanduser()
+            if kind != "subtitle" or sub_path.suffix.lower() not in ADDABLE_SUBTITLE_SUFFIXES:
+                raise SystemExit(f"{sub_path.name} isn't a subtitle file the app can add (.srt, .ass, .ssa or .vtt).")
+            if not sub_path.exists():
+                raise SystemExit(f"Subtitle file not found: {sub_path}")
+            extra_inputs += 1
+            inputs += ["-i", str(sub_path)]
+            maps += ["-map", f"{extra_inputs}:0"]
+            if is_mov:
+                options += [f"-c:s:{counts['subtitle']}", "mov_text"]
+        else:
+            source = originals.get(entry.get("index"))
+            if source is None or source["kind"] != kind:
+                raise SystemExit(f"The video has no {kind} track #{entry.get('index')}.")
+            maps += ["-map", f"0:{source['index']}"]
+        n = counts[kind]
+        counts[kind] += 1
+        spec = "a" if kind == "audio" else "s"
+        flags = [flag for flag in ("default", "forced") if entry.get(flag)]
+        options += [f"-disposition:{spec}:{n}", "+".join(flags) if flags else "0"]
+        tag = subtitle_track_language(entry.get("language"), suffix)
+        options += [f"-metadata:s:{spec}:{n}", f"language={tag or 'und'}"]
+        options += [f"-metadata:s:{spec}:{n}", f"title={str(entry.get('title') or '').strip()}"]
+
+    # Written next to the destination under a temporary name, then moved into place once complete.
+    partial = out_path.with_name(f".{out_path.stem}.partial-{os.getpid()}{out_path.suffix}")
+    cmd = [
+        *ffmpeg_cmd_prefix(),
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-progress", "pipe:1",
+        "-nostats",
+        "-y",
+        *inputs,
+        *maps,
+        "-c", "copy",
+        *options,
+        str(partial),
+    ]
+    try:
+        # Copying keeps every byte of the kept tracks, so the copy is about the size of the original.
+        _run_ffmpeg_with_progress(
+            cmd, get_duration_seconds(video_path), on_progress, total_bytes=video_path.stat().st_size
+        )
+        if not partial.exists() or partial.stat().st_size == 0:
+            raise SystemExit("ffmpeg didn't write the video. It wasn't changed.")
+        os.replace(partial, out_path)
+    except BaseException as exc:
+        if partial.exists():
+            partial.unlink()
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise SystemExit("Timed out saving the video.") from None
+        if isinstance(exc, subprocess.CalledProcessError):
+            raise SystemExit(
+                f"ffmpeg couldn't save these tracks in a {suffix} file (exit code {exc.returncode}). "
+                "The video wasn't changed."
+            ) from None
+        raise
 
 
 def repair_audio_for_api(input_path: Path) -> Path:

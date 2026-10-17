@@ -308,6 +308,16 @@ struct TranscribePaneView: View {
         }
     }
 
+    /// What a run's warnings may mean. Subtitle runs can also warn that the video copy wasn't saved.
+    private var warningsSummary: String {
+        let missing = !viewModel.latestOutputIsSubtitles
+            ? "Part of the transcript may be missing."
+            : viewModel.embedsSubtitlesForRun
+                ? "Some subtitles may be missing, or the video copy wasn't saved."
+                : "Some subtitles may be missing."
+        return "\(missing) Details are in the Run Log below."
+    }
+
     private var completedRunSummary: some View {
         VStack(spacing: 12) {
             if viewModel.runWarnings.isEmpty {
@@ -327,7 +337,7 @@ struct TranscribePaneView: View {
                 }
                 .font(.headline)
 
-                Text("Part of the transcript may be missing. Details are in the Run Log below.")
+                Text(warningsSummary)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -343,7 +353,18 @@ struct TranscribePaneView: View {
                     .textSelection(.enabled)
             }
 
-            if viewModel.latestOutputIsSubtitles {
+            if let subtitledVideoPath = viewModel.latestSubtitledVideoPath {
+                Text("Video with subtitles built in:")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text((subtitledVideoPath as NSString).abbreviatingWithTildeInPath)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            } else if viewModel.latestOutputIsSubtitles {
                 Text(
                     "Open the video in IINA or VLC and drag this file onto it. Kept next to the video "
                         + "with the same name, it loads on its own. QuickTime Player can't load .srt files."
@@ -357,6 +378,14 @@ struct TranscribePaneView: View {
             HStack(spacing: 10) {
                 Button("Show in Finder") {
                     viewModel.revealLatestTranscript()
+                }
+                if viewModel.latestSubtitledVideoPath != nil {
+                    Button("Open Video", action: viewModel.openLatestSubtitledVideo)
+                        .help("Open the copy of the video with subtitles built in")
+                }
+                if viewModel.latestOutputIsSubtitles {
+                    Button("Edit Tracks…", action: viewModel.editTracksOfLatestRun)
+                        .help("Open the video in Tracks with these subtitles added, to choose which tracks to keep")
                 }
                 Button("Choose Another File…", action: viewModel.browseAudioFile)
             }
@@ -525,6 +554,18 @@ struct TranscribePaneView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            if viewModel.subtitlesEnabled {
+                Toggle("Also save a copy of the video with subtitles built in", isOn: $viewModel.embedSubtitlesEnabled)
+                    .toggleStyle(.checkbox)
+                    .disabled(viewModel.isRunning)
+                    .padding(.top, 6)
+                    .help("For players like QuickTime Player that can't load .srt files. Works with .mp4, .m4v, .mov and .mkv videos.")
+                Text("Same format as the video, with these subtitles on. "
+                    + "It's a full copy, so it takes as much disk space as the video.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
     }
 

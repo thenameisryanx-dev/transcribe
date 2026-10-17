@@ -122,6 +122,14 @@ struct LectureTranscribeNativeApp: App {
                 .keyboardShortcut("n")
                 .disabled(viewModel.isRunning)
             }
+            TrackCommands(
+                editor: viewModel.trackEditor,
+                isShowingTracks: viewModel.selectedPane == .tracks,
+                showTracks: {
+                    viewModel.selectedPane = .tracks
+                    activateAndBringPrimaryWindowToFront()
+                }
+            )
         }
 
         MenuBarExtra(
