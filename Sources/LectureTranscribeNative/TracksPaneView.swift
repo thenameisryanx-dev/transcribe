@@ -119,6 +119,7 @@ struct TracksPaneView: View {
                         .disabled(editor.isSaving)
                         .help("Open another video in Tracks (⌘O)")
                 }
+                .background(ReorderDragTuning())
                 if let error = editor.errorMessage {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
@@ -235,6 +236,199 @@ struct TracksPaneView: View {
             }
         }
         return true
+    }
+}
+
+/// Tunes the list's table for dragging rows to reorder them:
+/// - The table opens a gap where the row will land and slides the other rows aside as the drag moves (as Finder's
+///   sidebar and Safari's tabs do), instead of drawing an insertion line and jumping on drop.
+/// - Holding a row near the top or bottom edge scrolls the list, faster the closer it is to the edge. The table's own
+///   autoscroll crawls (about one row every two seconds), which makes long lists impractical to reorder.
+private struct ReorderDragTuning: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Locator() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    /// Finds the table it's laid out in. Rows come and go as the list scrolls, so the tuning lives on the table.
+    private final class Locator: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            DispatchQueue.main.async { [weak self] in
+                var view = self?.superview
+                while let current = view, !(current is NSTableView) { view = current.superview }
+                if let table = view as? NSTableView {
+                    EdgeAutoscroller.install(on: table)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private final class EdgeAutoscroller {
+        private static var key = 0
+
+        /// The band along each edge where holding a row scrolls the list, in points. It's about as tall as the
+        /// sticky section header, so hovering over the first or last visible row to drop there doesn't scroll.
+        private static let edgeBand: CGFloat = 32
+        /// How far past an edge the pointer reaches full speed, in points.
+        private static let overshoot: CGFloat = 48
+        /// Scrolling speeds in points per second. Scrolling starts at a clear pace rather than a crawl: a crawl moves
+        /// rows under the pointer a pixel at a time, so the drop gap keeps jumping between rows.
+        private static let minSpeed: CGFloat = 320
+        private static let maxSpeed: CGFloat = 1800
+
+        private weak var table: NSTableView?
+        // Only touched on the main thread; deinit is nonisolated.
+        nonisolated(unsafe) private var mouseDownMonitor: Any?
+        nonisolated(unsafe) private var timer: Timer?
+        private var dragPasteboardCount = 0
+        private var lastTick: CFTimeInterval = 0
+
+        static func install(on table: NSTableView) {
+            DropValidationGuard.install(on: table)
+            guard objc_getAssociatedObject(table, &key) == nil else { return }
+            objc_setAssociatedObject(table, &key, EdgeAutoscroller(table: table), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
+
+        private init(table: NSTableView) {
+            self.table = table
+            // A press in the table may start a row drag. Watch the pointer until the button comes up; a drag
+            // session runs its own event loop, so a timer in the common modes is what keeps firing during it.
+            mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                MainActor.assumeIsolated { self?.mouseDown(event) }
+                return event
+            }
+        }
+
+        deinit {
+            if let mouseDownMonitor { NSEvent.removeMonitor(mouseDownMonitor) }
+            timer?.invalidate()
+        }
+
+        private func mouseDown(_ event: NSEvent) {
+            guard let table, event.window === table.window, let clipView = table.enclosingScrollView?.contentView,
+                  clipView.bounds.contains(clipView.convert(event.locationInWindow, from: nil))
+            else { return }
+            // Before any drag starts, in case the list has replaced its data source since.
+            DropValidationGuard.install(on: table)
+            // A drag session writes to the drag pasteboard as it begins; until then this is a click.
+            dragPasteboardCount = NSPasteboard(name: .drag).changeCount
+            lastTick = CACurrentMediaTime()
+            timer?.invalidate()
+            let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.tick() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
+        }
+
+        private func tick() {
+            let now = CACurrentMediaTime()
+            let elapsed = min(now - lastTick, 1.0 / 30.0)
+            lastTick = now
+
+            guard NSEvent.pressedMouseButtons & 1 != 0, let table, let window = table.window,
+                  let scrollView = table.enclosingScrollView, let documentView = scrollView.documentView
+            else {
+                timer?.invalidate()
+                timer = nil
+                return
+            }
+            guard NSPasteboard(name: .drag).changeCount != dragPasteboardCount else { return }
+
+            let clipView = scrollView.contentView
+            // The real pointer: during a drag session the window's own event stream lags behind it.
+            let pointer = clipView.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+            let visible = clipView.bounds
+            let insets = scrollView.contentInsets
+            let top = visible.minY + insets.top
+            let bottom = visible.maxY - insets.bottom
+            let band = min(Self.edgeBand, (bottom - top) / 4)
+            // Only while the drag is over the list (or just past its top and bottom edges).
+            guard pointer.x >= visible.minX, pointer.x <= visible.maxX,
+                  pointer.y >= top - Self.overshoot, pointer.y <= bottom + Self.overshoot
+            else { return }
+
+            // Speed eases in from the inner edge of the band to full speed just past the edge.
+            let direction: CGFloat
+            let distance: CGFloat
+            if pointer.y < top + band {
+                direction = -1
+                distance = top + band - pointer.y
+            } else if pointer.y > bottom - band {
+                direction = 1
+                distance = pointer.y - (bottom - band)
+            } else {
+                return
+            }
+            let depth = min(distance / (band + Self.overshoot), 1)
+            let speed = Self.minSpeed + (Self.maxSpeed - Self.minSpeed) * depth * depth
+
+            let minY = -insets.top
+            let maxY = max(minY, documentView.frame.height - visible.height + insets.bottom)
+            // Whole pixels, so rows don't shimmer as they move.
+            let scale = window.backingScaleFactor
+            let step = (visible.minY + direction * speed * CGFloat(elapsed)) * scale
+            let y = min(max(step.rounded() / scale, minY), maxY)
+            guard y != visible.minY else { return }
+            clipView.scroll(to: NSPoint(x: visible.minX, y: y))
+            scrollView.reflectScrolledClipView(clipView)
+        }
+    }
+
+    /// Turns on the table's gap feedback, which is only safe behind this guard. When a drag leaves a gap-style
+    /// outline view, AppKit asks its data source to validate one more drop, at child index -2; SwiftUI's list then
+    /// looks up row -2 and crashes. The guard refuses those itself and passes everything else through to SwiftUI's
+    /// data source unchanged.
+    @MainActor
+    private final class DropValidationGuard: NSObject, NSOutlineViewDataSource {
+        private static var key = 0
+
+        private weak var original: (NSObject & NSOutlineViewDataSource)?
+
+        private init(original: NSObject & NSOutlineViewDataSource) {
+            self.original = original
+        }
+
+        static func install(on table: NSTableView) {
+            guard let outline = table as? NSOutlineView else { return }
+            // The gap animation moves a floating section header along with the rows, so the sticky header bar
+            // would keep sliding down into the list and snapping back while a row is dragged. Headers scroll with
+            // their rows instead.
+            outline.floatsGroupRows = false
+            if outline.dataSource is DropValidationGuard { return }
+            guard let original = outline.dataSource as? (NSObject & NSOutlineViewDataSource) else {
+                // Without the guard, keep the insertion line (and floating headers) rather than risk the crash.
+                outline.draggingDestinationFeedbackStyle = .regular
+                outline.floatsGroupRows = true
+                return
+            }
+            let guardian = DropValidationGuard(original: original)
+            // The outline view doesn't retain its data source.
+            objc_setAssociatedObject(outline, &key, guardian, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            outline.dataSource = guardian
+            outline.draggingDestinationFeedbackStyle = .gap
+        }
+
+        override func responds(to selector: Selector!) -> Bool {
+            super.responds(to: selector) || original?.responds(to: selector) == true
+        }
+
+        override func forwardingTarget(for selector: Selector!) -> Any? {
+            original
+        }
+
+        func outlineView(
+            _ outlineView: NSOutlineView,
+            validateDrop info: NSDraggingInfo,
+            proposedItem item: Any?,
+            proposedChildIndex index: Int
+        ) -> NSDragOperation {
+            // Reordering always proposes a gap between rows (index 0 or more). Leaving the list proposes -2.
+            guard index >= 0 else { return [] }
+            return original?.outlineView?(
+                outlineView, validateDrop: info, proposedItem: item, proposedChildIndex: index
+            ) ?? []
+        }
     }
 }
 
