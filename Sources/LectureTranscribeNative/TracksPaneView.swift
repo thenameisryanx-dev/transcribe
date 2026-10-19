@@ -282,6 +282,8 @@ private struct ReorderDragTuning: NSViewRepresentable {
         nonisolated(unsafe) private var timer: Timer?
         private var dragPasteboardCount = 0
         private var lastTick: CFTimeInterval = 0
+        /// Whether a row is being dragged in some list, which then scrolls only by this class. Main thread only.
+        nonisolated(unsafe) private static var isDraggingRow = false
 
         static func install(on table: NSTableView) {
             DropValidationGuard.install(on: table)
@@ -310,6 +312,9 @@ private struct ReorderDragTuning: NSViewRepresentable {
             else { return }
             // Before any drag starts, in case the list has replaced its data source since.
             DropValidationGuard.install(on: table)
+            Self.silenceBuiltInAutoscroll(of: table)
+            Self.isDraggingRow = false
+            Self.estimateRowHeights(of: table, from: table.row(at: table.convert(event.locationInWindow, from: nil)))
             // A drag session writes to the drag pasteboard as it begins; until then this is a click.
             dragPasteboardCount = NSPasteboard(name: .drag).changeCount
             lastTick = CACurrentMediaTime()
@@ -321,6 +326,49 @@ private struct ReorderDragTuning: NSViewRepresentable {
             self.timer = timer
         }
 
+        /// The list sizes each row to fit, and lays out rows it hasn't shown yet at the table's row height, which
+        /// SwiftUI leaves at 24 points; a track row is more than twice that. When a drag scrolls the list, rows coming
+        /// into view are measured, and everything below them slides down into place inside the drag's animation, so
+        /// rows pass through each other. Estimating them at the height of the track row pressed on (most of the list's
+        /// rows) leaves almost nothing to correct.
+        private static func estimateRowHeights(of table: NSTableView, from row: Int) {
+            guard row >= 0, let rowView = table.rowView(atRow: row, makeIfNecessary: false) else { return }
+            let height = rowView.frame.height
+            guard height > table.rowHeight else { return }
+            table.rowHeight = height
+        }
+
+        /// The table's own drag autoscroll keeps running alongside this one: every 50 ms or so it jumps the list
+        /// about 24 points on top of the steady scroll, so the rows lurch and stall instead of gliding. While a row
+        /// is dragged, the list skips it. AppKit has no public switch for this, so the list's class gets an override
+        /// of the private method that does it; if a later macOS renames that method, nothing is overridden and the
+        /// two scrolls simply run together again.
+        private static func silenceBuiltInAutoscroll(of table: NSTableView) {
+            // The class SwiftUI made the table from, not the subclass key-value observing may have swapped in.
+            var found: AnyClass? = object_getClass(table)
+            while let current = found, NSStringFromClass(current).hasPrefix("NSKVONotifying_") {
+                found = class_getSuperclass(current)
+            }
+            let selector = NSSelectorFromString("_autoscrollForDraggingInfo:timeDelta:")
+            guard let tableClass = found, !silencedClasses.contains(ObjectIdentifier(tableClass)),
+                  let method = class_getInstanceMethod(tableClass, selector),
+                  let types = method_getTypeEncoding(method), String(cString: types) == "v32@0:8@16d24"
+            else { return }
+            silencedClasses.insert(ObjectIdentifier(tableClass))
+            typealias Autoscroll = @convention(c) (NSObject, Selector, AnyObject, Double) -> Void
+            let inherited = unsafeBitCast(method_getImplementation(method), to: Autoscroll.self)
+            let autoscroll: @convention(block) (NSObject, AnyObject, Double) -> Void = { view, info, timeDelta in
+                if !isDraggingRow { inherited(view, selector, info, timeDelta) }
+            }
+            let replacement = imp_implementationWithBlock(autoscroll)
+            // Adds an override when the method is inherited; replaces it (keeping the original above) when not.
+            if !class_addMethod(tableClass, selector, replacement, types) {
+                method_setImplementation(method, replacement)
+            }
+        }
+
+        private static var silencedClasses: Set<ObjectIdentifier> = []
+
         private func tick() {
             let now = CACurrentMediaTime()
             let elapsed = min(now - lastTick, 1.0 / 30.0)
@@ -331,9 +379,11 @@ private struct ReorderDragTuning: NSViewRepresentable {
             else {
                 timer?.invalidate()
                 timer = nil
+                Self.isDraggingRow = false
                 return
             }
             guard NSPasteboard(name: .drag).changeCount != dragPasteboardCount else { return }
+            Self.isDraggingRow = true
 
             let clipView = scrollView.contentView
             // The real pointer: during a drag session the window's own event stream lags behind it.
@@ -347,6 +397,15 @@ private struct ReorderDragTuning: NSViewRepresentable {
             guard pointer.x >= visible.minX, pointer.x <= visible.maxX,
                   pointer.y >= top - Self.overshoot, pointer.y <= bottom + Self.overshoot
             else { return }
+            if pointer.y < top || pointer.y > bottom {
+                // Past the edge the drag has left the list, so the gap closes. Rows sliding over to close it while
+                // the list scrolls under them would cross the rows the scroll brings in; they go straight to their
+                // places instead.
+                let rows = table.rows(in: table.visibleRect)
+                for row in rows.location..<(rows.location + rows.length) {
+                    table.rowView(atRow: row, makeIfNecessary: false)?.layer?.removeAllAnimations()
+                }
+            }
 
             // Speed eases in from the inner edge of the band to full speed just past the edge.
             let direction: CGFloat
@@ -462,13 +521,8 @@ private struct TrackRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 8) {
-                    Picker("Language", selection: $track.language) {
-                        ForEach(TrackLanguage.options(including: track.language), id: \.code) { option in
-                            Text(option.name).tag(option.code)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 150)
+                    LanguagePopUp(code: $track.language)
+                        .frame(width: 150)
                     TextField("Title (optional)", text: $track.title)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 260)
@@ -520,6 +574,74 @@ private struct TrackRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// A track's language menu: the pop-up button SwiftUI's `Picker` makes, holding only the chosen language until it
+/// opens. A `Picker` builds an entry for each of its three dozen languages whenever a row is made, about a third of a
+/// row's cost, and the list makes rows as it scrolls, so scrolling stalls on each row that comes into view (most
+/// noticeably while dragging a track along a long list).
+private struct LanguagePopUp: NSViewRepresentable {
+    @Binding var code: String
+
+    func makeCoordinator() -> Coordinator { Coordinator(code: $code) }
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let button = NSPopUpButton(frame: .zero, pullsDown: false)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.choose(_:))
+        button.setAccessibilityLabel("Language")
+        context.coordinator.button = button
+        return button
+    }
+
+    func updateNSView(_ button: NSPopUpButton, context: Context) {
+        context.coordinator.code = $code
+        button.isEnabled = context.environment.isEnabled
+        guard button.selectedItem?.representedObject as? String != code else { return }
+        let options = TrackLanguage.options(including: code)
+        let chosen = options.first { $0.code == code } ?? options[0]
+        let menu = NSMenu()
+        menu.delegate = context.coordinator
+        menu.items = [Coordinator.item(for: chosen)]
+        button.menu = menu
+    }
+
+    /// As wide as the button is with every language in it, as a `Picker` is; measured once, not for each row.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSPopUpButton, context: Context) -> CGSize? {
+        Self.fullSize
+    }
+
+    private static let fullSize: CGSize = {
+        let button = NSPopUpButton(frame: .zero, pullsDown: false)
+        button.addItems(withTitles: TrackLanguage.options(including: "").map(\.name))
+        return button.fittingSize
+    }()
+
+    final class Coordinator: NSObject, NSMenuDelegate {
+        var code: Binding<String>
+        weak var button: NSPopUpButton?
+
+        init(code: Binding<String>) {
+            self.code = code
+        }
+
+        static func item(for option: (code: String, name: String)) -> NSMenuItem {
+            let item = NSMenuItem(title: option.name, action: nil, keyEquivalent: "")
+            item.representedObject = option.code
+            return item
+        }
+
+        func menuNeedsUpdate(_ menu: NSMenu) {
+            let options = TrackLanguage.options(including: code.wrappedValue)
+            guard menu.items.count != options.count else { return }
+            menu.items = options.map(Self.item(for:))
+            button?.selectItem(at: options.firstIndex { $0.code == code.wrappedValue } ?? 0)
+        }
+
+        @objc func choose(_ sender: NSPopUpButton) {
+            code.wrappedValue = sender.selectedItem?.representedObject as? String ?? ""
+        }
     }
 }
 
