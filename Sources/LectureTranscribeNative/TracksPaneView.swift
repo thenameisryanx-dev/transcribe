@@ -442,7 +442,8 @@ private struct ReorderDragTuning: NSViewRepresentable {
     private final class DropValidationGuard: NSObject, NSOutlineViewDataSource {
         private static var key = 0
 
-        private weak var original: (NSObject & NSOutlineViewDataSource)?
+        // Set once at init and only read after, so the nonisolated NSObject overrides below can forward to it.
+        nonisolated(unsafe) private weak var original: (NSObject & NSOutlineViewDataSource)?
 
         private init(original: NSObject & NSOutlineViewDataSource) {
             self.original = original
@@ -618,6 +619,7 @@ private struct LanguagePopUp: NSViewRepresentable {
         return button.fittingSize
     }()
 
+    @MainActor
     final class Coordinator: NSObject, NSMenuDelegate {
         var code: Binding<String>
         weak var button: NSPopUpButton?
