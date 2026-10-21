@@ -13,16 +13,25 @@ lacks_fixed() { ! grep -Fq -- "$1" "$2"; }
 
 BUILD_DIR="$("$ROOT_DIR/scripts/swift_build_dir.sh" "$ROOT_DIR")"
 
-echo "[1/4] Building Swift app..."
+echo "[1/5] Building Swift app..."
 swift build --scratch-path "$BUILD_DIR" >/dev/null
 
 # Core features (sidebar panes, run history, default output folder, model options, clear draft)
 # are checked by Tests/LectureTranscribeNativeTests/CoreFeaturesTests.swift.
-echo "[2/4] Running Swift unit tests..."
+echo "[2/5] Running Swift unit tests..."
 swift test --scratch-path "$BUILD_DIR" >/dev/null
 
-echo "[3/4] Verifying UI wiring and backend features..."
-# Text checks for UI wiring the unit tests cannot see, and backend code without Python tests yet.
+# Backend behavior (model choice, speaker-label rules, media tool architecture, track editing) is checked by
+# Tests/python/test_backend.py, using the repo-local .venv and the ffmpeg in vendor/ffmpeg.
+echo "[3/5] Running Python backend tests..."
+scripts/ensure_dev_python.sh
+if ! PYTHON_TEST_OUTPUT="$(.venv/bin/python3 -m unittest discover -s Tests/python 2>&1)"; then
+  print -r -- "$PYTHON_TEST_OUTPUT"
+  exit 1
+fi
+
+echo "[4/5] Verifying UI wiring and backend features..."
+# Text checks for UI wiring the unit tests cannot see, and for removed behavior that must not come back.
 has_fixed 'TracksPaneView(editor: viewModel.trackEditor)' Sources/LectureTranscribeNative/RootView.swift
 has_fixed 'Image(systemName: pane.systemImage)' Sources/LectureTranscribeNative/RootView.swift
 has_fixed 'Text(pane.rawValue)' Sources/LectureTranscribeNative/RootView.swift
@@ -38,10 +47,6 @@ has 'ModelSelectionMenu' Sources/LectureTranscribeNative/TranscribePaneView.swif
 has_fixed 'model.menuSubtitle' Sources/LectureTranscribeNative/TranscribePaneView.swift
 has_fixed 'selectedModel.displayName' Sources/LectureTranscribeNative/TranscribePaneView.swift
 has 'Unavailable for' Sources/LectureTranscribeNative/TranscribePaneView.swift
-has_fixed '--model' transcribe_backend.py
-has 'MODEL_MINI' transcription_job.py
-has 'Speaker diarization is not supported with gpt-4o-mini-transcribe' transcription_job.py
-has 'def _supports_host_arch' lecture_transcribe.py
 lacks_fixed '"/usr/bin/arch", "-x86_64"' lecture_transcribe.py
 cmp -s lecture_transcribe.py Sources/LectureTranscribeNative/Resources/python/lecture_transcribe.py
 cmp -s transcription_job.py Sources/LectureTranscribeNative/Resources/python/transcription_job.py
@@ -58,7 +63,7 @@ has_fixed 'Text("About")' Sources/LectureTranscribeNative/RootView.swift
 grep -Eq '^[0-9]+(\.[0-9]+)*$' VERSION
 has_fixed '<string>$APP_VERSION</string>' build_macos_dmg.sh
 
-echo "[4/4] Verifying launcher entry point..."
+echo "[5/5] Verifying launcher entry point..."
 LAUNCHER="Open Lecture Transcribe.command"
 [[ -f "$LAUNCHER" ]]
 [[ -x "$LAUNCHER" ]]
