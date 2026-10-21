@@ -12,8 +12,13 @@
   "resource fork, Finder information, or similar detritus not allowed".
 
 ## Test the project
-- Run the regression guardrail after every change. It builds the app, runs the unit tests, and checks that key features are still in place:
+- Run the regression guardrail after every change. It builds the app, runs the Swift and Python tests, and checks that key features are still in place:
   - `./scripts/regression_check.sh`
+- GitHub runs the same check on every push and pull request (`.github/workflows/regression.yml`); results show on the commit or PR.
+- Run only one set of tests:
+  - Swift: `swift test --scratch-path "$(scripts/swift_build_dir.sh)"`
+  - Python backend: `.venv/bin/python3 -m unittest discover -s Tests/python` (no OpenAI calls; uses `vendor/ffmpeg`)
+- When you add or fix a feature, add a test for it in the same change.
 - Minimum manual validation for UI/backend changes:
   - Start one transcription from the app and confirm progress/status updates and output file creation.
 

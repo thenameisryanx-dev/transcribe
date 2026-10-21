@@ -20,6 +20,8 @@ The app has two halves: a native SwiftUI front end and a Python backend that doe
 - Bundled Python copies:
   - `Sources/LectureTranscribeNative/Resources/python/` holds identical copies of the three scripts above, packaged into the app. `scripts/regression_check.sh` fails if they differ from the root files.
 - `Tests/LectureTranscribeNativeTests/`: Swift unit tests (`swift test`).
+- `Tests/python/`: Python backend tests (`unittest`), which make small test videos with `vendor/ffmpeg`.
+- `.github/workflows/regression.yml`: runs `scripts/regression_check.sh` on GitHub for every push and pull request.
 - `vendor/ffmpeg/<arch>/`: the `ffmpeg` and `ffprobe` binaries used for source runs and bundled into the app.
 
 ## Main data flow

@@ -18,7 +18,7 @@ Preserve existing shipped behavior while adding or fixing features. Do not remov
 - `TranscribeViewModel` loads and saves history entries.
 - The single launcher `Open Lecture Transcribe.command` keeps working and resolves the project from its own location (no hardcoded user paths).
 
-`Tests/LectureTranscribeNativeTests/CoreFeaturesTests.swift` checks the app behaviors above (`scripts/regression_check.sh` checks the launcher); when an invariant changes on purpose, update that test in the same change.
+`Tests/LectureTranscribeNativeTests/CoreFeaturesTests.swift` checks the app behaviors above (`scripts/regression_check.sh` checks the launcher), and `Tests/python/test_backend.py` checks the backend. When an invariant changes on purpose, update those tests in the same change; when you add or fix a feature, add a test for it.
 
 ## Forbidden
 - Do not remove existing panes/features unless user explicitly asks.
