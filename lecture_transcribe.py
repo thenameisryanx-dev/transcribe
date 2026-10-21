@@ -1420,6 +1420,13 @@ def embed_subtitles_copy(
 TEXT_SUBTITLE_CODECS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
 # Subtitle files that can be added to a video in the track editor.
 ADDABLE_SUBTITLE_SUFFIXES = {".srt", ".ass", ".ssa", ".vtt"}
+# ffprobe doesn't read the title ffmpeg writes for an .mp4/.mov track, so titles are also saved as the track's
+# handler name. Names that tools give every handler on their own ("SoundHandler", "Core Media Audio") aren't titles.
+GENERIC_HANDLER_NAME = re.compile(r"handler|^(core media|apple|gpac|l-smash|mainconcept|iso ?media|bento4)\b", re.IGNORECASE)
+MOV_DEFAULT_HANDLER_NAMES = {"audio": "SoundHandler", "subtitle": "SubtitleHandler"}
+# Handler types of .mp4/.mov subtitle tracks. A subtitle file added to a .mov gets "text", the type of chapter
+# tracks too; those are never enabled, so clearing their flag changes nothing.
+MOV_SUBTITLE_HANDLER_TYPES = {b"sbtl", b"subt", b"text"}
 
 
 def list_media_tracks(path: Path) -> list[dict[str, Any]]:
@@ -1436,7 +1443,7 @@ def list_media_tracks(path: Path) -> list[dict[str, Any]]:
                 "-v", "error",
                 "-show_entries",
                 "stream=index,codec_type,codec_name,channels"
-                ":stream_tags=language,title:stream_disposition=default,forced,attached_pic",
+                ":stream_tags=language,title,handler_name:stream_disposition=default,forced,attached_pic",
                 "-of", "json",
                 str(path),
             ],
@@ -1462,19 +1469,93 @@ def list_media_tracks(path: Path) -> list[dict[str, Any]]:
             kind = "data"
         codec = str(stream.get("codec_name") or "").lower()
         language = str(tags.get("language") or "").strip().lower()
+        title = str(tags.get("title") or "").strip()
+        handler_name = str(tags.get("handler_name") or "").strip()
+        if not title and not GENERIC_HANDLER_NAME.search(handler_name):
+            title = handler_name
         tracks.append({
             "index": int(stream.get("index", len(tracks))),
             "kind": kind,
             "codec": codec,
             # "und" is how containers mark an unknown language.
             "language": "" if language in ("", "und") else language,
-            "title": str(tags.get("title") or "").strip(),
+            "title": title,
             "default": bool(disposition.get("default")),
             "forced": bool(disposition.get("forced")),
             "channels": stream.get("channels"),
             "text": kind == "subtitle" and codec in TEXT_SUBTITLE_CODECS,
         })
     return tracks
+
+
+def _mov_boxes(data: bytes, start: int, end: int):
+    """Yields (type, payload_start, box_end) for each box between start and end of an .mp4/.mov byte range."""
+    pos = start
+    while pos + 8 <= end:
+        size = int.from_bytes(data[pos:pos + 4], "big")
+        header = 8
+        if size == 1:
+            size = int.from_bytes(data[pos + 8:pos + 16], "big")
+            header = 16
+        elif size == 0:
+            size = end - pos
+        if size < header or pos + size > end:
+            return
+        yield data[pos + 4:pos + 8], pos + header, pos + size
+        pos += size
+
+
+def disable_mov_subtitle_tracks(path: Path) -> None:
+    """
+    Clear the "enabled" flag of every subtitle track in an .mp4/.mov file, in place, so players start with
+    subtitles off. Only the track header flags change. Raises SystemExit if the file's layout can't be read.
+    """
+    with open(path, "r+b") as f:
+        file_end = f.seek(0, os.SEEK_END)
+        pos = 0
+        moov: tuple[int, int] | None = None
+        # Top-level boxes are walked by seeking, since the media data between them can be gigabytes.
+        while pos + 8 <= file_end:
+            f.seek(pos)
+            head = f.read(16)
+            size = int.from_bytes(head[0:4], "big")
+            header = 8
+            if size == 1:
+                size = int.from_bytes(head[8:16], "big")
+                header = 16
+            elif size == 0:
+                size = file_end - pos
+            if size < header:
+                break
+            if head[4:8] == b"moov":
+                moov = (pos + header, pos + size)
+                break
+            pos += size
+        if moov is None:
+            raise SystemExit("Couldn't turn subtitles off by default: the saved video's track list wasn't found.")
+
+        f.seek(moov[0])
+        data = f.read(moov[1] - moov[0])
+        for box, trak_start, trak_end in _mov_boxes(data, 0, len(data)):
+            if box != b"trak":
+                continue
+            tkhd_flags = None
+            handler_type = None
+            for child, child_start, child_end in _mov_boxes(data, trak_start, trak_end):
+                if child == b"tkhd":
+                    # A full box: one version byte, then three flag bytes.
+                    tkhd_flags = child_start + 1
+                elif child == b"mdia":
+                    for media_box, media_start, _ in _mov_boxes(data, child_start, child_end):
+                        if media_box == b"hdlr":
+                            # Version and flags, pre_defined, then the handler type.
+                            handler_type = data[media_start + 8:media_start + 12]
+            if tkhd_flags is None or handler_type not in MOV_SUBTITLE_HANDLER_TYPES:
+                continue
+            flags = int.from_bytes(data[tkhd_flags:tkhd_flags + 3], "big")
+            if flags & 1:
+                f.seek(moov[0] + tkhd_flags)
+                f.write((flags & ~1).to_bytes(3, "big"))
 
 
 def save_edited_tracks(
@@ -1559,7 +1640,11 @@ def save_edited_tracks(
         options += [f"-disposition:{spec}:{n}", "+".join(flags) if flags else "0"]
         tag = subtitle_track_language(entry.get("language"), suffix)
         options += [f"-metadata:s:{spec}:{n}", f"language={tag or 'und'}"]
-        options += [f"-metadata:s:{spec}:{n}", f"title={str(entry.get('title') or '').strip()}"]
+        title = str(entry.get("title") or "").strip()
+        options += [f"-metadata:s:{spec}:{n}", f"title={title}"]
+        if is_mov:
+            # Also replaces a handler name copied from the original, so a cleared title stays cleared.
+            options += [f"-metadata:s:{spec}:{n}", f"handler_name={title or MOV_DEFAULT_HANDLER_NAMES[kind]}"]
 
     # Written next to the destination under a temporary name, then moved into place once complete.
     partial = out_path.with_name(f".{out_path.stem}.partial-{os.getpid()}{out_path.suffix}")
@@ -1584,6 +1669,9 @@ def save_edited_tracks(
         )
         if not partial.exists() or partial.stat().st_size == 0:
             raise SystemExit("ffmpeg didn't write the video. It wasn't changed.")
+        if is_mov and not any(e.get("kind") == "subtitle" and e.get("default") for e in plan):
+            # With no default subtitle, ffmpeg turns the first one on anyway, and players would show it.
+            disable_mov_subtitle_tracks(partial)
         os.replace(partial, out_path)
     except BaseException as exc:
         if partial.exists():

@@ -12,11 +12,13 @@ Preserve existing shipped behavior while adding or fixing features. Do not remov
 5. Report what changed and what checks passed/failed.
 
 ## Non-Regression Invariants (Must Keep)
-- Sidebar includes `Transcribe`, `Runs`, and `Settings`.
+- Sidebar includes `Transcribe`, `Tracks`, `Runs`, and `Settings`.
 - `Runs` pane remains reachable from `RootView` and renders run list/details.
 - History persistence remains enabled through `TranscriptionHistoryStore`.
 - `TranscribeViewModel` loads and saves history entries.
 - The single launcher `Open Lecture Transcribe.command` keeps working and resolves the project from its own location (no hardcoded user paths).
+
+`Tests/LectureTranscribeNativeTests/CoreFeaturesTests.swift` checks the app behaviors above (`scripts/regression_check.sh` checks the launcher); when an invariant changes on purpose, update that test in the same change.
 
 ## Forbidden
 - Do not remove existing panes/features unless user explicitly asks.

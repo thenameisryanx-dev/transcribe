@@ -459,37 +459,31 @@ if [[ "${TRANSCRIBE_PREFER_SOURCE:-0}" == "1" ]] && command -v swift >/dev/null 
   if [[ -n "${TRANSCRIBE_DEV_PROJECT_DIR:-}" ]]; then
     DEV_CANDIDATES+=("${TRANSCRIBE_DEV_PROJECT_DIR}")
   fi
-  DEV_CANDIDATES+=("${HOME}/Documents/transcribe")
+  # The project folder that holds this app, when the app was built into the project root.
   DEV_CANDIDATES+=("$(cd "$SCRIPT_DIR/../../.." && pwd)")
 
   for dev_root in "${DEV_CANDIDATES[@]}"; do
     [[ -n "$dev_root" ]] || continue
-    if [[ -f "$dev_root/Package.swift" && -d "$dev_root/Sources/LectureTranscribeNative" ]]; then
-      if /usr/bin/env swift build --package-path "$dev_root" >/dev/null 2>&1; then
-        DEV_BINARY_CANDIDATES=(
-          "$dev_root/.build/debug/LectureTranscribeNative"
-          "$dev_root/.build/arm64-apple-macosx/debug/LectureTranscribeNative"
-          "$dev_root/.build/x86_64-apple-macosx/debug/LectureTranscribeNative"
-        )
-        for dev_binary in "${DEV_BINARY_CANDIDATES[@]}"; do
-          if [[ -x "$dev_binary" ]]; then
-            exec "$dev_binary" "$@"
-          fi
-        done
+    if [[ -f "$dev_root/Package.swift" && -d "$dev_root/Sources/LectureTranscribeNative" && -x "$dev_root/scripts/swift_build_dir.sh" ]]; then
+      # Same build folder as Open Lecture Transcribe.command, outside ~/Documents (iCloud breaks codesign).
+      dev_build_dir="$("$dev_root/scripts/swift_build_dir.sh" "$dev_root")"
+      if /usr/bin/env swift build --package-path "$dev_root" --scratch-path "$dev_build_dir" >/dev/null 2>&1; then
+        dev_bin_dir="$(/usr/bin/env swift build --package-path "$dev_root" --scratch-path "$dev_build_dir" --show-bin-path 2>/dev/null || true)"
+        dev_binary="$dev_bin_dir/LectureTranscribeNative"
+        if [[ -n "$dev_bin_dir" && -x "$dev_binary" ]]; then
+          exec "$dev_binary" "$@"
+        fi
       fi
     fi
   done
 fi
 
-# Optional dev-binary override for debugging only.
+# Optional dev-binary override for debugging only. Set TRANSCRIBE_DEV_BINARY to the binary to run.
 if [[ "${TRANSCRIBE_PREFER_DEV_BINARY:-0}" == "1" ]]; then
   DEV_BINARY_CANDIDATES=()
   if [[ -n "${TRANSCRIBE_DEV_BINARY:-}" ]]; then
     DEV_BINARY_CANDIDATES+=("${TRANSCRIBE_DEV_BINARY}")
   fi
-  DEV_BINARY_CANDIDATES+=("${HOME}/Documents/transcribe/.build/debug/LectureTranscribeNative")
-  DEV_BINARY_CANDIDATES+=("${HOME}/Documents/transcribe/.build/arm64-apple-macosx/debug/LectureTranscribeNative")
-  DEV_BINARY_CANDIDATES+=("${HOME}/Documents/transcribe/.build/x86_64-apple-macosx/debug/LectureTranscribeNative")
 
   for dev_binary in "${DEV_BINARY_CANDIDATES[@]}"; do
     [[ -n "$dev_binary" ]] || continue

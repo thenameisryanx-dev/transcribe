@@ -1,49 +1,19 @@
 # Distribution
 
-## Build a shareable DMG
+How to build the app into a `.dmg` and publish it so other people (and the in-app update check) can get it.
 
-Run from this project directory:
-
-```bash
-chmod +x build_macos_dmg.sh
-./build_macos_dmg.sh
-```
-
-Output DMG will be in `dist/`:
-
-`Lecture-Transcribe-<version>-<arch>.dmg` (version from `VERSION`)
-
-By default, the script now builds the standard macOS drag-to-Applications layout with only:
-
-- `Lecture Transcribe.app`
-- `Applications` alias
-
-It will use `create-dmg` when available, otherwise it uses built-in Finder automation for the same layout.
-
-Optional arrow-style background image paths:
-
-- `Resources/dmg-background.png`
-- `dmg-background.png`
-
-If no background image is found, the script auto-generates a default arrow-style background.
-
-Disable `create-dmg` layout and force plain `hdiutil` output:
-
-```bash
-USE_CREATE_DMG=0 ./build_macos_dmg.sh
-```
-
-If you already have a local app bundle and only want to re-wrap it into a DMG:
-
-```bash
-SKIP_BUILD=1 ./build_macos_dmg.sh
-```
+## What you need
+- Everything in [CONTRIBUTING.md](CONTRIBUTING.md) (Xcode with Swift 6.2 and `python3`).
+- The GitHub CLI, signed in, for publishing: `brew install gh`, then `gh auth login`.
+- Optional: `brew install create-dmg` for a nicer DMG window layout. Without it the script uses Finder for the same layout.
 
 ## Releasing an update
 
+Release from `main`, with everything you want to ship merged.
+
 1. Bump the number in `VERSION` (for example `1.0.0` → `1.1.0`) and commit.
 2. Build the DMG: `./build_macos_dmg.sh` → `dist/Lecture-Transcribe-<version>-<arch>.dmg`.
-3. Publish it: `./scripts/publish_release.sh`. This pushes the branch and creates GitHub Release `v<version>` with the DMG attached.
+3. Publish it: `./scripts/publish_release.sh`. This pushes the current branch and creates GitHub Release `v<version>` with the DMG attached and FFmpeg credits in the notes. It refuses to run if you have uncommitted changes or the release already exists.
 
 On launch, installed copies check the latest GitHub Release. If it is newer, they show a banner with a **Download** button that downloads the DMG for their Mac. Settings → About shows the installed version and has a **Check for Updates** button. Builds run from source (`Open Lecture Transcribe.command`) skip the check.
 
@@ -61,13 +31,18 @@ Nothing needs to be installed first (no Homebrew, ffmpeg, Python or Xcode); ever
    - Confirm with their password. Later launches open normally.
 4. Enter their OpenAI API key when prompted.
 
+## Build options
+
+`./build_macos_dmg.sh` builds a DMG with the standard drag-to-Applications layout: `Lecture Transcribe.app` and an `Applications` alias.
+
+- Plain DMG without the custom layout: `USE_CREATE_DMG=0 ./build_macos_dmg.sh`
+- Re-wrap an app that is already built, without rebuilding: `SKIP_BUILD=1 ./build_macos_dmg.sh`
+- Custom DMG background: put an image at `Resources/dmg-background.png` or `dmg-background.png`. Otherwise the script generates one with an arrow.
+
 ## Notes
 
-- The generated app is architecture-specific (`arm64` or `x86_64`). A DMG built on Apple Silicon does not run on Intel Macs.
+- The DMG only runs on the kind of Mac it was built on (`arm64` for Apple Silicon, `x86_64` for Intel). A DMG built on Apple Silicon does not run on Intel Macs, and Intel copies of the app only see updates if an `x86_64` DMG is attached to the release.
 - Requires macOS 13 or later.
+- The app bundles the Python runtime, the Python dependencies in `python_release_requirements.txt`, and native `ffmpeg` + `ffprobe`.
 - The app is ad-hoc signed during the build, and the script fails if the app inside the DMG is not validly signed (an unsigned app is reported as "damaged" on other Macs). Staging and signing happen in `~/Library/Caches/LectureTranscribe/dmg_staging` because iCloud Drive metadata under `~/Documents` breaks `codesign`.
-- Release builds bundle the Python runtime and Python dependencies needed by the app.
-- Standard builds bundle `ffmpeg` + `ffprobe` automatically in app resources.
-- Apple Silicon builds now require and validate native `arm64` media tools; x86_64-only binaries are rejected.
-- The distribution bundle now packages the native SwiftUI executable (`LectureTranscribeNative`), not the legacy PyInstaller/Tk app.
-- For clean one-click installs without the Privacy & Security step, sign with a Developer ID certificate (Apple Developer Program) and notarize with `xcrun notarytool`.
+- For clean one-click installs without the Privacy & Security step, sign with a Developer ID certificate (Apple Developer Program, $99/year) and notarize with `xcrun notarytool`.
