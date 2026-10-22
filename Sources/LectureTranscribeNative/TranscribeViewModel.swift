@@ -235,6 +235,12 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         !subtitlesEnabled && selectedTranscriptionModel.requiresSpokenLanguages
     }
 
+    /// Named in the toolbar's model menu instead of the selected model, which then can't be changed: subtitle
+    /// runs always use the diarize model.
+    var modelMenuFixedName: String? {
+        subtitlesEnabled ? Self.subtitlesModelDisplayName : nil
+    }
+
     /// The model whose language rules apply: the one that will run.
     var languageModelDisplayName: String {
         subtitlesEnabled ? Self.subtitlesModelDisplayName : selectedTranscriptionModel.displayName

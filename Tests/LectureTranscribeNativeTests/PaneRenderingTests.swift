@@ -5,8 +5,8 @@ import XCTest
 @testable import LectureTranscribeNative
 
 /// Draws the real app window off-screen and checks what it shows, so the sidebar panes are tested as people see
-/// them rather than by searching the source. SwiftUI only exposes the window's title, subtitle and toolbar to
-/// accessibility without an assistive app attached, so that is what these tests read.
+/// them rather than by searching the source. They read the window's title and subtitle, which
+/// SwiftUI sets for the pane on screen.
 final class PaneRenderingTests: XCTestCase {
     private var tempDirectory: URL!
 
@@ -50,30 +50,6 @@ final class PaneRenderingTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(0.4))
     }
 
-    /// Every piece of text the window exposes to accessibility.
-    @MainActor
-    private func visibleText(in window: NSWindow) -> [String] {
-        func call(_ object: NSObject, _ name: String) -> Any? {
-            let selector = Selector(name)
-            guard object.responds(to: selector) else { return nil }
-            return object.perform(selector)?.takeUnretainedValue()
-        }
-        var texts: [String] = []
-        func walk(_ element: Any, depth: Int) {
-            guard depth < 60, let object = element as? NSObject else { return }
-            for name in ["accessibilityLabel", "accessibilityTitle", "accessibilityValue"] {
-                if let text = call(object, name) as? String, !text.isEmpty {
-                    texts.append(text)
-                }
-            }
-            for child in (call(object, "accessibilityChildren") as? [Any]) ?? [] {
-                walk(child, depth: depth + 1)
-            }
-        }
-        walk(window, depth: 0)
-        return texts
-    }
-
     private func entry(_ input: String, status: TranscriptionHistoryEntry.Status) -> TranscriptionHistoryEntry {
         TranscriptionHistoryEntry(
             id: UUID(),
@@ -115,19 +91,26 @@ final class PaneRenderingTests: XCTestCase {
         XCTAssertEqual(window.title, "Runs")
         XCTAssertEqual(window.subtitle, "2 of 2")
     }
+}
+
+/// The toolbar's model menu names the model the run will use. (macOS 26 doesn't expose toolbar text to tests,
+/// so this checks the label the menu is given rather than reading the drawn toolbar.)
+final class ModelMenuTests: XCTestCase {
+    func testTheMenuNamesTheSelectedModel() {
+        for model in TranscriptionModel.allCases {
+            XCTAssertEqual(ModelSelectionMenu.title(selectedModel: model, fixedModelName: nil), model.displayName)
+        }
+    }
 
     @MainActor
-    func testTranscribeToolbarShowsTheSelectedModel() throws {
-        let viewModel = try makeViewModel()
-        let original = viewModel.selectedTranscriptionModel
-        defer { viewModel.selectedTranscriptionModel = original }
-        let window = showWindow(viewModel)
-        defer { window.close() }
-
-        for model in TranscriptionModel.allCases {
-            viewModel.selectedTranscriptionModel = model
-            settle()
-            XCTAssertTrue(visibleText(in: window).contains(model.displayName), "The model menu should show \(model.displayName)")
-        }
+    func testSubtitlesNameTheDiarizeModelAndLockTheMenu() {
+        let viewModel = TranscribeViewModel()
+        XCTAssertNil(viewModel.modelMenuFixedName)
+        viewModel.subtitlesEnabled = true
+        XCTAssertEqual(viewModel.modelMenuFixedName, "GPT-4o Transcribe Diarize")
+        XCTAssertEqual(
+            ModelSelectionMenu.title(selectedModel: .gptTranscribe, fixedModelName: viewModel.modelMenuFixedName),
+            "GPT-4o Transcribe Diarize"
+        )
     }
 }
