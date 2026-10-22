@@ -33,6 +33,7 @@ sys.path.insert(0, str(ROOT))
 import lecture_transcribe as lt  # noqa: E402
 import transcribe_backend  # noqa: E402
 import transcription_job as tj  # noqa: E402
+import golden  # noqa: E402
 from transcription_job import run_transcription_job  # noqa: E402
 
 
@@ -63,6 +64,27 @@ class BackendArgumentsTests(unittest.TestCase):
     def test_run_rejects_unknown_model(self) -> None:
         with mock.patch.object(sys, "stderr"), self.assertRaises(SystemExit):
             self.parse("run", "--input", "in.m4a", "--output", "out", "--model", "whisper-1")
+
+
+class ModelRulesTests(unittest.TestCase):
+    """The backend's model rules match Tests/model_rules.json, which the app's ModelRulesTests.swift also checks."""
+
+    def setUp(self) -> None:
+        data = json.loads((ROOT / "Tests" / "model_rules.json").read_text(encoding="utf-8"))
+        self.rules = {model: rules for model, rules in data.items() if not model.startswith("_")}
+
+    def test_backend_accepts_exactly_the_models_in_the_rules(self) -> None:
+        self.assertEqual(set(lt.TRANSCRIPTION_MODELS), set(self.rules))
+        self.assertEqual(set(transcribe_backend.SUPPORTED_TRANSCRIPTION_MODELS), set(self.rules))
+
+    def test_each_models_options_match_the_rules(self) -> None:
+        for model, rules in self.rules.items():
+            with self.subTest(model):
+                self.assertEqual(model in lt.DIARIZATION_MODELS, rules["speaker_labels"])
+                self.assertEqual(model in lt.CONSISTENCY_MODELS, rules["consistency_mode"])
+                self.assertEqual(model in lt.KEYWORD_MODELS, rules["keywords"])
+                self.assertEqual(model in lt.PROMPT_MODELS, rules["context_prompt"])
+                self.assertEqual(model in lt.LANGUAGE_LIST_MODELS, rules["needs_spoken_languages"])
 
 
 class TranscriptionJobTests(TempDirTestCase):
@@ -246,6 +268,25 @@ class ResumeRunTests(TempDirTestCase):
         tj.prune_chunk_results()
         self.assertFalse(old.exists())
         self.assertTrue(recent.exists())
+
+
+class GoldenOutputTests(TempDirTestCase):
+    """The backend's output still matches the reference files in Tests/golden (see golden.py to regenerate them)."""
+
+    def test_text_functions_match_the_reference(self) -> None:
+        expected = json.loads(golden.TEXT_FUNCTIONS_FILE.read_text(encoding="utf-8"))
+        actual = golden.text_function_cases()
+        self.assertEqual(len(actual), len(expected))
+        for want, got in zip(expected, actual):
+            with self.subTest(function=want["function"], input=want["input"]):
+                self.assertEqual(got, want)
+
+    def test_whole_runs_match_the_reference(self) -> None:
+        actual = golden.run_outputs(self.dir)
+        self.assertEqual(sorted(actual), sorted(p.name for p in golden.RUNS_DIR.iterdir()))
+        for name, text in actual.items():
+            with self.subTest(name):
+                self.assertEqual(text, (golden.RUNS_DIR / name).read_text(encoding="utf-8"))
 
 
 class MediaToolArchitectureTests(TempDirTestCase):

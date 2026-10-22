@@ -33,35 +33,32 @@ if ! PYTHON_TEST_OUTPUT="$(.venv/bin/python3 -m unittest discover -s Tests/pytho
 fi
 
 echo "[4/5] Verifying UI wiring and backend features..."
-# Text checks for UI wiring the unit tests cannot see, and for removed behavior that must not come back.
-has_fixed 'TracksPaneView(editor: viewModel.trackEditor)' Sources/LectureTranscribeNative/RootView.swift
-has_fixed 'Image(systemName: pane.systemImage)' Sources/LectureTranscribeNative/RootView.swift
-has_fixed 'Text(pane.rawValue)' Sources/LectureTranscribeNative/RootView.swift
-has_fixed '.foregroundStyle(.primary)' Sources/LectureTranscribeNative/RootView.swift
-has_fixed 'RunsPaneView()' Sources/LectureTranscribeNative/RootView.swift
-has_fixed 'frame(minWidth: 1120, minHeight: 760)' Sources/LectureTranscribeNative/LectureTranscribeNativeApp.swift
-has_fixed 'Text("Output")' Sources/LectureTranscribeNative/RootView.swift
-has_fixed 'Button("Open Output Folder")' Sources/LectureTranscribeNative/RootView.swift
-has_fixed 'Button("Change Folder…")' Sources/LectureTranscribeNative/RootView.swift
-lacks_fixed '.disabled(!viewModel.canOpenOutputFolder)' Sources/LectureTranscribeNative/RootView.swift
-has 'Transcription Model' Sources/LectureTranscribeNative/TranscribePaneView.swift
-has 'ModelSelectionMenu' Sources/LectureTranscribeNative/TranscribePaneView.swift
-has_fixed 'model.menuSubtitle' Sources/LectureTranscribeNative/TranscribePaneView.swift
-has_fixed 'selectedModel.displayName' Sources/LectureTranscribeNative/TranscribePaneView.swift
-has 'Unavailable for' Sources/LectureTranscribeNative/TranscribePaneView.swift
+# Sidebar panes opening, the Runs list and the toolbar's model menu are tested by drawing the real window
+# (Tests/LectureTranscribeNativeTests/PaneRenderingTests.swift). Controls inside a pane aren't visible to those
+# tests, so these check that each control's label is still somewhere in the app: moving or restyling a control
+# keeps them passing, deleting it fails them.
+APP_SOURCES=Sources/LectureTranscribeNative
+in_app() { grep -rFq -- "$1" "$APP_SOURCES"; }
+not_in_app() { ! grep -rFq -- "$1" "$APP_SOURCES"; }
+in_app '"Start Transcribing"'
+in_app '"Clear Draft"'
+in_app 'This clears the selected audio file, progress, and run log. It does not remove any run history.'
+in_app '"Open Output Folder"'
+in_app '"Change Folder…"'
+in_app '"About"'
+in_app 'Unavailable for'
+# The How-To guide opens when asked for, and update checks run on launch.
+in_app 'handleHowToGuideRequestIfNeeded()'
+in_app 'await updateChecker.checkOnLaunch()'
+# Removed on purpose; must not come back.
+not_in_app '.disabled(!viewModel.canOpenOutputFolder)'
+not_in_app 'canCreateNewTranscript'
+not_in_app '"New Transcription"'
 lacks_fixed '"/usr/bin/arch", "-x86_64"' lecture_transcribe.py
+# The app ships the copies under Resources/python; they must match the root scripts.
 cmp -s lecture_transcribe.py Sources/LectureTranscribeNative/Resources/python/lecture_transcribe.py
 cmp -s transcription_job.py Sources/LectureTranscribeNative/Resources/python/transcription_job.py
 cmp -s transcribe_backend.py Sources/LectureTranscribeNative/Resources/python/transcribe_backend.py
-has_fixed 'if handleHowToGuideRequestIfNeeded() {' Sources/LectureTranscribeNative/TranscribePaneView.swift
-has_fixed 'Button("Start Transcribing")' Sources/LectureTranscribeNative/TranscribePaneView.swift
-has_fixed 'Label("Clear Draft", systemImage: "xmark.circle")' Sources/LectureTranscribeNative/TranscribePaneView.swift
-has_fixed 'This clears the selected audio file, progress, and run log. It does not remove any run history.' Sources/LectureTranscribeNative/TranscribePaneView.swift
-lacks 'canCreateNewTranscript' Sources/LectureTranscribeNative/TranscribeViewModel.swift
-lacks 'New Transcription' Sources/LectureTranscribeNative/TranscribePaneView.swift
-has_fixed '.environmentObject(updateChecker)' Sources/LectureTranscribeNative/LectureTranscribeNativeApp.swift
-has_fixed 'await updateChecker.checkOnLaunch()' Sources/LectureTranscribeNative/RootView.swift
-has_fixed 'Text("About")' Sources/LectureTranscribeNative/RootView.swift
 grep -Eq '^[0-9]+(\.[0-9]+)*$' VERSION
 has_fixed '<string>$APP_VERSION</string>' build_macos_dmg.sh
 

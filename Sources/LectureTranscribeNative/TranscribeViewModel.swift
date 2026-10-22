@@ -2,191 +2,6 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
-enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
-    case gptTranscribe = "gpt-transcribe"
-    case gpt4oTranscribe = "gpt-4o-transcribe"
-    case gpt4oMiniTranscribe = "gpt-4o-mini-transcribe"
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .gptTranscribe:
-            return "GPT Transcribe"
-        case .gpt4oTranscribe:
-            return "GPT-4o Transcribe"
-        case .gpt4oMiniTranscribe:
-            return "GPT-4o Mini Transcribe"
-        }
-    }
-
-    var hoverDescription: String {
-        switch self {
-        case .gptTranscribe:
-            return "Experimental. Uses the spoken language you pick (English if auto-detect). Supports speaker diarization. In testing it sometimes skipped quiet or whispered speech."
-        case .gpt4oTranscribe:
-            return "Accurate and supports speaker diarization."
-        case .gpt4oMiniTranscribe:
-            return "As accurate as GPT-4o Transcribe in testing, at half the price. Speaker diarization is unavailable."
-        }
-    }
-
-    // Short subtitle shown under the model name in the toolbar menu.
-    // Prices are OpenAI per-minute rates for file transcription; update if they change.
-    var menuSubtitle: String {
-        switch self {
-        case .gptTranscribe:
-            return "Experimental · $0.0045/min"
-        case .gpt4oTranscribe:
-            return "Supports speaker labels · $0.006/min"
-        case .gpt4oMiniTranscribe:
-            return "Half the price, no speaker labels · $0.003/min"
-        }
-    }
-
-    // Diarized runs always use gpt-4o-transcribe-diarize; this only gates the toggle.
-    var supportsDiarization: Bool {
-        self != .gpt4oMiniTranscribe
-    }
-
-    /// Carrying the previous chunk's excerpt helped GPT Transcribe in testing, but made the GPT-4o models
-    /// loop or invent text at chunk ends.
-    var supportsConsistencyMode: Bool {
-        self == .gptTranscribe
-    }
-
-    /// Only GPT Transcribe accepts keyword hints.
-    var supportsKeywords: Bool {
-        self == .gptTranscribe
-    }
-
-    /// GPT Transcribe drops speech without a language list, so it falls back to English when none is set.
-    /// The other models auto-detect when no language is set.
-    var requiresSpokenLanguages: Bool {
-        self == .gptTranscribe
-    }
-}
-
-/// How much audio goes into each API request. Cuts still move to the nearest pause.
-enum ChunkLength: Int, CaseIterable, Identifiable, Sendable {
-    case fiveMinutes = 300
-    case tenMinutes = 600
-
-    /// Used until the user picks one. 5-minute chunks dropped fewer words than 10-minute ones in testing.
-    static let standard: ChunkLength = .fiveMinutes
-
-    var id: Int { rawValue }
-    var seconds: Int { rawValue }
-
-    var displayName: String {
-        "\(rawValue / 60) min"
-    }
-}
-
-struct SpokenLanguage: Identifiable, Hashable {
-    /// ISO-639-1 code sent to the backend; empty means auto-detect.
-    let code: String
-
-    var id: String { code }
-
-    var displayName: String {
-        if code.isEmpty { return "Auto-detect" }
-        return Locale.current.localizedString(forLanguageCode: code)?.capitalized ?? code
-    }
-
-    static let autoDetect = SpokenLanguage(code: "")
-    /// GPT Transcribe drops speech without a language, so it falls back to this when auto-detect is chosen.
-    static let fallbackCode = "en"
-
-    /// Auto-detect first, then languages sorted by name.
-    static let all: [SpokenLanguage] = [autoDetect] + [
-        "ar", "zh", "cs", "da", "nl", "en", "fi", "fr", "de", "el", "he", "hi", "hu", "id", "it", "ja",
-        "ko", "ms", "no", "fa", "pl", "pt", "ro", "ru", "es", "sv", "tl", "th", "tr", "uk", "ur", "vi",
-    ]
-    .map(SpokenLanguage.init(code:))
-    .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-
-    /// Maps a stored setting (possibly an older comma-separated list) to a supported code, or "" for auto-detect.
-    static func normalizedCode(_ stored: String?) -> String {
-        let first = stored?
-            .split(whereSeparator: { $0 == "," || $0.isWhitespace })
-            .first
-            .map { $0.lowercased() } ?? ""
-        return all.contains { $0.code == first } ? first : ""
-    }
-
-    /// Codes sent to the backend for `model`.
-    static func backendCodes(for code: String, model: TranscriptionModel) -> [String] {
-        if !code.isEmpty { return [code] }
-        return model.requiresSpokenLanguages ? [fallbackCode] : []
-    }
-}
-
-/// One audio track in the selected file, as listed by the backend's `audio-tracks` command.
-/// Videos often carry one track per language (e.g. Italian first, English second).
-struct AudioTrack: Identifiable, Equatable, Sendable, Decodable {
-    /// Position among the file's audio tracks, from 0 (ffmpeg's `0:a:N`).
-    let index: Int
-    /// The file's language tag, usually three letters ("eng"); empty when untagged.
-    let language: String
-    let title: String
-    let codec: String
-    let channels: Int?
-    let `default`: Bool
-
-    var id: Int { index }
-
-    /// Older three-letter tags that `Locale` doesn't map to two-letter codes.
-    private static let bibliographicCodes = [
-        "alb": "sq", "arm": "hy", "baq": "eu", "bur": "my", "chi": "zh", "cze": "cs", "dut": "nl", "fre": "fr",
-        "geo": "ka", "ger": "de", "gre": "el", "ice": "is", "mac": "mk", "may": "ms", "per": "fa", "rum": "ro",
-        "slo": "sk", "tib": "bo", "wel": "cy",
-    ]
-
-    /// Two-letter code comparable with `SpokenLanguage` codes, or nil when the track has no language tag.
-    var languageCode: String? {
-        Self.languageCode(forTag: language)
-    }
-
-    /// Two-letter code for a file's language tag ("eng" → "en"), or nil when the tag is empty.
-    static func languageCode(forTag tag: String) -> String? {
-        guard !tag.isEmpty else { return nil }
-        if let code = bibliographicCodes[tag] { return code }
-        return Locale.Language(identifier: tag).languageCode?.identifier ?? tag
-    }
-
-    var languageName: String? {
-        languageCode.flatMap { Locale.current.localizedString(forLanguageCode: $0)?.capitalized }
-    }
-
-    /// e.g. "Track 2: English · 5.1"
-    var displayName: String {
-        var parts: [String] = []
-        let name = languageName ?? (title.isEmpty ? "Unknown language" : title)
-        parts.append(name)
-        if !title.isEmpty && title.caseInsensitiveCompare(name) != .orderedSame {
-            parts.append(title)
-        }
-        switch channels {
-        case 1: parts.append("Mono")
-        case 2: parts.append("Stereo")
-        case 6: parts.append("5.1")
-        case 8: parts.append("7.1")
-        case let count?: parts.append("\(count) channels")
-        case nil: break
-        }
-        return "Track \(index + 1): " + parts.joined(separator: " · ")
-    }
-
-    /// The track to start on: the one in the spoken language when there is one, else the file's default track.
-    static func preferredIndex(in tracks: [AudioTrack], spokenLanguage: String) -> Int {
-        if !spokenLanguage.isEmpty, let match = tracks.first(where: { $0.languageCode == spokenLanguage }) {
-            return match.index
-        }
-        return tracks.first(where: \.default)?.index ?? 0
-    }
-}
-
 @MainActor
 final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published var selectedPane: NavigationPane? = .transcribe
@@ -340,7 +155,6 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     /// The Tracks pane's editor; kept here so a finished subtitle run can open its video there.
     let trackEditor = TrackEditorModel()
     private let historyStore: TranscriptionHistoryStore
-    private let maxHistoryEntries = 200
     private static let selectedModelDefaultsKey = "selectedTranscriptionModel"
     private static let outputFolderDefaultsKey = "outputFolderPath"
     // Keeps the older key so a language chosen before the dropdown carries over.
@@ -445,6 +259,22 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
     var spokenLanguageSummary: String {
         SpokenLanguage(code: effectiveSpokenLanguage).displayName
+    }
+
+    /// The pane's options as they stand; `RunRequest` works out which of them a run uses.
+    var runOptions: RunRequest.Options {
+        RunRequest.Options(
+            model: selectedTranscriptionModel,
+            diarize: diarizeEnabled,
+            subtitles: subtitlesEnabled,
+            embedSubtitles: embedSubtitlesEnabled,
+            audioTrack: selectedAudioTrack,
+            languages: spokenLanguageCodesForRun,
+            contextPrompt: contextPrompt,
+            consistencyMode: consistencyModeEnabled,
+            chunkLength: effectiveChunkLength,
+            keywordsText: keywordsText
+        )
     }
 
     var trimmedContextPrompt: String {
@@ -767,34 +597,22 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     func deleteSelectedHistoryEntries() {
         guard !selectedHistoryEntryIDs.isEmpty else { return }
 
-        let runningSelectedCount = historyEntries.reduce(into: 0) { count, entry in
-            if selectedHistoryEntryIDs.contains(entry.id), entry.status == .running {
-                count += 1
-            }
-        }
-
-        let deletableIDs = Set(historyEntries.compactMap { entry -> UUID? in
-            guard selectedHistoryEntryIDs.contains(entry.id), entry.status != .running else {
-                return nil
-            }
-            return entry.id
-        })
-
-        guard !deletableIDs.isEmpty else {
+        let deletion = RunHistory.deleting(selectedHistoryEntryIDs, from: historyEntries)
+        guard deletion.deletedAny else {
             showError("Cannot delete a run while it is still in progress.")
             return
         }
 
-        let preferredSelectionID = selectedHistoryEntryIDs.first(where: { !deletableIDs.contains($0) })
-        historyEntries.removeAll { entry in
-            deletableIDs.contains(entry.id)
-        }
-        normalizeHistorySelection(preferredID: preferredSelectionID)
-
+        historyEntries = deletion.remaining
+        selectedHistoryEntryIDs = RunHistory.selection(
+            selectedHistoryEntryIDs,
+            in: historyEntries,
+            preferring: deletion.keepSelected
+        )
         saveHistoryEntries()
 
-        if runningSelectedCount > 0 {
-            showError("Skipped \(runningSelectedCount) run(s) that are still in progress.")
+        if deletion.skippedRunning > 0 {
+            showError("Skipped \(deletion.skippedRunning) run(s) that are still in progress.")
         }
     }
 
@@ -833,8 +651,6 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             return
         }
 
-        let languages = spokenLanguageCodesForRun
-
         if isKeywordsAvailable, let invalid = KeywordList.parse(keywordsText).first(where: KeywordList.isRejected) {
             showError("The keyword \"\(invalid)\" contains < or >, which OpenAI doesn't accept. Remove those characters, then try again.")
             return
@@ -857,39 +673,17 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         canOpenOutputFolder = false
         runFailedForAPIKey = false
         isRunning = true
-        let makeSubtitles = subtitlesEnabled
-        let embedSubtitles = embedsSubtitlesForRun
-        let shouldDiarize = diarizeEnabled && selectedTranscriptionModel.supportsDiarization && !makeSubtitles
-        if diarizeEnabled != shouldDiarize {
-            diarizeEnabled = shouldDiarize
+        let request = RunRequest(inputPath: trimmedPath, outputDirectory: normalizedOutputDirectory, options: runOptions)
+        if diarizeEnabled != request.diarize {
+            diarizeEnabled = request.diarize
         }
-        // Speaker labels and subtitles both run on the diarize model, which takes no prompt or chunk length.
-        let usesDiarizeModel = shouldDiarize || makeSubtitles
-        let model = selectedTranscriptionModel
-        let context = usesDiarizeModel ? "" : trimmedContextPrompt
-        let carryContext = !usesDiarizeModel && consistencyModeEnabled && model.supportsConsistencyMode
-        let chunkSeconds = usesDiarizeModel ? nil : effectiveChunkLength.seconds
-        let keywords = !usesDiarizeModel && model.supportsKeywords ? KeywordList.parse(keywordsText) : []
-        let audioTrack = selectedAudioTrack
-        if !context.isEmpty {
-            recentContextPrompts = RecentContextPrompts.adding(context, to: recentContextPrompts)
+        if !request.context.isEmpty {
+            recentContextPrompts = RecentContextPrompts.adding(request.context, to: recentContextPrompts)
         }
-        if !keywords.isEmpty {
-            recentKeywords = RecentContextPrompts.adding(KeywordList.displayText(keywords), to: recentKeywords)
+        if !request.keywords.isEmpty {
+            recentKeywords = RecentContextPrompts.adding(KeywordList.displayText(request.keywords), to: recentKeywords)
         }
-        beginHistoryEntry(
-            inputPath: trimmedPath,
-            outputDirectory: normalizedOutputDirectory,
-            diarize: shouldDiarize,
-            subtitles: makeSubtitles,
-            embedSubtitles: embedSubtitles,
-            audioTrack: audioTrack,
-            model: model,
-            context: context,
-            keywords: keywords,
-            consistencyMode: carryContext,
-            chunkSeconds: chunkSeconds
-        )
+        beginHistoryEntry(request.historyEntry())
 
         runTask = Task { [weak self] in
             guard let self else { return }
@@ -905,20 +699,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
             var runError: Error?
             do {
-                try await backend.startTranscription(
-                    inputPath: trimmedPath,
-                    outputDirectory: normalizedOutputDirectory,
-                    diarize: shouldDiarize,
-                    subtitles: makeSubtitles,
-                    embedSubtitles: embedSubtitles,
-                    audioTrack: audioTrack,
-                    model: model.rawValue,
-                    languages: languages,
-                    context: context,
-                    carryContext: carryContext,
-                    chunkSeconds: chunkSeconds,
-                    keywords: keywords
-                ) { event in
+                try await backend.startTranscription(request) { event in
                     eventContinuation.yield(event)
                 }
             } catch {
@@ -1134,23 +915,10 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
 
     private func loadHistoryEntries() {
         do {
-            let loadedEntries = try historyStore.loadEntries()
-            var didMutateInterruptedEntries = false
-            let normalizedEntries = loadedEntries.map { entry -> TranscriptionHistoryEntry in
-                guard entry.status == .running else { return entry }
-
-                // If a run is still marked as running on launch, the app was closed mid-run.
-                var interrupted = entry
-                interrupted.status = .cancelled
-                interrupted.finishedAt = interrupted.finishedAt ?? interrupted.startedAt
-                interrupted.errorMessage = interrupted.errorMessage ?? "Run interrupted before completion."
-                didMutateInterruptedEntries = true
-                return interrupted
-            }
-
-            historyEntries = normalizedEntries.sorted(by: Self.sortHistoryEntriesNewestFirst)
-            normalizeHistorySelection()
-            if didMutateInterruptedEntries {
+            let loaded = RunHistory.loaded(try historyStore.loadEntries())
+            historyEntries = loaded.entries
+            selectedHistoryEntryIDs = RunHistory.selection(selectedHistoryEntryIDs, in: historyEntries)
+            if loaded.changed {
                 saveHistoryEntries()
             }
         } catch {
@@ -1168,62 +936,10 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func normalizeHistorySelection(preferredID: UUID? = nil) {
-        let currentIDs = Set(historyEntries.map(\.id))
-        selectedHistoryEntryIDs.formIntersection(currentIDs)
-
-        if selectedHistoryEntryIDs.isEmpty, let preferredID, currentIDs.contains(preferredID) {
-            selectedHistoryEntryIDs = [preferredID]
-            return
-        }
-
-        if selectedHistoryEntryIDs.isEmpty, let firstEntryID = historyEntries.first?.id {
-            selectedHistoryEntryIDs = [firstEntryID]
-        }
-    }
-
-    private func beginHistoryEntry(
-        inputPath: String,
-        outputDirectory: String,
-        diarize: Bool,
-        subtitles: Bool,
-        embedSubtitles: Bool,
-        audioTrack: Int,
-        model: TranscriptionModel,
-        context: String,
-        keywords: [String],
-        consistencyMode: Bool,
-        chunkSeconds: Int?
-    ) {
-        let entry = TranscriptionHistoryEntry(
-            id: UUID(),
-            startedAt: Date(),
-            finishedAt: nil,
-            inputPath: inputPath,
-            outputPath: nil,
-            outputDirectory: outputDirectory,
-            diarize: diarize,
-            status: .running,
-            errorMessage: nil,
-            model: model.rawValue,
-            context: context.isEmpty ? nil : context,
-            keywords: keywords.isEmpty ? nil : keywords,
-            consistencyMode: consistencyMode,
-            chunkSeconds: chunkSeconds,
-            subtitles: subtitles ? true : nil,
-            audioTrack: audioTrack > 0 ? audioTrack : nil,
-            embedSubtitles: embedSubtitles ? true : nil
-        )
-
+    private func beginHistoryEntry(_ entry: TranscriptionHistoryEntry) {
         activeHistoryEntryID = entry.id
         activeHistoryEntryFinalized = false
-
-        historyEntries.removeAll(where: { $0.id == entry.id })
-        historyEntries.insert(entry, at: 0)
-        if historyEntries.count > maxHistoryEntries {
-            historyEntries.removeSubrange(maxHistoryEntries...)
-        }
-
+        historyEntries = RunHistory.adding(entry, to: historyEntries)
         selectedHistoryEntryIDs = [entry.id]
         saveHistoryEntries()
     }
@@ -1236,78 +952,25 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         guard let activeHistoryEntryID, !activeHistoryEntryFinalized else {
             return
         }
-
-        guard let index = historyEntries.firstIndex(where: { $0.id == activeHistoryEntryID }) else {
-            activeHistoryEntryFinalized = true
+        activeHistoryEntryFinalized = true
+        guard let finished = RunHistory.finishing(
+            activeHistoryEntryID,
+            in: historyEntries,
+            status: status,
+            outputPath: outputPath,
+            errorMessage: errorMessage,
+            warnings: runWarnings,
+            log: logText
+        ) else {
             return
         }
-
-        historyEntries[index].status = status
-        historyEntries[index].finishedAt = Date()
-        historyEntries[index].errorMessage = errorMessage
-        historyEntries[index].warnings = runWarnings.isEmpty ? nil : runWarnings
-        historyEntries[index].log = logText.isEmpty ? nil : logText
-        if let outputPath {
-            historyEntries[index].outputPath = outputPath
-        }
-
-        // Move updated entries to the top in case list ordering changed while running.
-        let updatedEntry = historyEntries.remove(at: index)
-        historyEntries.insert(updatedEntry, at: 0)
-        selectedHistoryEntryIDs = [updatedEntry.id]
-
-        activeHistoryEntryFinalized = true
+        historyEntries = finished
+        selectedHistoryEntryIDs = [activeHistoryEntryID]
         saveHistoryEntries()
     }
 
     private func clearActiveHistoryTracking() {
         activeHistoryEntryID = nil
         activeHistoryEntryFinalized = false
-    }
-
-    private static func sortHistoryEntriesNewestFirst(_ lhs: TranscriptionHistoryEntry, _ rhs: TranscriptionHistoryEntry) -> Bool {
-        lhs.startedAt > rhs.startedAt
-    }
-}
-
-/// Keywords typed as one string, separated by commas or new lines. Mirrors `parse_keywords` in the backend.
-enum KeywordList {
-    /// Characters OpenAI rejects in a keyword (the whole request fails).
-    static let rejectedCharacters: Set<Character> = ["<", ">"]
-
-    /// Trimmed keywords with inner whitespace collapsed, dropping blanks and repeats (ignoring case).
-    static func parse(_ text: String) -> [String] {
-        var seen = Set<String>()
-        return text
-            .split(whereSeparator: { $0 == "," || $0.isNewline })
-            .map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
-            .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
-    }
-
-    static func isRejected(_ keyword: String) -> Bool {
-        keyword.contains(where: rejectedCharacters.contains)
-    }
-
-    /// One line for the Runs pane and the Recent menu; parses back to the same keywords.
-    static func displayText(_ keywords: [String]) -> String {
-        keywords.joined(separator: ", ")
-    }
-}
-
-enum RecentContextPrompts {
-    static let limit = 10
-
-    /// Puts `context` first, dropping an identical earlier copy and anything past `limit`.
-    static func adding(_ context: String, to recent: [String]) -> [String] {
-        let trimmed = context.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return recent }
-        return Array(([trimmed] + recent.filter { $0 != trimmed }).prefix(limit))
-    }
-
-    /// A one-line label for the Recent menu.
-    static func menuTitle(for context: String, maxLength: Int = 60) -> String {
-        let oneLine = context.split(whereSeparator: \.isNewline).joined(separator: " ")
-        guard oneLine.count > maxLength else { return oneLine }
-        return String(oneLine.prefix(maxLength - 1)).trimmingCharacters(in: .whitespaces) + "…"
     }
 }

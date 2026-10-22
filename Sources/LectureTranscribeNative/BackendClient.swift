@@ -232,35 +232,10 @@ final class BackendClient: @unchecked Sendable {
     }
 
     func startTranscription(
-        inputPath: String,
-        outputDirectory: String,
-        diarize: Bool,
-        subtitles: Bool = false,
-        embedSubtitles: Bool = false,
-        audioTrack: Int = 0,
-        model: String,
-        languages: [String] = [],
-        context: String = "",
-        carryContext: Bool = false,
-        chunkSeconds: Int? = nil,
-        keywords: [String] = [],
+        _ request: RunRequest,
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
     ) async throws {
-        let args = Self.transcriptionArguments(
-            inputPath: inputPath,
-            outputDirectory: outputDirectory,
-            diarize: diarize,
-            subtitles: subtitles,
-            embedSubtitles: embedSubtitles,
-            audioTrack: audioTrack,
-            model: model,
-            languages: languages,
-            context: context,
-            carryContext: carryContext,
-            chunkSeconds: chunkSeconds,
-            keywords: keywords
-        )
-        try await runStreamCommand(args: args, onEvent: onEvent)
+        try await runStreamCommand(args: request.backendArguments, onEvent: onEvent)
     }
 
     /// The backend's `run` arguments for a transcription.

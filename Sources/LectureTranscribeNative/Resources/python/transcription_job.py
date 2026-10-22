@@ -25,8 +25,11 @@ from lecture_transcribe import (
     MAX_COPY_CHANNELS,
     MODEL_DIARIZE,
     MODEL_GPT_TRANSCRIBE,
-    MODEL_MINI,
     MODEL_NORMAL,
+    CONSISTENCY_MODELS,
+    DIARIZATION_MODELS,
+    LANGUAGE_LIST_MODELS,
+    TRANSCRIPTION_MODELS,
     RESULTS_MAX_AGE_SECONDS,
     RESULTS_ROOT_DIR,
     SubtitleCue,
@@ -372,11 +375,11 @@ def run_transcription_job(
         push_event("log", "A subtitled copy of the video is only made with subtitles, so none will be saved.")
         embed_subtitles = False
 
-    if transcription_model not in {MODEL_GPT_TRANSCRIBE, MODEL_NORMAL, MODEL_MINI}:
+    if transcription_model not in TRANSCRIPTION_MODELS:
         push_event("log", f"Unknown model '{transcription_model}'. Falling back to {MODEL_NORMAL}.")
         transcription_model = MODEL_NORMAL
 
-    if diarize and transcription_model == MODEL_MINI:
+    if diarize and transcription_model not in DIARIZATION_MODELS:
         raise SystemExit(
             "Speaker diarization is not supported with gpt-4o-mini-transcribe. "
             "Select gpt-transcribe or gpt-4o-transcribe, or disable diarization."
@@ -387,7 +390,7 @@ def run_transcription_job(
     else:
         push_event("log", f"Using transcription model: {transcription_model}")
     # gpt-transcribe takes the whole list; the GPT-4o and diarize models take at most one `language`.
-    if transcription_model == MODEL_GPT_TRANSCRIBE and not diarize and not subtitles:
+    if transcription_model in LANGUAGE_LIST_MODELS and not diarize and not subtitles:
         chunk_languages = languages or list(DEFAULT_LANGUAGES)
         push_event("log", f"Spoken languages: {', '.join(chunk_languages)}")
     else:
@@ -406,7 +409,7 @@ def run_transcription_job(
             push_event("log", f"Keywords aren't supported with {mode}, so they won't be sent.")
         context, carry_context, keywords = None, False, None
     else:
-        if carry_context and transcription_model != MODEL_GPT_TRANSCRIBE:
+        if carry_context and transcription_model not in CONSISTENCY_MODELS:
             # The GPT-4o models tend to loop or invent text at chunk ends when given the excerpt.
             push_event("log", f"Consistency mode is only used with {MODEL_GPT_TRANSCRIBE}, so it is off for this run.")
             carry_context = False

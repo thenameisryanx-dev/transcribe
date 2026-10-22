@@ -1,0 +1,24 @@
+{
+  "_about": "What each transcription model can do. TranscriptionModel (Swift) and lecture_transcribe.py (Python) each state these rules; ModelRulesTests.swift and test_backend.py check both against this file.",
+  "gpt-transcribe": {
+    "speaker_labels": true,
+    "consistency_mode": true,
+    "keywords": true,
+    "context_prompt": true,
+    "needs_spoken_languages": true
+  },
+  "gpt-4o-transcribe": {
+    "speaker_labels": true,
+    "consistency_mode": false,
+    "keywords": false,
+    "context_prompt": true,
+    "needs_spoken_languages": false
+  },
+  "gpt-4o-mini-transcribe": {
+    "speaker_labels": false,
+    "consistency_mode": false,
+    "keywords": false,
+    "context_prompt": true,
+    "needs_spoken_languages": false
+  }
+}

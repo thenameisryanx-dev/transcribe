@@ -11,6 +11,8 @@ from pathlib import Path
 from lecture_transcribe import (
     CHUNK_SECONDS_CHOICES,
     DEFAULT_LANGUAGES,
+    DIARIZATION_MODELS,
+    TRANSCRIPTION_MODELS,
     EMBED_SUBTITLE_CODECS,
     list_media_tracks,
     save_edited_tracks,
@@ -26,8 +28,7 @@ from transcription_job import run_transcription_job
 
 MODEL_GPT_TRANSCRIBE = "gpt-transcribe"
 MODEL_GPT4O_TRANSCRIBE = "gpt-4o-transcribe"
-MODEL_GPT4O_MINI_TRANSCRIBE = "gpt-4o-mini-transcribe"
-SUPPORTED_TRANSCRIPTION_MODELS = [MODEL_GPT_TRANSCRIBE, MODEL_GPT4O_TRANSCRIBE, MODEL_GPT4O_MINI_TRANSCRIBE]
+SUPPORTED_TRANSCRIPTION_MODELS = list(TRANSCRIPTION_MODELS)
 
 
 _EMIT_LOCK = threading.Lock()
@@ -211,7 +212,7 @@ def command_run(args: argparse.Namespace) -> int:
         return 2
 
     # Subtitles always run on the diarize model and drop speaker labels, so the selected model doesn't matter.
-    if diarize and not subtitles and model == MODEL_GPT4O_MINI_TRANSCRIBE:
+    if diarize and not subtitles and model not in DIARIZATION_MODELS:
         emit(
             "error",
             "Speaker diarization is not supported with gpt-4o-mini-transcribe. "

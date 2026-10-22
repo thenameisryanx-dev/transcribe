@@ -1,0 +1,53 @@
+1
+00:00:00,400 --> 00:00:03,917
+Part 1. Where were you?
+
+2
+00:00:04,000 --> 00:00:04,917
+Out.
+
+3
+00:00:05,000 --> 00:00:09,564
+Then let's go over the mechanism again,
+because the nucleophile
+
+4
+00:00:09,648 --> 00:00:14,500
+attacks from the back side
+and the stereochemistry inverts.
+
+5
+00:00:52,668 --> 00:00:56,185
+Part 2. Where were you?
+
+6
+00:00:56,268 --> 00:00:57,185
+Out.
+
+7
+00:00:57,268 --> 00:01:01,832
+Then let's go over the mechanism again,
+because the nucleophile
+
+8
+00:01:01,916 --> 00:01:06,768
+attacks from the back side
+and the stereochemistry inverts.
+
+9
+00:01:50,718 --> 00:01:54,235
+Part 3. Where were you?
+
+10
+00:01:54,318 --> 00:01:55,235
+Out.
+
+11
+00:01:55,318 --> 00:01:59,882
+Then let's go over the mechanism again,
+because the nucleophile
+
+12
+00:01:59,966 --> 00:02:04,818
+attacks from the back side
+and the stereochemistry inverts.

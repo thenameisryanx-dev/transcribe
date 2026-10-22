@@ -85,6 +85,13 @@ REPEAT_PHRASE_WORDS = 8             # wording is compared in overlapping phrases
 REPEAT_MIN_WORDS = 50               # shortest repeated passage that is flagged
 REPEAT_MATCH_SHARE = 0.7            # share of a passage's phrases that must repeat (allows small differences)
 
+# What each model can do. The app's TranscriptionModel (Swift) states the same rules; Tests/model_rules.json lists
+# them and both the Swift and Python tests check against it, so the two copies can't drift apart.
+TRANSCRIPTION_MODELS = (MODEL_GPT_TRANSCRIBE, MODEL_NORMAL, MODEL_MINI)
+DIARIZATION_MODELS = {MODEL_GPT_TRANSCRIBE, MODEL_NORMAL}   # speaker labels (run on MODEL_DIARIZE)
+CONSISTENCY_MODELS = {MODEL_GPT_TRANSCRIBE}                 # carrying context between chunks helps only this one
+LANGUAGE_LIST_MODELS = {MODEL_GPT_TRANSCRIBE}               # drops speech without spoken languages (DEFAULT_LANGUAGES)
+
 # Context prompt. The user's description of the recording goes with every chunk; when context is
 # carried between chunks, the end of the previous chunk's transcript is added so sentences and names
 # that cross a cut stay consistent. The diarize model doesn't accept a prompt.
