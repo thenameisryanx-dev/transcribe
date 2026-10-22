@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
+import json
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, TypeVar
@@ -19,9 +25,15 @@ from lecture_transcribe import (
     MAX_COPY_CHANNELS,
     MODEL_DIARIZE,
     MODEL_GPT_TRANSCRIBE,
-    MODEL_MINI,
     MODEL_NORMAL,
+    CONSISTENCY_MODELS,
+    DIARIZATION_MODELS,
+    LANGUAGE_LIST_MODELS,
+    TRANSCRIPTION_MODELS,
+    RESULTS_MAX_AGE_SECONDS,
+    RESULTS_ROOT_DIR,
     SubtitleCue,
+    _segment_fields,
     audio_channel_count,
     build_transcript_header,
     cleanup_dir,
@@ -53,6 +65,175 @@ T = TypeVar("T")
 # Overall progress (percent) given to preparing the audio; transcribing the chunks fills the rest.
 # Preparing a 21-minute episode took about 7s, roughly this share of a whole run.
 PREPARE_PROGRESS = 15.0
+
+# Bump when what a saved chunk result holds changes, so results saved by an older version aren't reused.
+RESULTS_FORMAT = 1
+
+
+class ChunkResults:
+    """
+    Saves each finished chunk of a run, so a run that fails or is cancelled can pick up where it stopped:
+    running it again with the same settings reuses the saved chunks instead of paying OpenAI for them twice.
+    A result is filed under a hash of the chunk's audio and everything sent with it, so only an identical
+    request reuses it. Splitting the same file the same way gives byte-identical chunks, so a re-run finds
+    them; a different file, track, chunk length or ffmpeg build gives different audio and misses.
+    """
+
+    def __init__(self, root: Path = RESULTS_ROOT_DIR) -> None:
+        self.root = root
+        self.total = 0
+        self.reused = 0
+        self._kept: set[Path] = set()
+        self._lock = threading.Lock()
+
+    @property
+    def kept(self) -> int:
+        """Chunks of this run with a saved result, reused or new."""
+        with self._lock:
+            return len(self._kept)
+
+    def key(self, chunk_path: Path, request: dict[str, Any]) -> str:
+        audio = hashlib.sha256()
+        with chunk_path.open("rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                audio.update(block)
+        described = json.dumps({"format": RESULTS_FORMAT, "audio": audio.hexdigest(), **request}, sort_keys=True)
+        return hashlib.sha256(described.encode("utf-8")).hexdigest()
+
+    def _path(self, key: str) -> Path:
+        return self.root / f"{key}.json"
+
+    def load(self, key: str) -> dict[str, Any] | None:
+        try:
+            data = json.loads(self._path(key).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def mark_reused(self, key: str) -> None:
+        with self._lock:
+            self._kept.add(self._path(key))
+            self.reused += 1
+
+    def save(self, key: str, data: dict[str, Any]) -> None:
+        path = self._path(key)
+        temp = path.with_name(f"{path.stem}.{threading.get_ident()}.tmp")
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            temp.write_text(json.dumps(data), encoding="utf-8")
+            os.replace(temp, path)
+        except OSError:
+            # Results are only kept for resuming, so failing to save one (a full disk) doesn't fail the run.
+            temp.unlink(missing_ok=True)
+            return
+        with self._lock:
+            self._kept.add(path)
+
+    def discard(self) -> None:
+        """Deletes this run's results once its output is written; they're not needed again."""
+        with self._lock:
+            kept, self._kept = self._kept, set()
+        for path in kept:
+            path.unlink(missing_ok=True)
+
+    def run(
+        self,
+        chunk_path: Path,
+        request: dict[str, Any],
+        work: Callable[[], T],
+        *,
+        encode: Callable[[T], dict[str, Any] | None],
+        decode: Callable[[dict[str, Any]], T | None],
+        log: Callable[[str], None],
+    ) -> T:
+        """
+        The saved result for this chunk and request, or `work()` saved for next time. `encode` gives what to
+        save (None saves nothing) and `decode` turns a saved result back into one (None if it can't be used).
+        """
+        key = self.key(chunk_path, request)
+        saved = self.load(key)
+        if saved is not None:
+            result = decode(saved)
+            if result is not None:
+                self.mark_reused(key)
+                log(f"Using the saved result of {chunk_path.name} from an earlier attempt.")
+                return result
+        result = work()
+        data = encode(result)
+        if data is not None:
+            self.save(key, data)
+        return result
+
+
+def prune_chunk_results(root: Path = RESULTS_ROOT_DIR, max_age_seconds: float = RESULTS_MAX_AGE_SECONDS) -> None:
+    """Removes saved chunk results that are too old to be from a run anyone will resume."""
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    cutoff = time.time() - max_age_seconds
+    for path in entries:
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+@contextmanager
+def _reporting_saved_chunks(results: ChunkResults, push_event):
+    """Logs how many chunks were reused, or on failure or cancel, how many are saved for the next attempt."""
+    try:
+        yield
+    except BaseException:
+        if results.kept:
+            push_event(
+                "log",
+                f"{results.kept} of {results.total} chunk(s) finished and were saved. "
+                "Run this again with the same settings to send only the rest.",
+            )
+        raise
+    if results.reused:
+        push_event("log", f"Reused {results.reused} of {results.total} chunk(s) saved from an earlier attempt.")
+
+
+def _encode_transcript(result: tuple[str, str | None]) -> dict[str, Any] | None:
+    text, warning = result
+    # A chunk that failed its checks is sent again next time instead of reusing its doubtful text.
+    return {"text": text} if warning is None else None
+
+
+def _decode_transcript(data: dict[str, Any]) -> tuple[str, str | None] | None:
+    text = data.get("text")
+    return (text, None) if isinstance(text, str) else None
+
+
+def _encode_diarized(resp: Any) -> dict[str, Any]:
+    """The parts of a diarize response the transcript and subtitles use, in a form that reads back the same."""
+    segments = []
+    for seg in extract_diarization_segments(resp):
+        speaker, start, end, text = _segment_fields(seg)
+        segments.append({"speaker": speaker, "start": start, "end": end, "text": text})
+    return {"text": extract_transcription_text(resp), "segments": segments}
+
+
+def _decode_diarized(data: dict[str, Any]) -> dict[str, Any] | None:
+    return data if isinstance(data.get("segments"), list) and isinstance(data.get("text"), str) else None
+
+
+def _transcribe_saved(results: ChunkResults, part: Path, request: dict[str, Any], work, log):
+    return results.run(part, request, work, encode=_encode_transcript, decode=_decode_transcript, log=log)
+
+
+def _diarize_saved(results: ChunkResults, client: OpenAI, part: Path, languages: list[str] | None, log):
+    return results.run(
+        part,
+        {"kind": "diarize", "model": MODEL_DIARIZE, "languages": languages},
+        lambda: diarize_chunk(client, part, languages=languages, on_log=log),
+        encode=_encode_diarized,
+        decode=_decode_diarized,
+        log=log,
+    )
 
 
 def _prepare_progress(push_event) -> Callable[[float], None]:
@@ -92,9 +273,21 @@ def _run_chunks_in_parallel(
     push_event("status", f"{label}: 0/{total} chunks done")
 
     results: list[Any] = [None] * total
+    stopping = threading.Event()
+
+    def start(part: Path):
+        # Once a chunk fails, workers still free don't send any more chunks.
+        if stopping.is_set():
+            return None
+        try:
+            return work(part)
+        except Exception:
+            stopping.set()
+            raise
+
     executor = ThreadPoolExecutor(max_workers=workers)
+    futures = {executor.submit(start, part): i for i, part in enumerate(parts)}
     try:
-        futures = {executor.submit(work, part): i for i, part in enumerate(parts)}
         done = 0
         for future in as_completed(futures):
             i = futures[future]
@@ -103,8 +296,19 @@ def _run_chunks_in_parallel(
             push_event("log", f"Finished chunk {i + 1}/{total}: {parts[i].name}")
             push_event("status", f"{label}: {done}/{total} chunks done")
             push_event("progress", _chunks_done_progress(done, total))
+    except Exception:
+        # Chunks already sent are paid for either way, so let them finish and save their results (see
+        # ChunkResults) before reporting the failure; the backend exits as soon as it's reported. Chunks
+        # not sent yet are dropped. A cancel (KeyboardInterrupt) skips this and stops at once.
+        for future in futures:
+            future.cancel()
+        sent = [future for future in futures if not future.done()]
+        if sent:
+            push_event("log", f"A chunk failed. Waiting for the {len(sent)} chunk(s) already sent so they can be saved...")
+            push_event("status", "Stopping after a failed chunk...")
+            wait(sent)
+        raise
     finally:
-        # On failure or cancellation, drop queued chunks instead of waiting for them.
         executor.shutdown(wait=False, cancel_futures=True)
     return results
 
@@ -151,6 +355,7 @@ def run_transcription_job(
 ) -> Path:
     require_ffmpeg()
     require_ffprobe()
+    prune_chunk_results()
 
     # Videos can carry one audio track per language; only the chosen one (0 = the first) is transcribed.
     tracks = list_audio_tracks(input_path)
@@ -170,11 +375,11 @@ def run_transcription_job(
         push_event("log", "A subtitled copy of the video is only made with subtitles, so none will be saved.")
         embed_subtitles = False
 
-    if transcription_model not in {MODEL_GPT_TRANSCRIBE, MODEL_NORMAL, MODEL_MINI}:
+    if transcription_model not in TRANSCRIPTION_MODELS:
         push_event("log", f"Unknown model '{transcription_model}'. Falling back to {MODEL_NORMAL}.")
         transcription_model = MODEL_NORMAL
 
-    if diarize and transcription_model == MODEL_MINI:
+    if diarize and transcription_model not in DIARIZATION_MODELS:
         raise SystemExit(
             "Speaker diarization is not supported with gpt-4o-mini-transcribe. "
             "Select gpt-transcribe or gpt-4o-transcribe, or disable diarization."
@@ -185,7 +390,7 @@ def run_transcription_job(
     else:
         push_event("log", f"Using transcription model: {transcription_model}")
     # gpt-transcribe takes the whole list; the GPT-4o and diarize models take at most one `language`.
-    if transcription_model == MODEL_GPT_TRANSCRIBE and not diarize and not subtitles:
+    if transcription_model in LANGUAGE_LIST_MODELS and not diarize and not subtitles:
         chunk_languages = languages or list(DEFAULT_LANGUAGES)
         push_event("log", f"Spoken languages: {', '.join(chunk_languages)}")
     else:
@@ -204,7 +409,7 @@ def run_transcription_job(
             push_event("log", f"Keywords aren't supported with {mode}, so they won't be sent.")
         context, carry_context, keywords = None, False, None
     else:
-        if carry_context and transcription_model != MODEL_GPT_TRANSCRIBE:
+        if carry_context and transcription_model not in CONSISTENCY_MODELS:
             # The GPT-4o models tend to loop or invent text at chunk ends when given the excerpt.
             push_event("log", f"Consistency mode is only used with {MODEL_GPT_TRANSCRIBE}, so it is off for this run.")
             carry_context = False
@@ -232,6 +437,7 @@ def run_transcription_job(
             out_path = output_dir / f"{input_path.stem}.{run_id}.srt"
 
     client = OpenAI()
+    results = ChunkResults()
     working_input_path = input_path
     converted_temp_path: Path | None = None
 
@@ -262,7 +468,9 @@ def run_transcription_job(
                 languages=chunk_languages,
                 audio_track=audio_track,
                 push_event=push_event,
+                results=results,
             )
+            results.discard()
             if embed_subtitles:
                 _save_subtitled_copy(
                     input_path,
@@ -323,16 +531,18 @@ def run_transcription_job(
                     audio_track=audio_track,
                 )
                 push_event("log", f"Prepared {len(parts)} chunk(s) for diarization.")
+                results.total = len(parts)
 
                 # Offsets depend on earlier chunks' real lengths, so measure them before fanning out.
                 offsets = [start for start, _ in _chunk_spans(parts, DIARIZE_CHUNK_SECONDS)]
 
-                responses = _run_chunks_in_parallel(
-                    parts,
-                    lambda p: diarize_chunk(client, p, languages=chunk_languages, on_log=log),
-                    push_event,
-                    "Diarizing",
-                )
+                with _reporting_saved_chunks(results, push_event):
+                    responses = _run_chunks_in_parallel(
+                        parts,
+                        lambda p: _diarize_saved(results, client, p, chunk_languages, log),
+                        push_event,
+                        "Diarizing",
+                    )
             finally:
                 cleanup_dir(run_chunks_dir)
 
@@ -355,6 +565,7 @@ def run_transcription_job(
                 duration_seconds=dur,
             )
             out_path.write_text(header + "\n".join(out_lines), encoding="utf-8")
+            results.discard()
             return out_path
 
         if chunk_seconds is None:
@@ -372,8 +583,35 @@ def run_transcription_job(
                 audio_track=audio_track,
             )
             push_event("log", f"Prepared {len(parts)} chunk(s) for transcription.")
+            results.total = len(parts)
             # Chunks are cut at pauses, so their lengths vary; measure them for the section headers.
             spans = _chunk_spans(parts, chunk_seconds)
+
+            def transcribe(p: Path, tail: str | None = None) -> tuple[str, str | None]:
+                request = {
+                    "kind": "transcript",
+                    "model": transcription_model,
+                    "languages": chunk_languages,
+                    "context": context,
+                    "keywords": keywords,
+                    "previous_tail": tail,
+                }
+                return _transcribe_saved(
+                    results,
+                    p,
+                    request,
+                    lambda: transcribe_chunk_checked(
+                        client,
+                        p,
+                        model=transcription_model,
+                        languages=chunk_languages,
+                        context=context,
+                        keywords=keywords,
+                        previous_tail=tail,
+                        on_log=log,
+                    ),
+                    log,
+                )
 
             if carry_context and len(parts) > 1:
 
@@ -385,33 +623,13 @@ def run_transcription_job(
                             log(f"Not carrying context into {p.name}: the previous chunk failed its check.")
                         else:
                             tail = transcript_tail(previous_text)
-                    return transcribe_chunk_checked(
-                        client,
-                        p,
-                        model=transcription_model,
-                        languages=chunk_languages,
-                        context=context,
-                        keywords=keywords,
-                        previous_tail=tail,
-                        on_log=log,
-                    )
+                    return transcribe(p, tail)
 
-                chunk_results = _run_chunks_in_order(parts, transcribe_after, push_event, "Transcribing")
+                with _reporting_saved_chunks(results, push_event):
+                    chunk_results = _run_chunks_in_order(parts, transcribe_after, push_event, "Transcribing")
             else:
-                chunk_results = _run_chunks_in_parallel(
-                    parts,
-                    lambda p: transcribe_chunk_checked(
-                        client,
-                        p,
-                        model=transcription_model,
-                        languages=chunk_languages,
-                        context=context,
-                        keywords=keywords,
-                        on_log=log,
-                    ),
-                    push_event,
-                    "Transcribing",
-                )
+                with _reporting_saved_chunks(results, push_event):
+                    chunk_results = _run_chunks_in_parallel(parts, transcribe, push_event, "Transcribing")
         finally:
             cleanup_dir(run_chunks_dir)
 
@@ -439,6 +657,7 @@ def run_transcription_job(
             lines = sentence_lines(chunk_text)
             sections.append("\n".join(lines) if lines else str(chunk_text))
         out_path.write_text("".join(sections), encoding="utf-8")
+        results.discard()
 
         return out_path
     finally:
@@ -458,6 +677,7 @@ def _write_subtitles(
     languages: list[str] | None,
     audio_track: int,
     push_event,
+    results: ChunkResults,
 ) -> None:
     """Transcribes the audio with the diarize model, whose segments are timed, and writes them as an .srt file."""
 
@@ -474,13 +694,15 @@ def _write_subtitles(
             audio_track=audio_track,
         )
         push_event("log", f"Prepared {len(parts)} chunk(s) for subtitles.")
+        results.total = len(parts)
         offsets = [start for start, _ in _chunk_spans(parts, DIARIZE_CHUNK_SECONDS)]
-        responses = _run_chunks_in_parallel(
-            parts,
-            lambda p: diarize_chunk(client, p, languages=languages, on_log=log),
-            push_event,
-            "Transcribing",
-        )
+        with _reporting_saved_chunks(results, push_event):
+            responses = _run_chunks_in_parallel(
+                parts,
+                lambda p: _diarize_saved(results, client, p, languages, log),
+                push_event,
+                "Transcribing",
+            )
     finally:
         cleanup_dir(chunks_dir)
 

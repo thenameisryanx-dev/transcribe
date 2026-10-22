@@ -85,6 +85,13 @@ REPEAT_PHRASE_WORDS = 8             # wording is compared in overlapping phrases
 REPEAT_MIN_WORDS = 50               # shortest repeated passage that is flagged
 REPEAT_MATCH_SHARE = 0.7            # share of a passage's phrases that must repeat (allows small differences)
 
+# What each model can do. The app's TranscriptionModel (Swift) states the same rules; Tests/model_rules.json lists
+# them and both the Swift and Python tests check against it, so the two copies can't drift apart.
+TRANSCRIPTION_MODELS = (MODEL_GPT_TRANSCRIBE, MODEL_NORMAL, MODEL_MINI)
+DIARIZATION_MODELS = {MODEL_GPT_TRANSCRIBE, MODEL_NORMAL}   # speaker labels (run on MODEL_DIARIZE)
+CONSISTENCY_MODELS = {MODEL_GPT_TRANSCRIBE}                 # carrying context between chunks helps only this one
+LANGUAGE_LIST_MODELS = {MODEL_GPT_TRANSCRIBE}               # drops speech without spoken languages (DEFAULT_LANGUAGES)
+
 # Context prompt. The user's description of the recording goes with every chunk; when context is
 # carried between chunks, the end of the previous chunk's transcript is added so sentences and names
 # that cross a cut stay consistent. The diarize model doesn't accept a prompt.
@@ -140,6 +147,10 @@ DEFAULT_MAX_PARALLEL_REQUESTS = 4
 WORK_ROOT_DIR = Path(os.getenv("TRANSCRIBE_WORKDIR", ".")).expanduser()
 CHUNKS_ROOT_DIR = WORK_ROOT_DIR / "chunks"
 CONVERTED_ROOT_DIR = WORK_ROOT_DIR / "converted_inputs"
+# Finished chunks of runs that haven't succeeded yet, so running one again only sends the rest (see ChunkResults
+# in transcription_job.py). A successful run deletes the ones it used; any left longer than this are removed.
+RESULTS_ROOT_DIR = WORK_ROOT_DIR / "chunk_results"
+RESULTS_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 KEYRING_SERVICE = "lecture-transcribe"
 KEYRING_USERNAME = "openai_api_key"
 BUNDLED_FFMPEG_DIR_NAME = "ffmpeg_bin"
@@ -1367,6 +1378,7 @@ def embed_subtitles_copy(
     suffix = out_path.suffix.lower()
     track_options = ["-c:s", EMBED_SUBTITLE_CODECS[suffix], "-disposition:s:0", "default"]
     if suffix != ".mkv":
+        track_options += ["-tag:s:0", MOV_TEXT_TAG]
         # QuickTime only plays HEVC tagged hvc1 in these containers; ffmpeg's default tag for it is hev1.
         for index, codec in enumerate(video_codec_names(video_path)):
             if codec == "hevc":
@@ -1424,15 +1436,19 @@ ADDABLE_SUBTITLE_SUFFIXES = {".srt", ".ass", ".ssa", ".vtt"}
 # handler name. Names that tools give every handler on their own ("SoundHandler", "Core Media Audio") aren't titles.
 GENERIC_HANDLER_NAME = re.compile(r"handler|^(core media|apple|gpac|l-smash|mainconcept|iso ?media|bento4)\b", re.IGNORECASE)
 MOV_DEFAULT_HANDLER_NAMES = {"audio": "SoundHandler", "subtitle": "SubtitleHandler"}
-# Handler types of .mp4/.mov subtitle tracks. A subtitle file added to a .mov gets "text", the type of chapter
-# tracks too; those are never enabled, so clearing their flag changes nothing.
+# Handler types of .mp4/.mov subtitle tracks. Older versions of the app gave subtitles added to a .mov "text",
+# the type of chapter tracks too; those are never enabled, so clearing their flag changes nothing.
 MOV_SUBTITLE_HANDLER_TYPES = {b"sbtl", b"subt", b"text"}
+# The sample format ffmpeg writes for mov_text subtitles. In a .mov it labels them "text" (old QuickTime text)
+# unless told otherwise, and Apple's players then list the track but show nothing, so subtitles written to an
+# .mp4/.mov are always tagged with this.
+MOV_TEXT_TAG = "tx3g"
 
 
 def list_media_tracks(path: Path) -> list[dict[str, Any]]:
     """
-    Every track in the file, in order, as {"index", "kind", "codec", "language", "title", "default", "forced",
-    "channels", "text"}. `index` is the stream's position in the whole file (ffmpeg's `0:N`); `kind` is
+    Every track in the file, in order, as {"index", "kind", "codec", "codec_tag", "language", "title", "default",
+    "forced", "channels", "text"}. `index` is the stream's position in the whole file (ffmpeg's `0:N`); `kind` is
     "video", "audio", "subtitle", "attachment" or "data", and cover art counts as an attachment. `text` is
     True for subtitles stored as text. Raises SystemExit if ffprobe can't read the file.
     """
@@ -1442,7 +1458,7 @@ def list_media_tracks(path: Path) -> list[dict[str, Any]]:
                 *ffprobe_cmd_prefix(),
                 "-v", "error",
                 "-show_entries",
-                "stream=index,codec_type,codec_name,channels"
+                "stream=index,codec_type,codec_name,codec_tag_string,channels"
                 ":stream_tags=language,title,handler_name:stream_disposition=default,forced,attached_pic",
                 "-of", "json",
                 str(path),
@@ -1477,6 +1493,7 @@ def list_media_tracks(path: Path) -> list[dict[str, Any]]:
             "index": int(stream.get("index", len(tracks))),
             "kind": kind,
             "codec": codec,
+            "codec_tag": str(stream.get("codec_tag_string") or ""),
             # "und" is how containers mark an unknown language.
             "language": "" if language in ("", "und") else language,
             "title": title,
@@ -1627,12 +1644,16 @@ def save_edited_tracks(
             inputs += ["-i", str(sub_path)]
             maps += ["-map", f"{extra_inputs}:0"]
             if is_mov:
-                options += [f"-c:s:{counts['subtitle']}", "mov_text"]
+                options += [f"-c:s:{counts['subtitle']}", "mov_text", f"-tag:s:{counts['subtitle']}", MOV_TEXT_TAG]
         else:
             source = originals.get(entry.get("index"))
             if source is None or source["kind"] != kind:
                 raise SystemExit(f"The video has no {kind} track #{entry.get('index')}.")
             maps += ["-map", f"0:{source['index']}"]
+            if is_mov and kind == "subtitle" and source["codec"] == "mov_text" and source.get("codec_tag") != MOV_TEXT_TAG:
+                # Subtitles an older version saved as "text" show as blank in Apple's players; rewriting the
+                # track (not just relabeling it, which would break a real QuickTime text track) fixes them.
+                options += [f"-c:s:{counts['subtitle']}", "mov_text", f"-tag:s:{counts['subtitle']}", MOV_TEXT_TAG]
         n = counts[kind]
         counts[kind] += 1
         spec = "a" if kind == "audio" else "s"

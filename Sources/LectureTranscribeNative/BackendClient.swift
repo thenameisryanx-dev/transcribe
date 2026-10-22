@@ -37,8 +37,9 @@ final class BackendClient: @unchecked Sendable {
         .deletingLastPathComponent() // Sources
     private let activeProcessLock = NSLock()
     private var activeProcess: Process?
-    // Each backend call is a fresh Python process, so a "this session only" key has to live here.
-    private var sessionAPIKey: String?
+    /// The OpenAI API key; each run's Python process gets it in `OPENAI_API_KEY`.
+    let apiKeys: APIKeyStore
+    private let openAI: OpenAIClient
     private static let cancelGracePeriodSeconds: Double = 3
     private let fileManager = FileManager.default
 
@@ -87,20 +88,26 @@ final class BackendClient: @unchecked Sendable {
         return bundledPythonProgram ?? "python3"
     }
 
-    /// Scratch space for audio chunks and converted inputs; keeps them out of the app bundle.
-    private var workingDirectoryURL: URL {
+    /// Scratch space for audio chunks, saved chunk results and converted inputs; keeps them out of the app
+    /// bundle. `TRANSCRIBE_WORKDIR` moves it.
+    var workingDirectoryURL: URL {
+        let override = (ProcessInfo.processInfo.environment["TRANSCRIBE_WORKDIR"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !override.isEmpty {
+            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
+        }
         let cachesURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Caches", isDirectory: true)
         return cachesURL.appendingPathComponent("LectureTranscribe", isDirectory: true)
     }
 
-    private var pythonEnvironment: [String: String] {
+    /// The environment each backend process runs with (internal so tests can check the key is passed on).
+    var pythonEnvironment: [String: String] {
         var env = ProcessInfo.processInfo.environment
         if (env["TRANSCRIBE_WORKDIR"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty {
             env["TRANSCRIBE_WORKDIR"] = workingDirectoryURL.path
         }
-        if let sessionAPIKey = withActiveProcessLock({ sessionAPIKey }) {
-            env["OPENAI_API_KEY"] = sessionAPIKey
+        if let key = apiKeys.currentKey()?.key {
+            env["OPENAI_API_KEY"] = key
         }
 
         let override = env["TRANSCRIBE_PYTHON"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -161,33 +168,36 @@ final class BackendClient: @unchecked Sendable {
         )
     }
 
-    /// With `verify`, the backend also asks OpenAI whether the key works.
-    func fetchAPIKeyStatus(verify: Bool = false) async throws -> String {
-        let output = try runSimpleCommand(verify ? ["key-status", "--verify"] : ["key-status"])
-        guard let value = output["status"] as? String else {
-            throw BackendError.invalidResponse("Could not parse API key status response.")
-        }
-        return value
+    init(apiKeys: APIKeyStore = APIKeyStore(), openAI: OpenAIClient = OpenAIClient()) {
+        self.apiKeys = apiKeys
+        self.openAI = openAI
     }
 
-    func setAPIKey(_ key: String, saveToKeychain: Bool) async throws -> String {
-        // The key goes over stdin so it never shows up in the process argument list.
-        var args = ["set-key"]
-        if saveToKeychain {
-            args.append("--save")
+    /// Where the API key comes from, like "loaded from system keychain", or "required" when there is none.
+    /// With `verify`, also asks OpenAI whether the key works; only a definite rejection changes the status,
+    /// so being offline doesn't flag a good key.
+    func fetchAPIKeyStatus(verify: Bool = false) async throws -> String {
+        guard let current = apiKeys.currentKey() else { return APIKeyStore.Status.required }
+        if verify, await openAI.checkKey(current.key) == .rejected {
+            return APIKeyStore.Status.rejected
         }
+        return current.status
+    }
 
-        let output = try runSimpleCommand(args, stdinText: key + "\n")
-        if let status = output["status"] as? String {
-            withActiveProcessLock {
-                sessionAPIKey = key
-            }
-            return status
+    /// Checks `key` with OpenAI, then uses it from now on (and saves it in the keychain when asked).
+    func setAPIKey(_ key: String, saveToKeychain: Bool) async throws -> String {
+        let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard APIKeyStore.isValid(key) else {
+            throw BackendError.commandFailed("Invalid API key format. It should start with 'sk-'.")
         }
-        if let error = output["error"] as? String {
-            throw BackendError.commandFailed(error)
+        switch await openAI.checkKey(key) {
+        case .rejected:
+            throw BackendError.commandFailed("OpenAI didn't accept this key. Copy it again from platform.openai.com/api-keys.")
+        case .unreachable:
+            throw BackendError.commandFailed("Couldn't reach OpenAI to check this key. Check your internet connection, then try again.")
+        case .ok:
+            return try apiKeys.setKey(key, save: saveToKeychain)
         }
-        throw BackendError.invalidResponse("Unexpected response while setting API key.")
     }
 
     func fetchAudioTracks(inputPath: String) async throws -> [AudioTrack] {
@@ -231,36 +241,57 @@ final class BackendClient: @unchecked Sendable {
         try await runStreamCommand(args: args, onEvent: onEvent)
     }
 
+    /// Runs a transcription. Plain transcripts run in Swift (`TranscriptJob`); speaker labels, subtitles and
+    /// .qta files still run in the Python backend. `TRANSCRIBE_PYTHON_RUNS=1` sends every run to the backend.
     func startTranscription(
-        inputPath: String,
-        outputDirectory: String,
-        diarize: Bool,
-        subtitles: Bool = false,
-        embedSubtitles: Bool = false,
-        audioTrack: Int = 0,
-        model: String,
-        languages: [String] = [],
-        context: String = "",
-        carryContext: Bool = false,
-        chunkSeconds: Int? = nil,
-        keywords: [String] = [],
+        _ request: RunRequest,
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
     ) async throws {
-        let args = Self.transcriptionArguments(
-            inputPath: inputPath,
-            outputDirectory: outputDirectory,
-            diarize: diarize,
-            subtitles: subtitles,
-            embedSubtitles: embedSubtitles,
-            audioTrack: audioTrack,
-            model: model,
-            languages: languages,
-            context: context,
-            carryContext: carryContext,
-            chunkSeconds: chunkSeconds,
-            keywords: keywords
+        let pythonOnly = ProcessInfo.processInfo.environment["TRANSCRIBE_PYTHON_RUNS"] == "1"
+        if TranscriptJob.handles(request) && !pythonOnly {
+            try await runInSwift(request, onEvent: onEvent)
+        } else {
+            try await runStreamCommand(args: request.backendArguments, onEvent: onEvent)
+        }
+    }
+
+    /// A plain transcript run in Swift. It reports through the same events as the backend: `error` (and
+    /// `apiKeyProblem`) when it fails, `done` with the transcript's path when it finishes.
+    private func runInSwift(_ request: RunRequest, onEvent: @escaping @Sendable (BackendStreamEvent) -> Void) async throws {
+        func fail(_ message: String, apiKeyProblem: Bool = false) throws -> Never {
+            if apiKeyProblem { onEvent(.apiKeyProblem) }
+            onEvent(.error(message))
+            throw BackendError.commandFailed(message)
+        }
+        guard fileManager.fileExists(atPath: request.inputPath) else {
+            try fail("Input file not found: \(request.inputPath)")
+        }
+        guard let key = apiKeys.currentKey()?.key else {
+            try fail("Add your OpenAI API key to start transcribing.", apiKeyProblem: true)
+        }
+        let media: MediaTools
+        do {
+            media = try MediaTools.located()
+        } catch {
+            try fail(error.localizedDescription)
+        }
+        let job = TranscriptJob(
+            request: request,
+            apiKey: key,
+            openAI: openAI,
+            media: media,
+            workDirectory: workingDirectoryURL,
+            maxParallel: TranscriptJob.maxParallel(environment: ProcessInfo.processInfo.environment),
+            emit: onEvent
         )
-        try await runStreamCommand(args: args, onEvent: onEvent)
+        do {
+            let output = try await job.run()
+            onEvent(.done(output.resolvingSymlinksInPath().path))
+        } catch {
+            if error is CancellationError || Task.isCancelled { throw CancellationError() }
+            let described = TranscriptJob.describe(error)
+            try fail(described.message, apiKeyProblem: described.isAPIKeyProblem)
+        }
     }
 
     /// The backend's `run` arguments for a transcription.
@@ -325,7 +356,7 @@ final class BackendClient: @unchecked Sendable {
         }
     }
 
-    private func runSimpleCommand(_ args: [String], stdinText: String? = nil) throws -> [String: Any] {
+    private func runSimpleCommand(_ args: [String]) throws -> [String: Any] {
         let backendScriptURL = try resolveBackendScriptURL()
         let process = Process()
         let stdoutPipe = Pipe()
@@ -341,9 +372,7 @@ final class BackendClient: @unchecked Sendable {
         process.standardInput = stdinPipe
 
         try process.run()
-        if let stdinText {
-            stdinPipe.fileHandleForWriting.write(Data(stdinText.utf8))
-        }
+        // Nothing is sent on standard input; closing it keeps the backend from waiting for any.
         try? stdinPipe.fileHandleForWriting.close()
         process.waitUntilExit()
 

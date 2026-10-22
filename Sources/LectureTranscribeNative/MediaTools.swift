@@ -1,0 +1,371 @@
+import Foundation
+
+/// ffmpeg and ffprobe, run from Swift: reading a recording, finding pauses, and cutting it into chunks.
+/// Ported from the Python backend (`lecture_transcribe.py`), with the same commands, so the chunks come out
+/// byte for byte the same.
+final class MediaTools: @unchecked Sendable {
+    struct Failure: LocalizedError {
+        let errorDescription: String?
+        init(_ message: String) { errorDescription = message }
+    }
+
+    // Chunk boundaries move back to the quietest moment in the stretch before each cut, so a sentence isn't
+    // sliced in half.
+    static let splitSearchSeconds = 60.0
+    static let splitFrameSeconds = 0.1
+    static let splitPauseFrames = 5
+    /// Share of the split's progress spent finding pauses; ffmpeg writing the chunks gets the rest.
+    static let splitPlanShare = 0.1
+    /// Sources with more channels are always re-encoded, never copied (surround keeps dialogue in the center).
+    static let maxCopyChannels = 2
+    /// The API rejects uploads over 25 MB; copied chunks bigger than this are re-encoded instead.
+    static let maxUploadBytes = 24 * 1024 * 1024
+    static let audioBitrate = "128k"
+    static let audioChannels = "1"
+    static let processTimeout: TimeInterval = 30 * 60
+
+    let ffmpeg: URL
+    let ffprobe: URL
+    private let lock = NSLock()
+    private var running: Process?
+    private var cancelled = false
+
+    init(ffmpeg: URL, ffprobe: URL) {
+        self.ffmpeg = ffmpeg
+        self.ffprobe = ffprobe
+    }
+
+    /// The pinned ffmpeg build: `FFMPEG_BIN`/`FFPROBE_BIN` (source runs and tests), the copy bundled in the app,
+    /// or the repository's vendor/ffmpeg. Never another ffmpeg on the system.
+    static func located(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        executable: URL = URL(fileURLWithPath: CommandLine.arguments.first ?? "").resolvingSymlinksInPath()
+    ) throws -> MediaTools {
+        let bundled = executable.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Resources/python/ffmpeg_bin")
+        var architecture = utsname()
+        uname(&architecture)
+        let machine = withUnsafeBytes(of: &architecture.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        let vendor = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("vendor/ffmpeg/\(machine)")
+
+        func find(_ name: String, variable: String) throws -> URL {
+            var candidates: [URL] = []
+            if let path = environment[variable]?.trimmingCharacters(in: .whitespaces), !path.isEmpty {
+                candidates.append(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+            }
+            candidates += [bundled.appendingPathComponent(name), vendor.appendingPathComponent(name)]
+            guard let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
+                throw Failure("\(name) not found. Reinstall the latest app build, which includes it.")
+            }
+            return found
+        }
+        return MediaTools(ffmpeg: try find("ffmpeg", variable: "FFMPEG_BIN"), ffprobe: try find("ffprobe", variable: "FFPROBE_BIN"))
+    }
+
+    /// Stops the ffmpeg or ffprobe running now, and any started later.
+    func cancel() {
+        lock.withLock {
+            cancelled = true
+            running?.terminate()
+        }
+    }
+
+    // MARK: - Running the tools
+
+    /// Runs a tool to the end; `onLine` gets each line of its standard output as it comes.
+    @discardableResult
+    func run(
+        _ tool: URL,
+        _ arguments: [String],
+        timeout: TimeInterval = MediaTools.processTimeout,
+        captureErrors: Bool = true,
+        onLine: ((String) -> Void)? = nil
+    ) throws -> (status: Int32, output: String, errors: String) {
+        let process = Process()
+        process.executableURL = tool
+        process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice
+        let output = Pipe()
+        let errors = Pipe()
+        process.standardOutput = output
+        process.standardError = captureErrors ? errors : FileHandle.nullDevice
+        try lock.withLock {
+            if cancelled { throw CancellationError() }
+            try process.run()
+            running = process
+        }
+        defer { lock.withLock { running = nil } }
+
+        let timedOut = Flag()
+        let timer = DispatchWorkItem {
+            timedOut.set()
+            process.terminate()
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
+        defer { timer.cancel() }
+
+        let errorData = DataBox()
+        let errorReader = DispatchGroup()
+        if captureErrors {
+            errorReader.enter()
+            DispatchQueue.global().async {
+                errorData.value = errors.fileHandleForReading.readDataToEndOfFile()
+                errorReader.leave()
+            }
+        }
+        var collected = Data()
+        var pending = Data()
+        let handle = output.fileHandleForReading
+        while true {
+            let chunk = handle.availableData
+            if chunk.isEmpty { break }
+            collected.append(chunk)
+            guard let onLine else { continue }
+            pending.append(chunk)
+            while let newline = pending.firstIndex(of: 0x0A) {
+                onLine(String(decoding: pending[pending.startIndex..<newline], as: UTF8.self))
+                pending.removeSubrange(pending.startIndex...newline)
+            }
+        }
+        process.waitUntilExit()
+        errorReader.wait()
+        if lock.withLock({ cancelled }) { throw CancellationError() }
+        if timedOut.isSet {
+            throw Failure("\(tool.lastPathComponent) took longer than \(Int(timeout / 60)) minutes and was stopped.")
+        }
+        return (process.terminationStatus, String(decoding: collected, as: UTF8.self), String(decoding: errorData.value, as: UTF8.self))
+    }
+
+    private func probe(_ arguments: [String]) -> String? {
+        guard let result = try? run(ffprobe, ["-v", "error"] + arguments, timeout: 30), result.status == 0 else { return nil }
+        return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - Reading a recording
+
+    /// The recording's length in seconds, or -1 when ffprobe can't tell.
+    func duration(_ url: URL) -> Double {
+        probe(["-show_entries", "format=duration", "-of", "default=nk=1:nw=1", url.path]).flatMap(Double.init) ?? -1
+    }
+
+    /// The recording's audio tracks in order; empty when ffprobe can't read it.
+    func audioTracks(_ url: URL) -> [AudioTrack] {
+        guard let json = probe([
+            "-select_streams", "a",
+            "-show_entries", "stream=codec_name,channels:stream_tags=language,title:stream_disposition=default",
+            "-of", "json", url.path,
+        ]), let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] else { return [] }
+        let streams = object["streams"] as? [[String: Any]] ?? []
+        return streams.enumerated().compactMap { index, stream in
+            let tags = stream["tags"] as? [String: Any] ?? [:]
+            let language = ((tags["language"] as? String) ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+            var entry: [String: Any] = [
+                "index": index,
+                // "und" is how containers mark an unknown language.
+                "language": language == "und" ? "" : language,
+                "title": ((tags["title"] as? String) ?? "").trimmingCharacters(in: .whitespaces),
+                "codec": stream["codec_name"] as? String ?? "",
+                "default": ((stream["disposition"] as? [String: Any])?["default"] as? Int ?? 0) != 0,
+            ]
+            if let channels = stream["channels"] as? Int {
+                entry["channels"] = channels
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: entry) else { return nil }
+            return try? JSONDecoder().decode(AudioTrack.self, from: data)
+        }
+    }
+
+    func codecName(_ url: URL, audioTrack: Int = 0) -> String? {
+        probe(["-select_streams", "a:\(audioTrack)", "-show_entries", "stream=codec_name", "-of", "default=nk=1:nw=1", url.path])
+            .map { $0.lowercased() }.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    func channelCount(_ url: URL, audioTrack: Int = 0) -> Int? {
+        probe(["-select_streams", "a:\(audioTrack)", "-show_entries", "stream=channels", "-of", "default=nk=1:nw=1", url.path])
+            .flatMap { $0.split(separator: "\n").first.flatMap { Int($0) } }
+    }
+
+    // MARK: - Finding pauses
+
+    /// The time of the quietest ~0.5s inside [windowStart, windowStart + windowSeconds], or nil.
+    func quietestPoint(_ url: URL, windowStart: Double, windowSeconds: Double, audioTrack: Int = 0) -> Double? {
+        let sampleRate = 16000
+        let frameSamples = Int(Double(sampleRate) * Self.splitFrameSeconds)
+        guard let result = try? run(ffmpeg, [
+            "-nostdin", "-hide_banner", "-loglevel", "error",
+            "-ss", String(format: "%.3f", windowStart),
+            "-t", String(format: "%.3f", windowSeconds),
+            "-i", url.path, "-vn", "-map", "0:a:\(audioTrack)",
+            "-af", "aresample=\(sampleRate),asetnsamples=n=\(frameSamples):p=0,astats=metadata=1:reset=1,"
+                + "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
+            "-f", "null", "-",
+        ], timeout: 120), result.status == 0 else { return nil }
+
+        let prefix = "lavfi.astats.Overall.RMS_level="
+        let levels: [Double] = result.output.split(separator: "\n").compactMap { line in
+            guard line.hasPrefix(prefix) else { return nil }
+            let level = Double(line.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)) ?? -200
+            // Digital silence reports -inf.
+            return level > -200 ? level : -200
+        }
+        let frames = Self.splitPauseFrames
+        guard levels.count >= frames else { return nil }
+        var bestIndex = 0
+        var bestLevel = Double.infinity
+        for i in 0...(levels.count - frames) {
+            let level = levels[i..<(i + frames)].reduce(0, +) / Double(frames)
+            // `<=` keeps the latest of equally quiet spots, so chunks stay close to their nominal length.
+            if level <= bestLevel {
+                bestLevel = level
+                bestIndex = i
+            }
+        }
+        return windowStart + (Double(bestIndex) + Double(frames) / 2) * Self.splitFrameSeconds
+    }
+
+    /// Cut times for chunks of at most `chunkSeconds`, each moved back to the quietest moment before it.
+    /// Empty when the audio fits in one chunk or its length is unknown. `onProgress` gets the share planned.
+    func chunkCuts(_ url: URL, chunkSeconds: Int, audioTrack: Int = 0, onProgress: ((Double) -> Void)? = nil) throws -> [Double] {
+        let total = duration(url)
+        let chunk = Double(chunkSeconds)
+        guard total > chunk else { return [] }
+        let search = min(Self.splitSearchSeconds, chunk / 4)
+        var cuts: [Double] = []
+        var previous = 0.0
+        while total - previous > chunk {
+            try Task.checkCancellation()
+            let target = previous + chunk
+            let windowStart = target - search
+            var cut = quietestPoint(url, windowStart: windowStart, windowSeconds: search, audioTrack: audioTrack) ?? target
+            if !(windowStart <= cut && cut <= target) { cut = target }
+            cuts.append(cut)
+            previous = cut
+            onProgress?(previous / total)
+        }
+        return cuts
+    }
+
+    // MARK: - Splitting
+
+    /// Runs an ffmpeg command that writes `-progress pipe:1`, passing the share of the input processed so far.
+    private func runWithProgress(_ arguments: [String], totalSeconds: Double, quiet: Bool, onProgress: @escaping (Double) -> Void) throws {
+        let result = try run(ffmpeg, arguments, captureErrors: !quiet) { line in
+            // out_time_us is the position reached in the input; it keeps counting across segments.
+            guard totalSeconds > 0, line.hasPrefix("out_time_us="), let micros = Int(line.dropFirst("out_time_us=".count)) else { return }
+            onProgress(min(max(Double(micros) / 1_000_000 / totalSeconds, 0), 1))
+        }
+        guard result.status == 0 else {
+            let detail = result.errors.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").suffix(3).joined(separator: " ")
+            throw Failure("ffmpeg failed (exit \(result.status))\(detail.isEmpty ? "" : ": \(detail)")")
+        }
+    }
+
+    private func chunkFiles(in directory: URL) -> [URL] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        return names.filter { $0.hasPrefix("part_") && $0.hasSuffix(".m4a") }.sorted().map { directory.appendingPathComponent($0) }
+    }
+
+    private func removeChunkFiles(in directory: URL) {
+        chunkFiles(in: directory).forEach { try? FileManager.default.removeItem(at: $0) }
+    }
+
+    /// Splits `audioTrack` of `url` into `part_NNN.m4a` files of at most `chunkSeconds`, cut at pauses.
+    /// Mono or stereo AAC is copied without re-encoding when every piece fits the upload limit; anything else,
+    /// including surround audio, is re-encoded to mono AAC. `onProgress` gets how far along the split is.
+    func split(_ url: URL, into directory: URL, chunkSeconds: Int, audioTrack: Int = 0, onProgress: ((Double) -> Void)? = nil) throws -> [URL] {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var reported = 0.0
+        func report(_ fraction: Double) {
+            // Never move backwards, e.g. when a finished copy is rejected and the audio is re-encoded.
+            if fraction > reported {
+                reported = fraction
+                onProgress?(fraction)
+            }
+        }
+        func reportWriting(_ fraction: Double) { report(Self.splitPlanShare + (1 - Self.splitPlanShare) * fraction) }
+
+        let total = duration(url)
+        let cuts = try chunkCuts(url, chunkSeconds: chunkSeconds, audioTrack: audioTrack) { report(Self.splitPlanShare * $0) }
+        report(Self.splitPlanShare)
+        let segmentArguments = cuts.isEmpty
+            ? ["-segment_time", String(chunkSeconds)]
+            : ["-segment_times", cuts.map { String(format: "%.3f", $0) }.joined(separator: ",")]
+        let output = directory.appendingPathComponent("part_%03d.m4a").path
+        removeChunkFiles(in: directory)
+
+        let channels = channelCount(url, audioTrack: audioTrack)
+        let codec = codecName(url, audioTrack: audioTrack)
+        // Only AAC can be copied into .m4a; MP3 would copy but then be rejected, and WAV wouldn't copy at all.
+        if (channels == nil || channels! <= Self.maxCopyChannels) && (codec == nil || codec == "aac") {
+            let copied: Bool
+            do {
+                // A failed copy is handled by re-encoding below, so its error output is left out of the log.
+                try runWithProgress(
+                    ["-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
+                     "-i", url.path, "-vn", "-f", "segment"] + segmentArguments
+                        + ["-reset_timestamps", "1", "-map", "0:a:\(audioTrack)", "-c:a", "copy", output],
+                    totalSeconds: total, quiet: true, onProgress: reportWriting
+                )
+                copied = true
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                copied = false
+            }
+            let parts = chunkFiles(in: directory)
+            // A copy that stopped partway leaves only the first chunks, which would silently drop the rest.
+            if copied, !parts.isEmpty,
+               parts.allSatisfy({ ((try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) <= Self.maxUploadBytes }),
+               parts.prefix(2).allSatisfy({ codecName($0) == "aac" })
+            {
+                return parts
+            }
+        }
+
+        removeChunkFiles(in: directory)
+        try runWithProgress(
+            ["-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
+             "-i", url.path, "-vn", "-f", "segment"] + segmentArguments
+                + ["-reset_timestamps", "1", "-map", "0:a:\(audioTrack)", "-c:a", "aac",
+                   "-ac", Self.audioChannels, "-b:a", Self.audioBitrate, output],
+            totalSeconds: total, quiet: false, onProgress: reportWriting
+        )
+        let parts = chunkFiles(in: directory)
+        guard !parts.isEmpty else { throw Failure("No chunks created. Is the input a valid audio file?") }
+        return parts
+    }
+
+    /// A re-encoded copy of a chunk OpenAI rejected as unreadable (`repair_audio_for_api`).
+    func repairedForAPI(_ url: URL) throws -> URL {
+        let repaired = url.deletingLastPathComponent().appendingPathComponent(url.deletingPathExtension().lastPathComponent + "_repaired.m4a")
+        try? FileManager.default.removeItem(at: repaired)
+        let result = try run(ffmpeg, ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", url.path, "-vn",
+                                      "-c:a", "aac", "-ac", Self.audioChannels, "-b:a", Self.audioBitrate, repaired.path])
+        let size = (try? repaired.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard result.status == 0, size > 0 else {
+            throw Failure("Could not repair audio for transcription: \(result.errors.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        return repaired
+    }
+
+    /// Removes a chunk folder's `part_*.m4a` files, then the folder if that left it empty (`cleanup_dir`).
+    func removeChunks(in directory: URL) {
+        removeChunkFiles(in: directory)
+        rmdir(directory.path)
+    }
+}
+
+/// A flag one thread sets and another reads.
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.withLock { value = true } }
+    var isSet: Bool { lock.withLock { value } }
+}
+
+/// Data one thread writes before another reads it (ordered by a DispatchGroup).
+private final class DataBox: @unchecked Sendable {
+    var value = Data()
+}

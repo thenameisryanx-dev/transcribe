@@ -13,10 +13,10 @@ DIST_DIR="$PROJECT_DIR/dist"
 STAGING_DIR="$HOME/Library/Caches/LectureTranscribe/dmg_staging"
 ARCH="$(uname -m)"
 VENDOR_DIR="$PROJECT_DIR/vendor"
+# The pinned ffmpeg build, put there by scripts/ensure_dev_media_tools.sh (never Homebrew's).
 FFMPEG_VENDOR_DIR="$VENDOR_DIR/ffmpeg/$ARCH"
 FFMPEG_BIN_PATH="$FFMPEG_VENDOR_DIR/ffmpeg"
 FFPROBE_BIN_PATH="$FFMPEG_VENDOR_DIR/ffprobe"
-FFMPEG_LIB_DIR="$FFMPEG_VENDOR_DIR/lib"
 PYTHON_RESOURCE_DIR="$PROJECT_DIR"
 PYTHON_RELEASE_REQUIREMENTS_PATH="$PROJECT_DIR/python_release_requirements.txt"
 BUNDLED_PYTHON_FRAMEWORK_NAME="Python3.framework"
@@ -48,14 +48,6 @@ DMG_APP_ICON_X=190
 DMG_APPS_ICON_X=570
 DMG_ICON_Y=170
 
-if [[ "$ARCH" == "arm64" ]]; then
-  FFMPEG_DOWNLOAD_URL="https://ffmpeg.martin-riedl.de/download/macos/arm64/1756401489_8.0/ffmpeg.zip"
-  FFPROBE_DOWNLOAD_URL="https://ffmpeg.martin-riedl.de/download/macos/arm64/1756401489_8.0/ffprobe.zip"
-else
-  FFMPEG_DOWNLOAD_URL="https://evermeet.cx/ffmpeg/getrelease/zip"
-  FFPROBE_DOWNLOAD_URL="https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip"
-fi
-
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This script builds a macOS .dmg and must run on macOS."
   exit 1
@@ -63,215 +55,6 @@ fi
 
 cd "$PROJECT_DIR"
 mkdir -p "$DIST_DIR"
-
-binary_supports_arch() {
-  local binary_path="$1"
-  local required_arch="$2"
-
-  if [[ ! -f "$binary_path" ]]; then
-    return 1
-  fi
-  if ! command -v lipo >/dev/null 2>&1; then
-    return 1
-  fi
-
-  local archs
-  archs="$(lipo -archs "$binary_path" 2>/dev/null || true)"
-  [[ -n "$archs" ]] || return 1
-  [[ " $archs " == *" $required_arch "* ]]
-}
-
-media_tools_match_host_arch() {
-  binary_supports_arch "$FFMPEG_BIN_PATH" "$ARCH" && binary_supports_arch "$FFPROBE_BIN_PATH" "$ARCH"
-}
-
-media_tool_responds() {
-  local tool_path="$1"
-  python3 -c '
-import subprocess, sys
-subprocess.run([sys.argv[1], "-version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
-' "$tool_path" >/dev/null 2>&1
-}
-
-bundled_media_tools_ready() {
-  media_tools_match_host_arch && media_tool_responds "$FFMPEG_BIN_PATH" && media_tool_responds "$FFPROBE_BIN_PATH"
-}
-
-list_non_system_dylibs() {
-  local binary_path="$1"
-  otool -L "$binary_path" | awk 'NR>1 {print $1}' | while IFS= read -r dep; do
-    case "$dep" in
-      /opt/homebrew/*|/usr/local/*)
-        [[ -f "$dep" ]] && echo "$dep"
-        ;;
-      *)
-        ;;
-    esac
-  done
-}
-
-bundle_macos_dylib_closure() {
-  mkdir -p "$FFMPEG_LIB_DIR"
-
-  local changed=1
-  while [[ "$changed" -eq 1 ]]; do
-    changed=0
-
-    local -a sources=("$FFMPEG_BIN_PATH" "$FFPROBE_BIN_PATH")
-    while IFS= read -r existing_lib; do
-      [[ -n "$existing_lib" ]] && sources+=("$existing_lib")
-    done < <(find "$FFMPEG_LIB_DIR" -maxdepth 1 -type f -name '*.dylib' | sort)
-
-    local source dep dep_base dep_dest
-    for source in "${sources[@]}"; do
-      [[ -f "$source" ]] || continue
-      while IFS= read -r dep; do
-        [[ -n "$dep" ]] || continue
-        dep_base="$(basename "$dep")"
-        dep_dest="$FFMPEG_LIB_DIR/$dep_base"
-        if [[ ! -f "$dep_dest" ]]; then
-          install -m 755 "$dep" "$dep_dest"
-          changed=1
-        fi
-      done < <(list_non_system_dylibs "$source")
-    done
-  done
-}
-
-rewrite_macos_dylib_links() {
-  local target="$1"
-  local local_dep_prefix="@loader_path"
-  if [[ "$target" == "$FFMPEG_BIN_PATH" || "$target" == "$FFPROBE_BIN_PATH" ]]; then
-    local_dep_prefix="@loader_path/lib"
-  fi
-
-  local dep dep_base dep_rewrite
-  while IFS= read -r dep; do
-    [[ -n "$dep" ]] || continue
-    dep_base="$(basename "$dep")"
-    dep_rewrite="$local_dep_prefix/$dep_base"
-    install_name_tool -change "$dep" "$dep_rewrite" "$target"
-  done < <(list_non_system_dylibs "$target")
-
-  if [[ "$target" == "$FFMPEG_LIB_DIR/"*".dylib" ]]; then
-    install_name_tool -id "@loader_path/$(basename "$target")" "$target" || true
-  fi
-}
-
-prepare_local_arm64_ffmpeg_bundle() {
-  if [[ "$ARCH" != "arm64" ]]; then
-    return 1
-  fi
-
-  local local_ffmpeg local_ffprobe
-  local_ffmpeg="$(command -v ffmpeg || true)"
-  local_ffprobe="$(command -v ffprobe || true)"
-  if [[ -z "$local_ffmpeg" || -z "$local_ffprobe" ]]; then
-    return 1
-  fi
-
-  if ! binary_supports_arch "$local_ffmpeg" "arm64"; then
-    return 1
-  fi
-  if ! binary_supports_arch "$local_ffprobe" "arm64"; then
-    return 1
-  fi
-
-  install -m 755 "$local_ffmpeg" "$FFMPEG_BIN_PATH"
-  install -m 755 "$local_ffprobe" "$FFPROBE_BIN_PATH"
-  rm -rf "$FFMPEG_LIB_DIR"
-  bundle_macos_dylib_closure
-
-  rewrite_macos_dylib_links "$FFMPEG_BIN_PATH"
-  rewrite_macos_dylib_links "$FFPROBE_BIN_PATH"
-  local lib
-  while IFS= read -r lib; do
-    rewrite_macos_dylib_links "$lib"
-  done < <(find "$FFMPEG_LIB_DIR" -maxdepth 1 -type f -name '*.dylib' | sort)
-
-  media_tools_match_host_arch
-}
-
-ensure_bundled_ffmpeg() {
-  mkdir -p "$FFMPEG_VENDOR_DIR"
-
-  if [[ -x "$FFMPEG_BIN_PATH" && -x "$FFPROBE_BIN_PATH" ]]; then
-    if bundled_media_tools_ready; then
-      echo "Using cached bundled media tools:"
-      echo "  $FFMPEG_BIN_PATH"
-      echo "  $FFPROBE_BIN_PATH"
-      return
-    fi
-    echo "Cached bundled media tools are missing, mismatched, or not runnable for $ARCH. Rebuilding bundle."
-    rm -f "$FFMPEG_BIN_PATH" "$FFPROBE_BIN_PATH"
-    rm -rf "$FFMPEG_LIB_DIR"
-  fi
-
-  if [[ "$ARCH" == "arm64" ]]; then
-    if prepare_local_arm64_ffmpeg_bundle; then
-      echo "Bundled media tools prepared from local arm64 ffmpeg:"
-      echo "  $FFMPEG_BIN_PATH"
-      echo "  $FFPROBE_BIN_PATH"
-      echo "  $FFMPEG_LIB_DIR"
-      return
-    fi
-    echo "Local arm64 ffmpeg bundle unavailable. Trying downloaded binaries."
-  fi
-
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "curl is required to download bundled ffmpeg binaries."
-    exit 1
-  fi
-  if ! command -v unzip >/dev/null 2>&1; then
-    echo "unzip is required to extract bundled ffmpeg binaries."
-    exit 1
-  fi
-
-  local tmpdir
-  tmpdir="$(mktemp -d)"
-  echo "Downloading static ffmpeg/ffprobe binaries..."
-  curl -fL "$FFMPEG_DOWNLOAD_URL" -o "$tmpdir/ffmpeg.zip"
-  curl -fL "$FFPROBE_DOWNLOAD_URL" -o "$tmpdir/ffprobe.zip"
-  unzip -qo "$tmpdir/ffmpeg.zip" -d "$tmpdir/ffmpeg"
-  unzip -qo "$tmpdir/ffprobe.zip" -d "$tmpdir/ffprobe"
-
-  local ffmpeg_src
-  local ffprobe_src
-  ffmpeg_src="$(find "$tmpdir/ffmpeg" -type f -name ffmpeg -print -quit || true)"
-  ffprobe_src="$(find "$tmpdir/ffprobe" -type f -name ffprobe -print -quit || true)"
-  if [[ -z "$ffmpeg_src" || -z "$ffprobe_src" ]]; then
-    rm -rf "$tmpdir"
-    echo "Could not locate ffmpeg/ffprobe inside downloaded archives."
-    exit 1
-  fi
-
-  install -m 755 "$ffmpeg_src" "$FFMPEG_BIN_PATH"
-  install -m 755 "$ffprobe_src" "$FFPROBE_BIN_PATH"
-  rm -rf "$tmpdir"
-
-  if ! bundled_media_tools_ready; then
-    if [[ "$ARCH" == "arm64" ]]; then
-      echo "Downloaded ffmpeg binaries are not usable for arm64. Building a native arm64 bundle from local ffmpeg."
-      rm -f "$FFMPEG_BIN_PATH" "$FFPROBE_BIN_PATH"
-      rm -rf "$FFMPEG_LIB_DIR"
-      if ! prepare_local_arm64_ffmpeg_bundle; then
-        echo "Could not create an arm64 ffmpeg bundle automatically."
-        echo "Install arm64 ffmpeg locally (brew install ffmpeg), then rerun this script."
-        exit 1
-      fi
-    else
-      echo "Downloaded ffmpeg binaries do not match host architecture: $ARCH"
-      exit 1
-    fi
-  fi
-
-  echo "Bundled media tools prepared:"
-  echo "  $FFMPEG_BIN_PATH"
-  echo "  $FFPROBE_BIN_PATH"
-  if [[ -d "$FFMPEG_LIB_DIR" ]]; then
-    echo "  $FFMPEG_LIB_DIR"
-  fi
-}
 
 resolve_python_framework_root() {
   if ! command -v python3 >/dev/null 2>&1; then
@@ -330,7 +113,7 @@ write_info_plist() {
   <key>CFBundleDisplayName</key>
   <string>$APP_NAME</string>
   <key>CFBundleExecutable</key>
-  <string>launcher</string>
+  <string>$NATIVE_BINARY_NAME</string>
 ${icon_plist_block}  <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
   <key>CFBundleInfoDictionaryVersion</key>
@@ -423,79 +206,6 @@ prepare_app_icon() {
   fi
 
   return 1
-}
-
-write_launcher() {
-  local app_path="$1"
-  cat > "$app_path/Contents/MacOS/launcher" <<'LAUNCHER'
-#!/bin/zsh
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-BUNDLED_BINARY="$SCRIPT_DIR/LectureTranscribeNative"
-BUNDLED_PYTHON_HOME="$SCRIPT_DIR/../Frameworks/Python3.framework/Versions/Current"
-BUNDLED_PYTHON="$BUNDLED_PYTHON_HOME/bin/python3"
-BUNDLED_SITE_PACKAGES="$SCRIPT_DIR/../Resources/python/site-packages"
-
-if [[ -z "${TRANSCRIBE_PYTHON:-}" ]]; then
-  if [[ -x "$BUNDLED_PYTHON" ]]; then
-    export TRANSCRIBE_PYTHON="$BUNDLED_PYTHON"
-    export PYTHONHOME="$BUNDLED_PYTHON_HOME"
-    export PYTHONNOUSERSITE=1
-    if [[ -d "$BUNDLED_SITE_PACKAGES" ]]; then
-      export PYTHONPATH="$BUNDLED_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
-    fi
-  elif command -v python3 >/dev/null 2>&1; then
-    export TRANSCRIBE_PYTHON="$(command -v python3)"
-  elif [[ -x "/usr/bin/python3" ]]; then
-    export TRANSCRIBE_PYTHON="/usr/bin/python3"
-  fi
-fi
-
-# Optional source build/run path for debugging only.
-if [[ "${TRANSCRIBE_PREFER_SOURCE:-0}" == "1" ]] && command -v swift >/dev/null 2>&1; then
-  DEV_CANDIDATES=()
-  if [[ -n "${TRANSCRIBE_DEV_PROJECT_DIR:-}" ]]; then
-    DEV_CANDIDATES+=("${TRANSCRIBE_DEV_PROJECT_DIR}")
-  fi
-  # The project folder that holds this app, when the app was built into the project root.
-  DEV_CANDIDATES+=("$(cd "$SCRIPT_DIR/../../.." && pwd)")
-
-  for dev_root in "${DEV_CANDIDATES[@]}"; do
-    [[ -n "$dev_root" ]] || continue
-    if [[ -f "$dev_root/Package.swift" && -d "$dev_root/Sources/LectureTranscribeNative" && -x "$dev_root/scripts/swift_build_dir.sh" ]]; then
-      # Same build folder as Open Lecture Transcribe.command, outside ~/Documents (iCloud breaks codesign).
-      dev_build_dir="$("$dev_root/scripts/swift_build_dir.sh" "$dev_root")"
-      if /usr/bin/env swift build --package-path "$dev_root" --scratch-path "$dev_build_dir" >/dev/null 2>&1; then
-        dev_bin_dir="$(/usr/bin/env swift build --package-path "$dev_root" --scratch-path "$dev_build_dir" --show-bin-path 2>/dev/null || true)"
-        dev_binary="$dev_bin_dir/LectureTranscribeNative"
-        if [[ -n "$dev_bin_dir" && -x "$dev_binary" ]]; then
-          exec "$dev_binary" "$@"
-        fi
-      fi
-    fi
-  done
-fi
-
-# Optional dev-binary override for debugging only. Set TRANSCRIBE_DEV_BINARY to the binary to run.
-if [[ "${TRANSCRIBE_PREFER_DEV_BINARY:-0}" == "1" ]]; then
-  DEV_BINARY_CANDIDATES=()
-  if [[ -n "${TRANSCRIBE_DEV_BINARY:-}" ]]; then
-    DEV_BINARY_CANDIDATES+=("${TRANSCRIBE_DEV_BINARY}")
-  fi
-
-  for dev_binary in "${DEV_BINARY_CANDIDATES[@]}"; do
-    [[ -n "$dev_binary" ]] || continue
-    if [[ -x "$dev_binary" ]]; then
-      exec "$dev_binary" "$@"
-    fi
-  done
-fi
-
-exec "$BUNDLED_BINARY" "$@"
-LAUNCHER
-  chmod 755 "$app_path/Contents/MacOS/launcher"
 }
 
 build_native_binary() {
@@ -823,8 +533,8 @@ assemble_native_app_bundle() {
   mkdir -p "$app_path/Contents/Frameworks"
   mkdir -p "$app_path/Contents/Resources/python/ffmpeg_bin"
 
+  # The Swift program is the app's entry point; BackendClient sets up the bundled Python and work folder itself.
   install -m 755 "$native_binary_path" "$app_path/Contents/MacOS/$NATIVE_BINARY_NAME"
-  write_launcher "$app_path"
   if [[ -n "$icon_source_path" ]]; then
     write_info_plist "$app_path" "1"
     install -m 644 "$icon_source_path" "$app_path/Contents/Resources/AppIcon.icns"
@@ -839,10 +549,6 @@ assemble_native_app_bundle() {
   install_bundled_python_dependencies "$app_path/Contents/Resources/python/site-packages"
   install -m 755 "$FFMPEG_BIN_PATH" "$app_path/Contents/Resources/python/ffmpeg_bin/ffmpeg"
   install -m 755 "$FFPROBE_BIN_PATH" "$app_path/Contents/Resources/python/ffmpeg_bin/ffprobe"
-  if [[ -d "$FFMPEG_LIB_DIR" ]]; then
-    mkdir -p "$app_path/Contents/Resources/python/ffmpeg_bin/lib"
-    ditto "$FFMPEG_LIB_DIR" "$app_path/Contents/Resources/python/ffmpeg_bin/lib"
-  fi
 }
 
 echo "Cleaning previous artifacts..."
@@ -860,7 +566,7 @@ if [[ "$SKIP_BUILD" == "1" ]]; then
   echo "Skipping native app bundle build. Using existing app bundle:"
   echo "  $APP_PATH"
 else
-  ensure_bundled_ffmpeg
+  "$PROJECT_DIR/scripts/ensure_dev_media_tools.sh"
   PYTHON_FRAMEWORK_ROOT="$(resolve_python_framework_root)"
 
   NATIVE_BINARY_PATH="$(build_native_binary)"

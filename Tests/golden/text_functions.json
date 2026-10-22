@@ -1,0 +1,549 @@
+[
+  {
+    "function": "sentence_lines",
+    "input": {
+      "text": "Good morning, everyone. Today we're going to talk about nucleophilic substitution. Dr. Patel asked me to start with the SN2 reaction, which happens in one step. The nucleophile attacks from the back side... And the leaving group departs at the same time.Why does that matter?It matters because the stereochemistry inverts. Let's compare that with the SN1 reaction, which goes through a carbocation. The U.S.A. is not a sentence break here, and neither is e.g. this. Okay! Questions?"
+    },
+    "output": [
+      "Good morning, everyone.",
+      "Today we're going to talk about nucleophilic substitution.",
+      "Dr. Patel asked me to start with the SN2 reaction, which happens in one step.",
+      "The nucleophile attacks from the back side...",
+      "And the leaving group departs at the same time.",
+      "Why does that matter?",
+      "It matters because the stereochemistry inverts.",
+      "Let's compare that with the SN1 reaction, which goes through a carbocation.",
+      "The U.S.A. is not a sentence break here, and neither is e.g. this.",
+      "Okay!",
+      "Questions?"
+    ]
+  },
+  {
+    "function": "sentence_lines",
+    "input": {
+      "text": ""
+    },
+    "output": []
+  },
+  {
+    "function": "sentence_lines",
+    "input": {
+      "text": "   "
+    },
+    "output": []
+  },
+  {
+    "function": "sentence_lines",
+    "input": {
+      "text": "no punctuation at all"
+    },
+    "output": [
+      "no punctuation at all"
+    ]
+  },
+  {
+    "function": "sentence_lines",
+    "input": {
+      "text": "Mr. Smith met Mrs. Jones at St. Mary's. They talked."
+    },
+    "output": [
+      "Mr. Smith met Mrs. Jones at St. Mary's.",
+      "They talked."
+    ]
+  },
+  {
+    "function": "sentence_lines",
+    "input": {
+      "text": "Wait... What? Really!"
+    },
+    "output": [
+      "Wait...",
+      "What?",
+      "Really!"
+    ]
+  },
+  {
+    "function": "sentence_lines",
+    "input": {
+      "text": "He said 3.5 percent. Then 4 percent."
+    },
+    "output": [
+      "He said 3.5 percent.",
+      "Then 4 percent."
+    ]
+  },
+  {
+    "function": "transcript_tail",
+    "input": {
+      "text": "Good morning, everyone. Today we're going to talk about nucleophilic substitution. Dr. Patel asked me to start with the SN2 reaction, which happens in one step. The nucleophile attacks from the back side... And the leaving group departs at the same time.Why does that matter?It matters because the stereochemistry inverts. Let's compare that with the SN1 reaction, which goes through a carbocation. The U.S.A. is not a sentence break here, and neither is e.g. this. Okay! Questions?",
+      "max_chars": 300
+    },
+    "output": "And the leaving group departs at the same time. Why does that matter? It matters because the stereochemistry inverts. Let's compare that with the SN1 reaction, which goes through a carbocation. The U.S.A. is not a sentence break here, and neither is e.g. this. Okay! Questions?"
+  },
+  {
+    "function": "transcript_tail",
+    "input": {
+      "text": "Good morning, everyone. Today we're going to talk about nucleophilic substitution. Dr. Patel asked me to start with the SN2 reaction, which happens in one step. The nucleophile attacks from the back side... And the leaving group departs at the same time.Why does that matter?It matters because the stereochemistry inverts. Let's compare that with the SN1 reaction, which goes through a carbocation. The U.S.A. is not a sentence break here, and neither is e.g. this. Okay! Questions?",
+      "max_chars": 80
+    },
+    "output": "Okay! Questions?"
+  },
+  {
+    "function": "transcript_tail",
+    "input": {
+      "text": "One sentence. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "max_chars": 300
+    },
+    "output": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  {
+    "function": "transcript_tail",
+    "input": {
+      "text": "",
+      "max_chars": 300
+    },
+    "output": ""
+  },
+  {
+    "function": "strip_echoed_tail",
+    "input": {
+      "text": "And the stereochemistry inverts like an umbrella. Next, the SN1 reaction.",
+      "tail": "and the stereochemistry inverts like an umbrella."
+    },
+    "output": [
+      "Next, the SN1 reaction.",
+      7
+    ]
+  },
+  {
+    "function": "strip_echoed_tail",
+    "input": {
+      "text": "inverts like an umbrella. Next, the SN1 reaction.",
+      "tail": "and the stereochemistry inverts like an umbrella."
+    },
+    "output": [
+      "Next, the SN1 reaction.",
+      4
+    ]
+  },
+  {
+    "function": "strip_echoed_tail",
+    "input": {
+      "text": "umbrella. Next, the SN1 reaction.",
+      "tail": "and the stereochemistry inverts like an umbrella."
+    },
+    "output": [
+      "umbrella. Next, the SN1 reaction.",
+      0
+    ]
+  },
+  {
+    "function": "strip_echoed_tail",
+    "input": {
+      "text": "Next, the SN1 reaction.",
+      "tail": "and the stereochemistry inverts like an umbrella."
+    },
+    "output": [
+      "Next, the SN1 reaction.",
+      0
+    ]
+  },
+  {
+    "function": "find_repeated_passage",
+    "input": {
+      "text": "So the rate depends only on the substrate, because the slow step is the loss of the leaving group and the nucleophile isn't involved yet. That's why we call it first order. Remember that the carbocation is flat, so the nucleophile can attack from either face and we get a mixture of both configurations, which chemists call racemization in the ideal case. Remember that the carbocation is flat, so the nucleophile can attack from either face and we get a mixture of both configurations, which chemists call racemization in the ideal case. Remember that the carbocation is flat, so the nucleophile can attack from either face and we get a mixture of both configurations, which chemists call racemization in the ideal case. Next week we'll look at elimination."
+    },
+    "output": [
+      66,
+      "Remember that the carbocation is flat, so the"
+    ]
+  },
+  {
+    "function": "find_repeated_passage",
+    "input": {
+      "text": "Good morning, everyone. Today we're going to talk about nucleophilic substitution. Dr. Patel asked me to start with the SN2 reaction, which happens in one step. The nucleophile attacks from the back side... And the leaving group departs at the same time.Why does that matter?It matters because the stereochemistry inverts. Let's compare that with the SN1 reaction, which goes through a carbocation. The U.S.A. is not a sentence break here, and neither is e.g. this. Okay! Questions?"
+    },
+    "output": null
+  },
+  {
+    "function": "find_repeated_passage",
+    "input": {
+      "text": "Almost there. Almost there. Almost there."
+    },
+    "output": null
+  },
+  {
+    "function": "build_chunk_prompt",
+    "input": {
+      "context": null,
+      "previous_tail": null
+    },
+    "output": null
+  },
+  {
+    "function": "build_chunk_prompt",
+    "input": {
+      "context": "Organic chemistry, week 3",
+      "previous_tail": null
+    },
+    "output": "Organic chemistry, week 3"
+  },
+  {
+    "function": "build_chunk_prompt",
+    "input": {
+      "context": null,
+      "previous_tail": "the leaving group departs."
+    },
+    "output": "The recording begins right after this transcript excerpt:\n\"…the leaving group departs.\""
+  },
+  {
+    "function": "build_chunk_prompt",
+    "input": {
+      "context": "  Organic chemistry  ",
+      "previous_tail": "the leaving group departs."
+    },
+    "output": "Organic chemistry\n\nThe recording begins right after this transcript excerpt:\n\"…the leaving group departs.\""
+  },
+  {
+    "function": "wrap_subtitle_text",
+    "input": {
+      "text": "Short line."
+    },
+    "output": [
+      "Short line."
+    ]
+  },
+  {
+    "function": "wrap_subtitle_text",
+    "input": {
+      "text": "The nucleophile attacks from the back side while the leaving group departs."
+    },
+    "output": [
+      "The nucleophile attacks from the back side",
+      "while the leaving group departs."
+    ]
+  },
+  {
+    "function": "wrap_subtitle_text",
+    "input": {
+      "text": "Supercalifragilisticexpialidocious-and-another-very-long-hyphenated-compound word"
+    },
+    "output": [
+      "Supercalifragilisticexpialidocious-and-another-very-long-hyphenated-compound",
+      "word"
+    ]
+  },
+  {
+    "function": "wrap_subtitle_text",
+    "input": {
+      "text": "Well, if you think about it, the answer is yes."
+    },
+    "output": [
+      "Well, if you think about it,",
+      "the answer is yes."
+    ]
+  },
+  {
+    "function": "subtitle_pieces",
+    "input": {
+      "text": "The SN2 reaction happens in a single concerted step, where the nucleophile attacks from the back side while the leaving group departs, and the stereochemistry inverts like an umbrella in the wind."
+    },
+    "output": [
+      "The SN2 reaction happens in a single concerted step,",
+      "where the nucleophile attacks from the back side while the leaving group departs,",
+      "and the stereochemistry inverts like an umbrella in the wind."
+    ]
+  },
+  {
+    "function": "subtitle_pieces",
+    "input": {
+      "text": "Good morning, everyone. Today we're going to talk about nucleophilic substitution. Dr. Patel asked me to start with the SN2 reaction, which happens in one step. The nucleophile attacks from the back side... And the leaving group departs at the same time.Why does that matter?It matters because the stereochemistry inverts. Let's compare that with the SN1 reaction, which goes through a carbocation. The U.S.A. is not a sentence break here, and neither is e.g. this. Okay! Questions?"
+    },
+    "output": [
+      "Good morning, everyone. Today we're going to talk about nucleophilic substitution.",
+      "Dr. Patel asked me to start with the SN2 reaction, which happens in one step.",
+      "The nucleophile attacks from the back side...",
+      "And the leaving group departs at the same time. Why does that matter?",
+      "It matters because the stereochemistry inverts.",
+      "Let's compare that with the SN1 reaction, which goes through a carbocation.",
+      "The U.S.A. is not a sentence break here, and neither is e.g. this. Okay! Questions?"
+    ]
+  },
+  {
+    "function": "srt_timestamp",
+    "input": {
+      "seconds": 0
+    },
+    "output": "00:00:00,000"
+  },
+  {
+    "function": "hhmmss",
+    "input": {
+      "seconds": 0
+    },
+    "output": "00:00:00"
+  },
+  {
+    "function": "srt_timestamp",
+    "input": {
+      "seconds": 0.0004
+    },
+    "output": "00:00:00,000"
+  },
+  {
+    "function": "hhmmss",
+    "input": {
+      "seconds": 0.0004
+    },
+    "output": "00:00:00"
+  },
+  {
+    "function": "srt_timestamp",
+    "input": {
+      "seconds": 59.9996
+    },
+    "output": "00:01:00,000"
+  },
+  {
+    "function": "hhmmss",
+    "input": {
+      "seconds": 59.9996
+    },
+    "output": "00:00:59"
+  },
+  {
+    "function": "srt_timestamp",
+    "input": {
+      "seconds": 61.5
+    },
+    "output": "00:01:01,500"
+  },
+  {
+    "function": "hhmmss",
+    "input": {
+      "seconds": 61.5
+    },
+    "output": "00:01:01"
+  },
+  {
+    "function": "srt_timestamp",
+    "input": {
+      "seconds": 3599.999
+    },
+    "output": "00:59:59,999"
+  },
+  {
+    "function": "hhmmss",
+    "input": {
+      "seconds": 3599.999
+    },
+    "output": "00:59:59"
+  },
+  {
+    "function": "srt_timestamp",
+    "input": {
+      "seconds": 3725.25
+    },
+    "output": "01:02:05,250"
+  },
+  {
+    "function": "hhmmss",
+    "input": {
+      "seconds": 3725.25
+    },
+    "output": "01:02:05"
+  },
+  {
+    "function": "format_srt(subtitle_cues)",
+    "input": {
+      "segments": "one_speaker",
+      "offset_seconds": 0.0,
+      "chunk": 0
+    },
+    "output": "1\n00:00:00,000 --> 00:00:04,517\nGood morning, everyone.\nToday we're talking about substitution.\n\n2\n00:00:04,600 --> 00:00:07,009\nThe SN2 reaction happens\nin a single concerted step,\n\n3\n00:00:07,093 --> 00:00:10,892\nwhere the nucleophile attacks from the\nback side while the leaving group departs,\n\n4\n00:00:10,976 --> 00:00:13,917\nand the stereochemistry inverts\nlike an umbrella in the wind.\n\n5\n00:00:14,000 --> 00:00:16,500\nOkay. Any questions so far?\n"
+  },
+  {
+    "function": "format_srt(subtitle_cues)",
+    "input": {
+      "segments": "one_speaker",
+      "offset_seconds": 599.586,
+      "chunk": 1
+    },
+    "output": "1\n00:09:59,586 --> 00:10:04,103\nGood morning, everyone.\nToday we're talking about substitution.\n\n2\n00:10:04,186 --> 00:10:06,595\nThe SN2 reaction happens\nin a single concerted step,\n\n3\n00:10:06,679 --> 00:10:10,478\nwhere the nucleophile attacks from the\nback side while the leaving group departs,\n\n4\n00:10:10,562 --> 00:10:13,503\nand the stereochemistry inverts\nlike an umbrella in the wind.\n\n5\n00:10:13,586 --> 00:10:16,086\nOkay. Any questions so far?\n"
+  },
+  {
+    "function": "format_diarized_lines",
+    "input": {
+      "segments": "one_speaker",
+      "offset_seconds": 0.0
+    },
+    "output": [
+      "[A] Good morning, everyone. Today we're talking about substitution.",
+      "[A] The SN2 reaction happens in a single concerted step, where the nucleophile attacks from the back side while the leaving group departs, and the stereochemistry inverts like an umbrella in the wind.",
+      "[A] Okay.",
+      "[A] Any questions so far?"
+    ]
+  },
+  {
+    "function": "format_srt(subtitle_cues)",
+    "input": {
+      "segments": "quick_exchange",
+      "offset_seconds": 0.0,
+      "chunk": 0
+    },
+    "output": "1\n00:00:00,000 --> 00:00:03,017\nWhere were you? Out.\nOut where? The lab closes at six.\n\n2\n00:00:03,100 --> 00:00:03,933\nLibrary.\n\n3\n00:00:06,000 --> 00:00:10,000\nFine,\nbut next time leave a note on the board.\n"
+  },
+  {
+    "function": "format_srt(subtitle_cues)",
+    "input": {
+      "segments": "quick_exchange",
+      "offset_seconds": 599.586,
+      "chunk": 1
+    },
+    "output": "1\n00:09:59,586 --> 00:10:02,603\nWhere were you? Out.\nOut where? The lab closes at six.\n\n2\n00:10:02,686 --> 00:10:03,519\nLibrary.\n\n3\n00:10:05,586 --> 00:10:09,586\nFine,\nbut next time leave a note on the board.\n"
+  },
+  {
+    "function": "format_diarized_lines",
+    "input": {
+      "segments": "quick_exchange",
+      "offset_seconds": 0.0
+    },
+    "output": [
+      "[A] Where were you?",
+      "[B] Out.",
+      "[A] Out where? The lab closes at six.",
+      "[B] Library.",
+      "[A] Fine, but next time leave a note on the board."
+    ]
+  },
+  {
+    "function": "format_srt(subtitle_cues)",
+    "input": {
+      "segments": "gaps_and_untimed",
+      "offset_seconds": 0.0,
+      "chunk": 0
+    },
+    "output": "1\n00:00:00,000 --> 00:00:01,967\nFirst line.\n\n2\n00:00:02,050 --> 00:00:02,883\nHm.\n\n3\n00:00:30,000 --> 00:00:31,500\nMuch later.\n"
+  },
+  {
+    "function": "format_srt(subtitle_cues)",
+    "input": {
+      "segments": "gaps_and_untimed",
+      "offset_seconds": 599.586,
+      "chunk": 1
+    },
+    "output": "1\n00:09:59,586 --> 00:10:01,553\nFirst line.\n\n2\n00:10:01,636 --> 00:10:02,469\nHm.\n\n3\n00:10:29,586 --> 00:10:31,086\nMuch later.\n"
+  },
+  {
+    "function": "format_diarized_lines",
+    "input": {
+      "segments": "gaps_and_untimed",
+      "offset_seconds": 0.0
+    },
+    "output": [
+      "[A] First line.",
+      "[A] Hm.",
+      "[B] Much later.",
+      "[B]    "
+    ]
+  },
+  {
+    "function": "parse_keywords",
+    "input": {
+      "raw": "SN2, Grignard reagent\nsn2\n\n  carbocation  "
+    },
+    "output": [
+      "SN2",
+      "Grignard reagent",
+      "carbocation"
+    ]
+  },
+  {
+    "function": "parse_keywords",
+    "input": {
+      "raw": ""
+    },
+    "output": []
+  },
+  {
+    "function": "parse_keywords",
+    "input": {
+      "raw": "bad <tag>"
+    },
+    "output": {
+      "error": "'bad <tag>' contains < or >, which OpenAI doesn't accept in keywords."
+    }
+  },
+  {
+    "function": "parse_language_codes",
+    "input": {
+      "raw": "en, ES,en"
+    },
+    "output": [
+      "en",
+      "es"
+    ]
+  },
+  {
+    "function": "parse_language_codes",
+    "input": {
+      "raw": ""
+    },
+    "output": []
+  },
+  {
+    "function": "parse_language_codes",
+    "input": {
+      "raw": "english"
+    },
+    "output": {
+      "error": "'english' is not a language code. Use codes like en, es, zh."
+    }
+  },
+  {
+    "function": "parse_language_codes",
+    "input": {
+      "raw": "zz"
+    },
+    "output": [
+      "zz"
+    ]
+  },
+  {
+    "function": "build_transcript_header",
+    "input": {
+      "model": "gpt-transcribe",
+      "local_chunk_seconds": 300,
+      "languages": [
+        "en"
+      ],
+      "context": "Organic\nchemistry",
+      "keywords": [
+        "SN2"
+      ],
+      "consistency_mode": true,
+      "chunk_warnings": [
+        "part_002.m4a: looks repeated"
+      ]
+    },
+    "output": "INPUT: /lectures/week3.mp4\nWORKING_INPUT: /lectures/week3.mp4\nMODEL: gpt-transcribe\nLOCAL_CHUNK_SECONDS: 300\nLANGUAGES: en\nCONTEXT: Organic chemistry\nKEYWORDS: SN2\nCONSISTENCY_MODE: on\nWARNING: part_002.m4a: looks repeated\n\n"
+  },
+  {
+    "function": "build_transcript_header",
+    "input": {
+      "model": "gpt-4o-transcribe-diarize",
+      "response_format": "diarized_json",
+      "chunking_strategy": "auto",
+      "duration_seconds": 1234.5678
+    },
+    "output": "INPUT: /lectures/week3.mp4\nWORKING_INPUT: /lectures/week3.mp4\nMODEL: gpt-4o-transcribe-diarize\nRESPONSE_FORMAT: diarized_json\nCHUNKING_STRATEGY: \"auto\"\nDURATION_SECONDS: 1234.568\n\n"
+  },
+  {
+    "function": "build_transcript_header",
+    "input": {
+      "model": "gpt-4o-transcribe",
+      "context": ""
+    },
+    "output": "INPUT: /lectures/week3.mp4\nWORKING_INPUT: /lectures/week3.mp4\nMODEL: gpt-4o-transcribe\nCONTEXT: none\n\n"
+  }
+]

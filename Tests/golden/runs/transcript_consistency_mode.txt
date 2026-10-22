@@ -1,0 +1,43 @@
+INPUT: <RECORDING>
+WORKING_INPUT: <RECORDING>
+MODEL: gpt-transcribe
+LOCAL_CHUNK_SECONDS: 60
+LANGUAGES: en
+CONTEXT: Organic chemistry, week 3
+KEYWORDS: SN2, Grignard
+CONSISTENCY_MODE: on
+WARNING: part_001.m4a: gpt-transcribe repeated a passage of about 66 words, starting "Remember that the carbocation is flat, so the…" (check this part of the transcript) after 3 attempts.
+
+
+
+===== part_000.m4a (00:00:00-00:00:52) =====
+
+Part 1 of the lecture.
+The nucleophile attacks from the back side.
+Why?
+Because of sterics.
+Dr. Patel agrees.
+
+===== part_001.m4a (00:00:52-00:01:50) =====
+
+[WARNING: part_001.m4a: gpt-transcribe repeated a passage of about 66 words, starting "Remember that the carbocation is flat, so the…" (check this part of the transcript) after 3 attempts.]
+
+Part 2 of the lecture.
+The nucleophile attacks from the back side.
+Why?
+Because of sterics.
+Dr. Patel agrees.
+So the rate depends only on the substrate, because the slow step is the loss of the leaving group and the nucleophile isn't involved yet.
+That's why we call it first order.
+Remember that the carbocation is flat, so the nucleophile can attack from either face and we get a mixture of both configurations, which chemists call racemization in the ideal case.
+Remember that the carbocation is flat, so the nucleophile can attack from either face and we get a mixture of both configurations, which chemists call racemization in the ideal case.
+Remember that the carbocation is flat, so the nucleophile can attack from either face and we get a mixture of both configurations, which chemists call racemization in the ideal case.
+Next week we'll look at elimination.
+
+===== part_002.m4a (00:01:50-00:02:30) =====
+
+Part 3 of the lecture.
+The nucleophile attacks from the back side.
+Why?
+Because of sterics.
+Dr. Patel agrees.

@@ -87,7 +87,7 @@ struct TranscribePaneView: View {
                 ModelSelectionMenu(
                     selectedModel: $viewModel.selectedTranscriptionModel,
                     isDisabled: viewModel.isRunning,
-                    fixedModelName: viewModel.subtitlesEnabled ? TranscribeViewModel.subtitlesModelDisplayName : nil
+                    fixedModelName: viewModel.modelMenuFixedName
                 )
                 .help(viewModel.subtitlesEnabled
                     ? "Subtitles always use \(TranscribeViewModel.subtitlesModelDisplayName), the model that returns timing for each line."
@@ -792,7 +792,7 @@ struct TranscribePaneView: View {
     }
 }
 
-private struct ModelSelectionMenu: View {
+struct ModelSelectionMenu: View {
     @Binding var selectedModel: TranscriptionModel
     let isDisabled: Bool
     /// Shown instead of the selected model, with the menu locked, when the run uses a fixed model (subtitles).
@@ -817,11 +817,16 @@ private struct ModelSelectionMenu: View {
                 .help(model.hoverDescription)
             }
         } label: {
-            Text(fixedModelName ?? selectedModel.displayName)
+            Text(Self.title(selectedModel: selectedModel, fixedModelName: fixedModelName))
         }
         .accessibilityLabel("Transcription Model")
         .fixedSize()
         .disabled(isDisabled || fixedModelName != nil)
+    }
+
+    /// The menu's label: the model the run will use.
+    static func title(selectedModel: TranscriptionModel, fixedModelName: String?) -> String {
+        fixedModelName ?? selectedModel.displayName
     }
 }
 
