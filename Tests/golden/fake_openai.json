@@ -1,0 +1,89 @@
+{
+  "answers": {
+    "transcript": "Part {n} of the lecture. The nucleophile attacks from the back side.Why?Because of sterics. Dr. Patel agrees.",
+    "echo_marker": "The recording begins right after this transcript excerpt",
+    "echo_prefix": "of sterics. Dr. Patel agrees. ",
+    "looped_chunk": 2,
+    "looped": "So the rate depends only on the substrate, because the slow step is the loss of the leaving group and the nucleophile isn't involved yet. That's why we call it first order. Remember that the carbocation is flat, so the nucleophile can attack from either face and we get a mixture of both configurations, which chemists call racemization in the ideal case. Remember that the carbocation is flat, so the nucleophile can attack from either face and we get a mixture of both configurations, which chemists call racemization in the ideal case. Remember that the carbocation is flat, so the nucleophile can attack from either face and we get a mixture of both configurations, which chemists call racemization in the ideal case. Next week we'll look at elimination.",
+    "segments": [
+      {
+        "speaker": "A",
+        "start": 0.4,
+        "end": 3.9,
+        "text": "Part {n}. Where were you?"
+      },
+      {
+        "speaker": "B",
+        "start": 4.0,
+        "end": 4.3,
+        "text": "Out."
+      },
+      {
+        "speaker": "A",
+        "start": 5.0,
+        "end": 14.0,
+        "text": "Then let's go over the mechanism again, because the nucleophile attacks from the back side and the stereochemistry inverts."
+      }
+    ],
+    "output_tokens": 50
+  },
+  "recording_ffmpeg_arguments": [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=300:duration=52",
+    "-f",
+    "lavfi",
+    "-i",
+    "anullsrc=r=44100:cl=mono:d=0.6",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=300:duration=57.4",
+    "-f",
+    "lavfi",
+    "-i",
+    "anullsrc=r=44100:cl=mono:d=0.6",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=300:duration=39.4",
+    "-filter_complex",
+    "[0:a]aformat=sample_rates=44100:channel_layouts=mono[a0];[1:a]aformat=sample_rates=44100:channel_layouts=mono[a1];[2:a]aformat=sample_rates=44100:channel_layouts=mono[a2];[3:a]aformat=sample_rates=44100:channel_layouts=mono[a3];[4:a]aformat=sample_rates=44100:channel_layouts=mono[a4];[a0][a1][a2][a3][a4]concat=n=5:v=0:a=1",
+    "-c:a",
+    "aac",
+    "<RECORDING>"
+  ],
+  "runs": {
+    "transcript_gpt4o": {
+      "model": "gpt-4o-transcribe",
+      "chunk_seconds": 60
+    },
+    "transcript_consistency_mode": {
+      "model": "gpt-transcribe",
+      "chunk_seconds": 60,
+      "carry_context": true,
+      "context": "Organic chemistry, week 3",
+      "keywords": [
+        "SN2",
+        "Grignard"
+      ],
+      "languages": [
+        "en"
+      ]
+    },
+    "speaker_labels": {
+      "model": "gpt-4o-transcribe",
+      "diarize": true
+    },
+    "subtitles": {
+      "model": "gpt-4o-transcribe",
+      "subtitles": true
+    }
+  },
+  "max_parallel": 1
+}

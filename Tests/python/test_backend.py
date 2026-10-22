@@ -66,6 +66,26 @@ class BackendArgumentsTests(unittest.TestCase):
             self.parse("run", "--input", "in.m4a", "--output", "out", "--model", "whisper-1")
 
 
+class TypedTextTests(unittest.TestCase):
+    def test_accents_split_by_macos_are_put_back(self) -> None:
+        split = "Cafe\u0301 \u2014 Ga\u0308rtner"
+        self.assertEqual(transcribe_backend.typed_text(split), "Caf\u00e9 \u2014 G\u00e4rtner")
+        self.assertEqual(transcribe_backend.typed_text(None), "")
+
+    def test_runs_get_the_typed_context_and_keywords(self) -> None:
+        with mock.patch.object(sys, "argv", [
+            "transcribe_backend.py", "run", "--input", __file__, "--output", "/tmp", "--model", "gpt-transcribe",
+            "--context", "Cafe\u0301 lecture", "--keywords", "Gro\u0308bner",
+        ]):
+            args = transcribe_backend.parse_args()
+        with mock.patch.object(transcribe_backend, "run_transcription_job", return_value=Path(__file__)) as job, \
+             mock.patch.object(transcribe_backend, "resolve_api_key_status", return_value="loaded from environment"), \
+             mock.patch.object(transcribe_backend, "emit"):
+            transcribe_backend.command_run(args)
+        self.assertEqual(job.call_args.kwargs["context"], "Caf\u00e9 lecture")
+        self.assertEqual(job.call_args.kwargs["keywords"], ["Gr\u00f6bner"])
+
+
 class ModelRulesTests(unittest.TestCase):
     """The backend's model rules match Tests/model_rules.json, which the app's ModelRulesTests.swift also checks."""
 
@@ -286,6 +306,9 @@ class GoldenOutputTests(TempDirTestCase):
         golden.make_recording(audio)
         expected = json.loads(golden.OPENAI_REQUESTS_FILE.read_text(encoding="utf-8"))
         self.assertEqual(golden.openai_request_cases(audio), expected)
+
+    def test_fake_openai_description_is_current(self) -> None:
+        self.assertEqual(json.loads(golden.FAKE_OPENAI_FILE.read_text(encoding="utf-8")), golden.fake_openai_spec())
 
     def test_whole_runs_match_the_reference(self) -> None:
         actual = golden.run_outputs(self.dir)

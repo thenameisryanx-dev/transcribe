@@ -11,6 +11,8 @@ when the backend's output no longer matches. After an intended change, regenerat
   detection, subtitle wrapping and timing, transcript headers, keyword and language parsing).
 - openai_requests.json: the form fields the backend sends to OpenAI's transcription endpoint for each kind of
   request, as the `openai` package encodes them. A client written another way must send the same fields.
+- fake_openai.json: what the fake OpenAI answers for the whole runs, and how their recording is made, so a
+  rewrite's tests can replay the same runs.
 - runs/*: whole runs on a generated recording against a fake OpenAI (see FakeOpenAI below), with the
   transcript or subtitle file each one writes. These also record where the chunks are cut.
 """
@@ -31,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_DIR = ROOT / "Tests" / "golden"
 TEXT_FUNCTIONS_FILE = GOLDEN_DIR / "text_functions.json"
 OPENAI_REQUESTS_FILE = GOLDEN_DIR / "openai_requests.json"
+FAKE_OPENAI_FILE = GOLDEN_DIR / "fake_openai.json"
 RUNS_DIR = GOLDEN_DIR / "runs"
 
 if __name__ == "__main__":
@@ -206,31 +209,43 @@ def openai_request_cases(audio: Path) -> list[dict]:
 # Whole runs
 
 
+# The fake OpenAI's answers. "{n}" is the chunk's number from 1. Written to fake_openai.json so other tests can
+# give the same answers.
+FAKE_ANSWERS = {
+    "transcript": "Part {n} of the lecture. The nucleophile attacks from the back side.Why?Because of sterics. Dr. Patel agrees.",
+    # Models sometimes repeat the excerpt they were given in the prompt; the backend removes it.
+    "echo_marker": "The recording begins right after this transcript excerpt",
+    "echo_prefix": "of sterics. Dr. Patel agrees. ",
+    # The second chunk loops, which the backend flags.
+    "looped_chunk": 2,
+    "looped": LOOPED,
+    "segments": [
+        {"speaker": "A", "start": 0.4, "end": 3.9, "text": "Part {n}. Where were you?"},
+        {"speaker": "B", "start": 4.0, "end": 4.3, "text": "Out."},
+        {"speaker": "A", "start": 5.0, "end": 14.0, "text": "Then let's go over the mechanism again, because the nucleophile attacks from the back side and the stereochemistry inverts."},
+    ],
+    "output_tokens": 50,
+}
+
+
 class FakeOpenAI:
-    """Answers each chunk with fixed text, so a run's output depends only on the backend's own logic."""
+    """Answers each chunk with FAKE_ANSWERS, so a run's output depends only on the backend's own logic."""
 
     def __init__(self) -> None:
         self.audio = SimpleNamespace(transcriptions=SimpleNamespace(create=self.create))
 
     def create(self, **kwargs):
         name = Path(kwargs["file"].name).name
-        n = int(name.split("_")[1].split(".")[0])
-        usage = {"output_tokens": 50}
+        n = int(name.split("_")[1].split(".")[0]) + 1
+        usage = {"output_tokens": FAKE_ANSWERS["output_tokens"]}
         if kwargs["response_format"] == "diarized_json":
-            segments = [
-                {"speaker": "A", "start": 0.4, "end": 3.9, "text": f"Part {n + 1}. Where were you?"},
-                {"speaker": "B", "start": 4.0, "end": 4.3, "text": "Out."},
-                {"speaker": "A", "start": 5.0, "end": 14.0, "text": "Then let's go over the mechanism again, because the nucleophile attacks from the back side and the stereochemistry inverts."},
-            ]
+            segments = [{**s, "text": s["text"].replace("{n}", str(n))} for s in FAKE_ANSWERS["segments"]]
             return SimpleNamespace(text=" ".join(s["text"] for s in segments), segments=segments, usage=usage)
-        prompt = kwargs.get("prompt") or ""
-        echo = "The recording begins right after this transcript excerpt" in prompt
-        text = f"Part {n + 1} of the lecture. The nucleophile attacks from the back side.Why?Because of sterics. Dr. Patel agrees."
-        if echo:
-            # Models sometimes repeat the excerpt they were given; the backend removes it.
-            text = "of sterics. Dr. Patel agrees. " + text
-        if n == 1:
-            text += " " + LOOPED
+        text = FAKE_ANSWERS["transcript"].replace("{n}", str(n))
+        if FAKE_ANSWERS["echo_marker"] in (kwargs.get("prompt") or ""):
+            text = FAKE_ANSWERS["echo_prefix"] + text
+        if n == FAKE_ANSWERS["looped_chunk"]:
+            text += " " + FAKE_ANSWERS["looped"]
         return SimpleNamespace(text=text, usage=usage)
 
 
@@ -245,17 +260,26 @@ RUNS = {
 }
 
 
-def make_recording(path: Path) -> None:
-    """150s of tone with a clear pause at 52s and 110s, so the cuts land in known places."""
-    tone = "sine=frequency=300:duration={}"
-    parts = [tone.format(52), "anullsrc=r=44100:cl=mono:d=0.6", tone.format(57.4), "anullsrc=r=44100:cl=mono:d=0.6", tone.format(39.4)]
+# 150s of tone with a clear pause at 52s and 110s, so the cuts land in known places (ffmpeg lavfi sources).
+RECORDING_PARTS = [
+    "sine=frequency=300:duration=52", "anullsrc=r=44100:cl=mono:d=0.6", "sine=frequency=300:duration=57.4",
+    "anullsrc=r=44100:cl=mono:d=0.6", "sine=frequency=300:duration=39.4",
+]
+
+
+def recording_arguments(path: Path) -> list[str]:
+    """ffmpeg's arguments to make the recording at `path`."""
+    parts = RECORDING_PARTS
     args = []
     for p in parts:
         args += ["-f", "lavfi", "-i", p]
     chains = "".join(f"[{i}:a]aformat=sample_rates=44100:channel_layouts=mono[a{i}];" for i in range(len(parts)))
     concat = "".join(f"[a{i}]" for i in range(len(parts))) + f"concat=n={len(parts)}:v=0:a=1"
-    subprocess.run([*lt.ffmpeg_cmd_prefix(), "-hide_banner", "-loglevel", "error", "-y", *args,
-                    "-filter_complex", chains + concat, "-c:a", "aac", str(path)], check=True)
+    return ["-hide_banner", "-loglevel", "error", "-y", *args, "-filter_complex", chains + concat, "-c:a", "aac", str(path)]
+
+
+def make_recording(path: Path) -> None:
+    subprocess.run([*lt.ffmpeg_cmd_prefix(), *recording_arguments(path)], check=True)
 
 
 def run_outputs(workdir: Path) -> dict[str, str]:
@@ -279,6 +303,16 @@ def run_outputs(workdir: Path) -> dict[str, str]:
     return outputs
 
 
+def fake_openai_spec() -> dict:
+    """The fake OpenAI's answers, the recording's ffmpeg arguments and each run's settings, for other tests."""
+    return {
+        "answers": FAKE_ANSWERS,
+        "recording_ffmpeg_arguments": recording_arguments(Path("<RECORDING>")),
+        "runs": RUNS,
+        "max_parallel": 1,
+    }
+
+
 def update() -> None:
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     TEXT_FUNCTIONS_FILE.write_text(json.dumps(text_function_cases(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -286,6 +320,7 @@ def update() -> None:
         audio = Path(workdir) / "part_000.m4a"
         make_recording(audio)
         requests = openai_request_cases(audio)
+    FAKE_OPENAI_FILE.write_text(json.dumps(fake_openai_spec(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     OPENAI_REQUESTS_FILE.write_text(json.dumps(requests, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     for old in RUNS_DIR.iterdir():

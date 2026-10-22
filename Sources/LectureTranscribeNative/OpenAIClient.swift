@@ -60,10 +60,11 @@ struct OpenAIClient: Sendable {
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         urlRequest.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        urlRequest.httpBody = body
 
         for attempt in 1...Self.maxAttempts {
             do {
-                let (data, response) = try await session.upload(for: urlRequest, from: body)
+                let (data, response) = try await session.data(for: urlRequest)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 guard (200..<300).contains(status) else {
                     throw OpenAIError(status: status, body: data)

@@ -13,6 +13,10 @@ lacks_fixed() { ! grep -Fq -- "$1" "$2"; }
 
 BUILD_DIR="$("$ROOT_DIR/scripts/swift_build_dir.sh" "$ROOT_DIR")"
 
+# The Swift and Python tests both use the pinned ffmpeg in vendor/ffmpeg (downloaded and checked against its
+# checksums by scripts/ensure_dev_media_tools.sh; it isn't kept in git).
+scripts/ensure_dev_media_tools.sh
+
 echo "[1/5] Building Swift app..."
 swift build --scratch-path "$BUILD_DIR" >/dev/null
 
@@ -26,11 +30,9 @@ if ! SWIFT_TEST_OUTPUT="$(swift test --scratch-path "$BUILD_DIR" 2>&1)"; then
 fi
 
 # Backend behavior (model choice, speaker-label rules, media tool architecture, track editing) is checked by
-# Tests/python/test_backend.py, using the repo-local .venv and the pinned ffmpeg in vendor/ffmpeg (downloaded and
-# checked against its checksums by scripts/ensure_dev_media_tools.sh; it isn't kept in git).
+# Tests/python/test_backend.py, using the repo-local .venv and the pinned ffmpeg in vendor/ffmpeg.
 echo "[3/5] Running Python backend tests..."
 scripts/ensure_dev_python.sh
-scripts/ensure_dev_media_tools.sh
 if ! PYTHON_TEST_OUTPUT="$(.venv/bin/python3 -m unittest discover -s Tests/python 2>&1)"; then
   print -r -- "$PYTHON_TEST_OUTPUT"
   exit 1

@@ -1,6 +1,6 @@
 # Architecture
 
-The app has two halves: a native SwiftUI front end and a Python backend that does the audio work and talks to OpenAI. The Swift app runs the Python backend as a separate process for each task.
+The app has two halves: a native SwiftUI front end and a Python backend that does the audio work and talks to OpenAI. The Swift app runs the Python backend as a separate process for each task. The backend is moving into Swift one piece at a time: the API key and plain transcript runs already run in Swift; speaker labels, subtitles, .qta files and the Tracks pane still use the backend.
 
 ## Module overview
 - `Sources/LectureTranscribeNative/` (SwiftUI app)
@@ -17,7 +17,8 @@ The app has two halves: a native SwiftUI front end and a Python backend that doe
   - Update check against GitHub Releases (`UpdateChecker.swift`)
   - Bridge to the Python backend process (`BackendClient.swift`)
   - The OpenAI API key: status, saving to the keychain, handing it to the backend (`APIKeyStore.swift`)
-  - OpenAI calls from Swift: the key check, and a transcription client that sends the same requests as the backend; runs don't use it yet (`OpenAIClient.swift`)
+  - OpenAI calls from Swift: the key check, and a transcription client that sends the same requests as the backend (`OpenAIClient.swift`)
+  - Plain transcript runs, in Swift: chunking, the checks on each chunk's text, saved chunk results and the transcript file (`TranscriptJob.swift`, `ChunkResultStore.swift`, `TranscriptText.swift`), using ffmpeg through `MediaTools.swift`
 - Root Python backend scripts:
   - `transcribe_backend.py` (CLI entry and JSON event stream; commands `run`, `key-status`, `set-key`, `audio-tracks`, `tracks`, `save-tracks`)
   - `lecture_transcribe.py` (audio conversion, chunking, ffmpeg and track helpers)
@@ -34,7 +35,7 @@ The app has two halves: a native SwiftUI front end and a Python backend that doe
 ## Main data flow
 1. User starts transcription in the SwiftUI pane.
 2. `TranscribeViewModel` validates inputs, turns the pane's options into a `RunRequest`, and invokes `BackendClient`.
-3. `BackendClient` launches the Python backend command and reads line-delimited JSON events.
+3. `BackendClient` runs plain transcripts in Swift (`TranscriptJob`); for speaker labels, subtitles and .qta files it launches the Python backend command and reads line-delimited JSON events. Both report through the same events, and `TRANSCRIBE_PYTHON_RUNS=1` sends every run to the backend.
 4. Events (`status`, `progress`, `log`, `done`, `error`) are mapped into view model state.
 5. Views update reactively from published state (status text, progress, logs, output location).
 6. The finished run is recorded in history and shown in the Runs pane.

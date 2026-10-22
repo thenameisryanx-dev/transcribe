@@ -6,6 +6,7 @@ import signal
 import sys
 import threading
 import traceback
+import unicodedata
 from pathlib import Path
 
 from lecture_transcribe import (
@@ -227,7 +228,7 @@ def command_run(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        keywords = parse_keywords(args.keywords or "")
+        keywords = parse_keywords(typed_text(args.keywords))
     except ValueError as exc:
         emit("error", f"Invalid keywords: {exc}")
         return 2
@@ -248,7 +249,7 @@ def command_run(args: argparse.Namespace) -> int:
             transcription_model=model,
             push_event=push_event,
             languages=languages,
-            context=args.context,
+            context=typed_text(args.context),
             carry_context=bool(args.carry_context),
             chunk_seconds=args.chunk_seconds,
             keywords=keywords,
@@ -270,6 +271,15 @@ def command_run(args: argparse.Namespace) -> int:
             emit("error_kind", ERROR_KIND_API_KEY)
         emit("error", describe_run_error(exc))
         return 1
+
+
+def typed_text(value: "str | None") -> str:
+    """
+    Text from the app as it was typed. macOS hands a program's arguments over with accents split from their
+    letters ("é" as "e" plus a combining accent); this puts them back together, so OpenAI gets what was typed
+    and saved chunk results match the ones the app's own (Swift) runs save.
+    """
+    return unicodedata.normalize("NFC", value or "")
 
 
 def describe_run_error(exc: BaseException) -> str:

@@ -88,8 +88,13 @@ final class BackendClient: @unchecked Sendable {
         return bundledPythonProgram ?? "python3"
     }
 
-    /// Scratch space for audio chunks and converted inputs; keeps them out of the app bundle.
-    private var workingDirectoryURL: URL {
+    /// Scratch space for audio chunks, saved chunk results and converted inputs; keeps them out of the app
+    /// bundle. `TRANSCRIBE_WORKDIR` moves it.
+    var workingDirectoryURL: URL {
+        let override = (ProcessInfo.processInfo.environment["TRANSCRIBE_WORKDIR"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !override.isEmpty {
+            return URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
+        }
         let cachesURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Caches", isDirectory: true)
         return cachesURL.appendingPathComponent("LectureTranscribe", isDirectory: true)
@@ -236,11 +241,57 @@ final class BackendClient: @unchecked Sendable {
         try await runStreamCommand(args: args, onEvent: onEvent)
     }
 
+    /// Runs a transcription. Plain transcripts run in Swift (`TranscriptJob`); speaker labels, subtitles and
+    /// .qta files still run in the Python backend. `TRANSCRIBE_PYTHON_RUNS=1` sends every run to the backend.
     func startTranscription(
         _ request: RunRequest,
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
     ) async throws {
-        try await runStreamCommand(args: request.backendArguments, onEvent: onEvent)
+        let pythonOnly = ProcessInfo.processInfo.environment["TRANSCRIBE_PYTHON_RUNS"] == "1"
+        if TranscriptJob.handles(request) && !pythonOnly {
+            try await runInSwift(request, onEvent: onEvent)
+        } else {
+            try await runStreamCommand(args: request.backendArguments, onEvent: onEvent)
+        }
+    }
+
+    /// A plain transcript run in Swift. It reports through the same events as the backend: `error` (and
+    /// `apiKeyProblem`) when it fails, `done` with the transcript's path when it finishes.
+    private func runInSwift(_ request: RunRequest, onEvent: @escaping @Sendable (BackendStreamEvent) -> Void) async throws {
+        func fail(_ message: String, apiKeyProblem: Bool = false) throws -> Never {
+            if apiKeyProblem { onEvent(.apiKeyProblem) }
+            onEvent(.error(message))
+            throw BackendError.commandFailed(message)
+        }
+        guard fileManager.fileExists(atPath: request.inputPath) else {
+            try fail("Input file not found: \(request.inputPath)")
+        }
+        guard let key = apiKeys.currentKey()?.key else {
+            try fail("Add your OpenAI API key to start transcribing.", apiKeyProblem: true)
+        }
+        let media: MediaTools
+        do {
+            media = try MediaTools.located()
+        } catch {
+            try fail(error.localizedDescription)
+        }
+        let job = TranscriptJob(
+            request: request,
+            apiKey: key,
+            openAI: openAI,
+            media: media,
+            workDirectory: workingDirectoryURL,
+            maxParallel: TranscriptJob.maxParallel(environment: ProcessInfo.processInfo.environment),
+            emit: onEvent
+        )
+        do {
+            let output = try await job.run()
+            onEvent(.done(output.resolvingSymlinksInPath().path))
+        } catch {
+            if error is CancellationError || Task.isCancelled { throw CancellationError() }
+            let described = TranscriptJob.describe(error)
+            try fail(described.message, apiKeyProblem: described.isAPIKeyProblem)
+        }
     }
 
     /// The backend's `run` arguments for a transcription.
