@@ -22,9 +22,11 @@ echo "[2/5] Running Swift unit tests..."
 swift test --scratch-path "$BUILD_DIR" >/dev/null
 
 # Backend behavior (model choice, speaker-label rules, media tool architecture, track editing) is checked by
-# Tests/python/test_backend.py, using the repo-local .venv and the ffmpeg in vendor/ffmpeg.
+# Tests/python/test_backend.py, using the repo-local .venv and the pinned ffmpeg in vendor/ffmpeg (downloaded and
+# checked against its checksums by scripts/ensure_dev_media_tools.sh; it isn't kept in git).
 echo "[3/5] Running Python backend tests..."
 scripts/ensure_dev_python.sh
+scripts/ensure_dev_media_tools.sh
 if ! PYTHON_TEST_OUTPUT="$(.venv/bin/python3 -m unittest discover -s Tests/python 2>&1)"; then
   print -r -- "$PYTHON_TEST_OUTPUT"
   exit 1
@@ -88,12 +90,17 @@ has_fixed 'export FFPROBE_BIN="$PROJECT_DIR/vendor/ffmpeg/$(uname -m)/ffprobe"' 
 has_fixed 'BUILD_DIR="$("$PROJECT_DIR/scripts/swift_build_dir.sh" "$PROJECT_DIR")"' "$LAUNCHER"
 has_fixed 'exec /usr/bin/env swift run --package-path "$PROJECT_DIR" --scratch-path "$BUILD_DIR" LectureTranscribeNative "$@"' "$LAUNCHER"
 lacks_fixed 'TRANSCRIBE_PREFER_SOURCE=0 TRANSCRIBE_PREFER_DEV_BINARY=0 exec' "$LAUNCHER"
-if [[ -f "Lecture Transcribe.app/Contents/MacOS/launcher" ]]; then
-  zsh -n "Lecture Transcribe.app/Contents/MacOS/launcher"
-  has_fixed 'BUNDLED_BINARY=' "Lecture Transcribe.app/Contents/MacOS/launcher"
-  has_fixed 'TRANSCRIBE_PREFER_SOURCE:-0' "Lecture Transcribe.app/Contents/MacOS/launcher"
-  has_fixed 'TRANSCRIBE_PREFER_DEV_BINARY:-0' "Lecture Transcribe.app/Contents/MacOS/launcher"
-  has_fixed 'exec "$BUNDLED_BINARY" "$@"' "Lecture Transcribe.app/Contents/MacOS/launcher"
+# The built app starts the Swift program directly, not a shell script, and ships only the pinned ffmpeg.
+bash -n build_macos_dmg.sh
+has_fixed '<string>$NATIVE_BINARY_NAME</string>' build_macos_dmg.sh
+lacks_fixed 'Contents/MacOS/launcher' build_macos_dmg.sh
+has_fixed '"$PROJECT_DIR/scripts/ensure_dev_media_tools.sh"' build_macos_dmg.sh
+lacks 'homebrew|brew install ffmpeg|command -v ffmpeg' build_macos_dmg.sh
+lacks 'homebrew|brew install ffmpeg|command -v ffmpeg' scripts/ensure_dev_media_tools.sh
+git ls-files --error-unmatch vendor >/dev/null 2>&1 && { echo "vendor/ffmpeg must not be tracked in git"; exit 1; }
+if [[ -d "Lecture Transcribe.app" ]]; then
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "Lecture Transcribe.app/Contents/Info.plist")" == "LectureTranscribeNative" ]]
+  [[ ! -e "Lecture Transcribe.app/Contents/MacOS/launcher" ]]
 fi
 
 echo "Regression checks passed."

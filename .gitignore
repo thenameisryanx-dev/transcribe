@@ -21,3 +21,5 @@ DerivedData/
 /chunks
 /converted_inputs
 /.venv
+# Pinned ffmpeg, downloaded and checked by scripts/ensure_dev_media_tools.sh
+/vendor/

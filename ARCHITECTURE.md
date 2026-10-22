@@ -22,7 +22,7 @@ The app has two halves: a native SwiftUI front end and a Python backend that doe
 - `Tests/LectureTranscribeNativeTests/`: Swift unit tests (`swift test`).
 - `Tests/python/`: Python backend tests (`unittest`), which make small test videos with `vendor/ffmpeg`.
 - `.github/workflows/regression.yml`: runs `scripts/regression_check.sh` on GitHub for every push and pull request.
-- `vendor/ffmpeg/<arch>/`: the `ffmpeg` and `ffprobe` binaries used for source runs and bundled into the app.
+- `vendor/ffmpeg/<arch>/`: the `ffmpeg` and `ffprobe` binaries used for source runs, the tests and the app. Not kept in git: `scripts/ensure_dev_media_tools.sh` downloads one pinned build per Mac architecture and checks it against its checksums, and nothing falls back to another ffmpeg (like Homebrew's).
 
 ## Main data flow
 1. User starts transcription in the SwiftUI pane.
@@ -37,6 +37,7 @@ The Tracks pane works the same way: `TrackEditorModel` calls the backend's `trac
 ## Key design decisions
 - SwiftUI remains thin; most run-state logic is centralized in `TranscribeViewModel`.
 - Cross-language boundary uses simple process execution plus JSON events (no sockets/services).
+- The installed app starts the Swift program directly (`CFBundleExecutable` is `LectureTranscribeNative`); `BackendClient` points the backend at the bundled Python, its packages and the work folder.
 - Backend script lookup supports both source runs and bundled app resources.
 - The OpenAI API key comes from the `OPENAI_API_KEY` environment variable or the macOS keychain.
 - Audio chunks are transcribed in parallel (default 4 concurrent requests, override with `TRANSCRIBE_MAX_PARALLEL`); transcripts are written only after every chunk succeeds.
