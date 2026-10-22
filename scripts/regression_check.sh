@@ -21,7 +21,7 @@ swift build --scratch-path "$BUILD_DIR" >/dev/null
 echo "[2/5] Running Swift unit tests..."
 # Quiet when the tests pass; on a failure, show which tests failed and why (without the linker's warnings).
 if ! SWIFT_TEST_OUTPUT="$(swift test --scratch-path "$BUILD_DIR" 2>&1)"; then
-  print -r -- "$SWIFT_TEST_OUTPUT" | grep -v 'ld: warning' | grep -vE '^\[[0-9]+/[0-9]+\]' | tail -150
+  print -r -- "$SWIFT_TEST_OUTPUT" | grep -E ': error: |^error: |failed \(|Executed [0-9]+ tests' | grep -v 'ld: warning' | tail -80
   exit 1
 fi
 
