@@ -32,6 +32,7 @@ Transcription is billed by OpenAI to your API key, per minute of audio. The mode
 
 - Transcripts and subtitles are saved to your Downloads folder by default. You can change the folder in the app.
 - Temporary audio chunks go in `~/Library/Caches/LectureTranscribe`.
+- If a run fails or you cancel it, the chunks that finished are saved there too. Run it again (or click **Re-run** in Runs) with the same settings and only the unfinished chunks are sent, so you aren't charged twice. Saved chunks are deleted once the run succeeds, or after 7 days.
 
 ## For developers
 

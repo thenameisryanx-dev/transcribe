@@ -140,6 +140,10 @@ DEFAULT_MAX_PARALLEL_REQUESTS = 4
 WORK_ROOT_DIR = Path(os.getenv("TRANSCRIBE_WORKDIR", ".")).expanduser()
 CHUNKS_ROOT_DIR = WORK_ROOT_DIR / "chunks"
 CONVERTED_ROOT_DIR = WORK_ROOT_DIR / "converted_inputs"
+# Finished chunks of runs that haven't succeeded yet, so running one again only sends the rest (see ChunkResults
+# in transcription_job.py). A successful run deletes the ones it used; any left longer than this are removed.
+RESULTS_ROOT_DIR = WORK_ROOT_DIR / "chunk_results"
+RESULTS_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 KEYRING_SERVICE = "lecture-transcribe"
 KEYRING_USERNAME = "openai_api_key"
 BUNDLED_FFMPEG_DIR_NAME = "ffmpeg_bin"

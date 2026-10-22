@@ -751,6 +751,15 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         if let chunkLength = entry.chunkSeconds.flatMap(ChunkLength.init(rawValue:)) {
             chunkLengthPreference = chunkLength
         }
+        // The same prompt settings too, so the backend can reuse chunks a failed or cancelled run saved.
+        // Set after audioFilePath, whose change can clear them. Speaker-label and subtitle runs sent none.
+        if !entry.diarize, entry.subtitles != true {
+            contextPrompt = entry.context ?? ""
+            keywordsText = KeywordList.displayText(entry.keywords ?? [])
+            if selectedTranscriptionModel.supportsConsistencyMode, let consistencyMode = entry.consistencyMode {
+                consistencyModeEnabled = consistencyMode
+            }
+        }
         selectedPane = .transcribe
         startTranscription()
     }
