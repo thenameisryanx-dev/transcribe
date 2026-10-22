@@ -7,7 +7,8 @@ set -euo pipefail
 #
 # To update ffmpeg, pick a release build for both Macs at https://ffmpeg.martin-riedl.de (Release builds), then
 # set BUILD and every checksum below. Each .zip has a published .sha256 next to it; the binary checksums are
-# `shasum -a 256` of the ffmpeg and ffprobe inside. Release notes link the matching FFmpeg source code.
+# `shasum -a 256` of the ffmpeg and ffprobe inside. Check the new build's license (`ffmpeg -L`) still matches
+# the README's credits; release notes link the matching FFmpeg source code and name its license.
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH="$(uname -m)"
@@ -15,18 +16,18 @@ VENDOR_DIR="$ROOT_DIR/vendor/ffmpeg/$ARCH"
 
 case "$ARCH" in
   arm64)
-    BUILD="arm64/1756401489_8.0"
-    FFMPEG_ZIP_SHA256="e7e0375f0b031ca0b013b7b7409500c3f6d10f1a0d4dc0c500774a304a60dc4f"
-    FFPROBE_ZIP_SHA256="f564c9a4e6514ee0b159e70fcd042b45493c3b47603b72a2ddbf7ee4fe9bfca1"
-    FFMPEG_SHA256="992c6457adb4f79c0ee51dd4fed002b236692c013bf355f91039ce822c130bdf"
-    FFPROBE_SHA256="18849ebcca51c0d0a97ed0baae6e56492506fbda9578cecc67ae13f3f0265a3a"
+    BUILD="arm64/1789931890_9.0.2"
+    FFMPEG_ZIP_SHA256="c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924"
+    FFPROBE_ZIP_SHA256="fcbe839537485eaee7a7a8bc5cbc0f90d53617e80943e8a5b2e31cb851197ea6"
+    FFMPEG_SHA256="2e11c6f90993cdb79fff84d3f90044d28316b310e75b3e030cfc9a54f2c9d384"
+    FFPROBE_SHA256="2738aa46a7f9acbc8ab09a6715554c90f7de603171ac403726765685df6a0059"
     ;;
   x86_64)
-    BUILD="amd64/1756407576_8.0"
-    FFMPEG_ZIP_SHA256="1cf942791d5524cc5e090ba6ecff7d2b03ffc916bddece9618a5f6d91afdb0df"
-    FFPROBE_ZIP_SHA256="32a1989f2c9b06254d919df0465ae414a4eb7f525fbb02d1add24818cad4d7b4"
-    FFMPEG_SHA256="707b395f830156cc4ef367e0e677bd031b3e854e179b1aeea0ecc66417aaa0fd"
-    FFPROBE_SHA256="34f7129500bd1916ee17ea78d58ca4ebc46f02a3e0fd84b64b689048c295dc22"
+    BUILD="amd64/1789931006_9.0.2"
+    FFMPEG_ZIP_SHA256="7c6b4125b191cbf773832dc51f424cf2b6bb7da43007d1e066f95909e47cacd4"
+    FFPROBE_ZIP_SHA256="2322438ed2f6319a691291b247d09c69dcaa3a982460d1f269a7e1af335cfdfd"
+    FFMPEG_SHA256="b25689cf2211c0582d317e849912769a1f1c93904fe102c485b5364a425633d1"
+    FFPROBE_SHA256="b5df9964b0c2048318fafedcd4e3bbafbc561033cee77de8da1840685d8a9d0d"
     ;;
   *)
     echo "No pinned ffmpeg build for this Mac's architecture ($ARCH)." >&2

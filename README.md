@@ -42,4 +42,4 @@ Transcription is billed by OpenAI to your API key, per minute of audio. The mode
 
 ## Credits
 
-The app bundles [FFmpeg](https://ffmpeg.org), licensed under the [GNU GPL v2 or later](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html). Each release's notes link the matching FFmpeg source code.
+The app bundles [FFmpeg](https://ffmpeg.org), licensed under the [GNU GPL v3 or later](https://www.gnu.org/licenses/gpl-3.0.html). Each release's notes link the matching FFmpeg source code.
