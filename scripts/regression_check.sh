@@ -19,7 +19,11 @@ swift build --scratch-path "$BUILD_DIR" >/dev/null
 # Core features (sidebar panes, run history, default output folder, model options, clear draft)
 # are checked by Tests/LectureTranscribeNativeTests/CoreFeaturesTests.swift.
 echo "[2/5] Running Swift unit tests..."
-swift test --scratch-path "$BUILD_DIR" >/dev/null
+# Quiet when the tests pass; on a failure, show which tests failed and why (without the linker's warnings).
+if ! SWIFT_TEST_OUTPUT="$(swift test --scratch-path "$BUILD_DIR" 2>&1)"; then
+  print -r -- "$SWIFT_TEST_OUTPUT" | grep -v 'ld: warning' | grep -vE '^\[[0-9]+/[0-9]+\]' | tail -150
+  exit 1
+fi
 
 # Backend behavior (model choice, speaker-label rules, media tool architecture, track editing) is checked by
 # Tests/python/test_backend.py, using the repo-local .venv and the pinned ffmpeg in vendor/ffmpeg (downloaded and
