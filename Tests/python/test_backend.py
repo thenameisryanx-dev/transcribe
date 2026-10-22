@@ -407,6 +407,41 @@ class TrackEditingTests(TempDirTestCase):
                 saved = self.save(named, "renamed", [self.track("audio", 1, "eng", "", True)])
                 self.assertEqual(saved[0]["title"], "")
 
+    def subtitle_tags(self, video: Path) -> list[str]:
+        return [t["codec_tag"] for t in lt.list_media_tracks(video) if t["kind"] == "subtitle"]
+
+    def test_subtitles_in_mp4_and_mov_are_tagged_for_apple_players(self) -> None:
+        # Apple's players list a mov_text track tagged "text" (ffmpeg's default in a .mov) but show nothing.
+        for suffix in (".mp4", ".mov"):
+            with self.subTest(suffix):
+                out = self.dir / f"tagged{suffix}"
+                lt.save_edited_tracks(self.videos[suffix], out, [
+                    self.track("audio", 1, "eng", default=True),
+                    self.track("subtitle", 3, "eng"),
+                    self.track("subtitle", str(self.srt), "fra", default=True),
+                ])
+                self.assertEqual(self.subtitle_tags(out), ["tx3g", "tx3g"])
+
+    def test_blank_subtitles_saved_by_older_versions_are_fixed(self) -> None:
+        old = self.dir / "old.mov"
+        ffmpeg("-i", str(self.videos[".mov"]), "-i", str(self.srt), "-map", "0:v", "-map", "0:a", "-map", "1:0",
+               "-c", "copy", "-c:s", "mov_text", str(old))
+        self.assertEqual(self.subtitle_tags(old), ["text"])
+        subtitle = next(t["index"] for t in lt.list_media_tracks(old) if t["kind"] == "subtitle")
+        fixed = self.dir / "fixed.mov"
+        lt.save_edited_tracks(old, fixed, [self.track("audio", 1, "eng", default=True), self.track("subtitle", subtitle, "fra", default=True)])
+        self.assertEqual(self.subtitle_tags(fixed), ["tx3g"])
+        back = self.dir / "back.srt"
+        ffmpeg("-i", str(fixed), "-map", "0:s:0", str(back))
+        self.assertIn("Bonjour", back.read_text(encoding="utf-8"))
+
+    def test_subtitled_copies_are_tagged_for_apple_players(self) -> None:
+        for suffix in (".mp4", ".mov"):
+            with self.subTest(suffix):
+                out = self.dir / f"subtitled{suffix}"
+                lt.embed_subtitles_copy(self.videos[suffix], self.srt, out, language="fr")
+                self.assertEqual(self.subtitle_tags(out), ["tx3g"])
+
     def test_generic_handler_names_are_not_titles(self) -> None:
         video = self.dir / "phone.mov"
         ffmpeg(
