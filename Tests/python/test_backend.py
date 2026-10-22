@@ -281,6 +281,12 @@ class GoldenOutputTests(TempDirTestCase):
             with self.subTest(function=want["function"], input=want["input"]):
                 self.assertEqual(got, want)
 
+    def test_requests_to_openai_match_the_reference(self) -> None:
+        audio = self.dir / "part_000.m4a"
+        golden.make_recording(audio)
+        expected = json.loads(golden.OPENAI_REQUESTS_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(golden.openai_request_cases(audio), expected)
+
     def test_whole_runs_match_the_reference(self) -> None:
         actual = golden.run_outputs(self.dir)
         self.assertEqual(sorted(actual), sorted(p.name for p in golden.RUNS_DIR.iterdir()))

@@ -1,0 +1,225 @@
+[
+  {
+    "input": {
+      "model": "gpt-transcribe",
+      "response_format": "json",
+      "languages": [
+        "en",
+        "es"
+      ],
+      "prompt": "Organic chemistry",
+      "keywords": [
+        "SN2",
+        "Grignard reagent"
+      ]
+    },
+    "request": {
+      "method": "POST",
+      "path": "/v1/audio/transcriptions",
+      "fields": [
+        [
+          "model",
+          "gpt-transcribe"
+        ],
+        [
+          "prompt",
+          "Organic chemistry"
+        ],
+        [
+          "response_format",
+          "json"
+        ],
+        [
+          "languages[]",
+          "en"
+        ],
+        [
+          "languages[]",
+          "es"
+        ],
+        [
+          "keywords[]",
+          "SN2"
+        ],
+        [
+          "keywords[]",
+          "Grignard reagent"
+        ],
+        [
+          "file",
+          {
+            "filename": "part_000.m4a",
+            "content_type": "audio/mp4a-latm"
+          }
+        ]
+      ]
+    }
+  },
+  {
+    "input": {
+      "model": "gpt-transcribe",
+      "response_format": "json"
+    },
+    "request": {
+      "method": "POST",
+      "path": "/v1/audio/transcriptions",
+      "fields": [
+        [
+          "model",
+          "gpt-transcribe"
+        ],
+        [
+          "response_format",
+          "json"
+        ],
+        [
+          "file",
+          {
+            "filename": "part_000.m4a",
+            "content_type": "audio/mp4a-latm"
+          }
+        ]
+      ]
+    }
+  },
+  {
+    "input": {
+      "model": "gpt-4o-transcribe",
+      "response_format": "json",
+      "languages": [
+        "en"
+      ],
+      "prompt": "Organic chemistry",
+      "keywords": [
+        "ignored by this model"
+      ]
+    },
+    "request": {
+      "method": "POST",
+      "path": "/v1/audio/transcriptions",
+      "fields": [
+        [
+          "model",
+          "gpt-4o-transcribe"
+        ],
+        [
+          "language",
+          "en"
+        ],
+        [
+          "prompt",
+          "Organic chemistry"
+        ],
+        [
+          "response_format",
+          "json"
+        ],
+        [
+          "file",
+          {
+            "filename": "part_000.m4a",
+            "content_type": "audio/mp4a-latm"
+          }
+        ]
+      ]
+    }
+  },
+  {
+    "input": {
+      "model": "gpt-4o-transcribe",
+      "response_format": "json",
+      "languages": [
+        "en",
+        "es"
+      ]
+    },
+    "request": {
+      "method": "POST",
+      "path": "/v1/audio/transcriptions",
+      "fields": [
+        [
+          "model",
+          "gpt-4o-transcribe"
+        ],
+        [
+          "response_format",
+          "json"
+        ],
+        [
+          "file",
+          {
+            "filename": "part_000.m4a",
+            "content_type": "audio/mp4a-latm"
+          }
+        ]
+      ]
+    }
+  },
+  {
+    "input": {
+      "model": "gpt-4o-mini-transcribe",
+      "response_format": "json"
+    },
+    "request": {
+      "method": "POST",
+      "path": "/v1/audio/transcriptions",
+      "fields": [
+        [
+          "model",
+          "gpt-4o-mini-transcribe"
+        ],
+        [
+          "response_format",
+          "json"
+        ],
+        [
+          "file",
+          {
+            "filename": "part_000.m4a",
+            "content_type": "audio/mp4a-latm"
+          }
+        ]
+      ]
+    }
+  },
+  {
+    "input": {
+      "model": "gpt-4o-transcribe-diarize",
+      "response_format": "diarized_json",
+      "chunking_strategy": "auto",
+      "languages": [
+        "en"
+      ],
+      "prompt": "not accepted by this model"
+    },
+    "request": {
+      "method": "POST",
+      "path": "/v1/audio/transcriptions",
+      "fields": [
+        [
+          "model",
+          "gpt-4o-transcribe-diarize"
+        ],
+        [
+          "chunking_strategy",
+          "auto"
+        ],
+        [
+          "language",
+          "en"
+        ],
+        [
+          "response_format",
+          "diarized_json"
+        ],
+        [
+          "file",
+          {
+            "filename": "part_000.m4a",
+            "content_type": "audio/mp4a-latm"
+          }
+        ]
+      ]
+    }
+  }
+]

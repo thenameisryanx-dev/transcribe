@@ -9,6 +9,8 @@ when the backend's output no longer matches. After an intended change, regenerat
 
 - text_functions.json: inputs and outputs of the text-processing functions (sentences, echo removal, repeat
   detection, subtitle wrapping and timing, transcript headers, keyword and language parsing).
+- openai_requests.json: the form fields the backend sends to OpenAI's transcription endpoint for each kind of
+  request, as the `openai` package encodes them. A client written another way must send the same fields.
 - runs/*: whole runs on a generated recording against a fake OpenAI (see FakeOpenAI below), with the
   transcript or subtitle file each one writes. These also record where the chunks are cut.
 """
@@ -28,6 +30,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_DIR = ROOT / "Tests" / "golden"
 TEXT_FUNCTIONS_FILE = GOLDEN_DIR / "text_functions.json"
+OPENAI_REQUESTS_FILE = GOLDEN_DIR / "openai_requests.json"
 RUNS_DIR = GOLDEN_DIR / "runs"
 
 if __name__ == "__main__":
@@ -154,6 +157,52 @@ def text_function_cases() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------------------------------------------
+# Requests to OpenAI
+
+OPENAI_REQUEST_CASES = [
+    {"model": lt.MODEL_GPT_TRANSCRIBE, "response_format": "json", "languages": ["en", "es"],
+     "prompt": "Organic chemistry", "keywords": ["SN2", "Grignard reagent"]},
+    {"model": lt.MODEL_GPT_TRANSCRIBE, "response_format": "json"},
+    {"model": lt.MODEL_NORMAL, "response_format": "json", "languages": ["en"], "prompt": "Organic chemistry",
+     "keywords": ["ignored by this model"]},
+    {"model": lt.MODEL_NORMAL, "response_format": "json", "languages": ["en", "es"]},
+    {"model": lt.MODEL_MINI, "response_format": "json"},
+    {"model": lt.MODEL_DIARIZE, "response_format": "diarized_json", "chunking_strategy": "auto", "languages": ["en"],
+     "prompt": "not accepted by this model"},
+]
+
+
+def openai_request_cases(audio: Path) -> list[dict]:
+    """Each case: the arguments to create_transcription_with_retry, and the form fields it sends, in order."""
+    import httpx
+    from openai import OpenAI
+
+    sent: list[list] = []
+
+    def handler(request: "httpx.Request") -> "httpx.Response":
+        boundary = request.headers["content-type"].split("boundary=")[1].encode()
+        fields = []
+        for part in request.read().split(b"--" + boundary)[1:-1]:
+            head, _, value = part.strip(b"\r\n").partition(b"\r\n\r\n")
+            head = head.decode()
+            name = head.split('name="')[1].split('"')[0]
+            if 'filename="' in head:
+                content_type = next(line.split(":", 1)[1].strip() for line in head.split("\r\n") if line.lower().startswith("content-type"))
+                fields.append([name, {"filename": head.split('filename="')[1].split('"')[0], "content_type": content_type}])
+            else:
+                fields.append([name, value.decode()])
+        sent.append({"method": request.method, "path": request.url.path, "fields": fields})
+        return httpx.Response(200, json={"text": "", "segments": []})
+
+    client = OpenAI(api_key="sk-test", base_url="http://openai.test/v1", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    cases = []
+    for arguments in OPENAI_REQUEST_CASES:
+        lt.create_transcription_with_retry(client, audio, **arguments)
+        cases.append({"input": arguments, "request": sent.pop()})
+    return cases
+
+
+# ---------------------------------------------------------------------------------------------------------------
 # Whole runs
 
 
@@ -233,6 +282,11 @@ def run_outputs(workdir: Path) -> dict[str, str]:
 def update() -> None:
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     TEXT_FUNCTIONS_FILE.write_text(json.dumps(text_function_cases(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    with tempfile.TemporaryDirectory() as workdir:
+        audio = Path(workdir) / "part_000.m4a"
+        make_recording(audio)
+        requests = openai_request_cases(audio)
+    OPENAI_REQUESTS_FILE.write_text(json.dumps(requests, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     for old in RUNS_DIR.iterdir():
         old.unlink()
