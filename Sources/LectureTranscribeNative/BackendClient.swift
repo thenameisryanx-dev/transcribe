@@ -241,14 +241,14 @@ final class BackendClient: @unchecked Sendable {
         try await runStreamCommand(args: args, onEvent: onEvent)
     }
 
-    /// Runs a transcription. Plain transcripts, speaker labels and subtitles run in Swift (`TranscriptJob`); .qta
-    /// files still run in the Python backend. `TRANSCRIBE_PYTHON_RUNS=1` sends every run to the backend.
+    /// Runs a transcription in Swift (`TranscriptJob`). `TRANSCRIBE_PYTHON_RUNS=1` sends it to the Python backend
+    /// instead, to compare the two.
     func startTranscription(
         _ request: RunRequest,
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
     ) async throws {
         let pythonOnly = ProcessInfo.processInfo.environment["TRANSCRIBE_PYTHON_RUNS"] == "1"
-        if TranscriptJob.handles(request) && !pythonOnly {
+        if !pythonOnly {
             try await runInSwift(request, onEvent: onEvent)
         } else {
             try await runStreamCommand(args: request.backendArguments, onEvent: onEvent)

@@ -346,16 +346,46 @@ final class TranscriptJobTests: XCTestCase {
         XCTAssertFalse(events.all.contains { if case .subtitledCopy = $0 { return true } else { return false } })
     }
 
-    func testOnlyQTAFilesStillRunInTheBackend() throws {
-        var request = try referenceRequest("transcript_gpt4o")
-        XCTAssertTrue(TranscriptJob.handles(request))
-        request.subtitles = true
-        XCTAssertTrue(TranscriptJob.handles(request))
-        request.subtitles = false
-        request.diarize = true
-        XCTAssertTrue(TranscriptJob.handles(request))
-        request.inputPath = "/tmp/recording.qta"
-        XCTAssertFalse(TranscriptJob.handles(request))
+    /// The reference recording as the second audio track of a .qta file, after a steady tone with no pauses.
+    private func makeQTA() throws -> URL {
+        let tools = try MediaTools.located()
+        let qta = directory.appendingPathComponent("lecture.qta")
+        let result = try tools.run(tools.ffmpeg, [
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "sine=frequency=500:duration=150",
+            "-i", recording.path,
+            "-map", "0:a", "-map", "1:a", "-c:a", "aac", "-f", "mov", qta.path,
+        ])
+        XCTAssertEqual(result.status, 0, result.errors)
+        return qta
+    }
+
+    func testQTAFilesAreTranscribedFromTheirChosenTrack() async throws {
+        let qta = try makeQTA()
+        var request = try referenceRequest("transcript_gpt4o", input: qta)
+        request.audioTrack = 1
+        let output = try await job(request).run()
+        let text = try String(contentsOf: output, encoding: .utf8)
+        let lines = text.components(separatedBy: "\n")
+        XCTAssertEqual(lines[0], "INPUT: \(qta.path)")
+        let converted = directory.appendingPathComponent("work/converted_inputs").path
+        XCTAssertTrue(lines[1].hasPrefix("WORKING_INPUT: \(converted)/lecture_") && lines[1].hasSuffix(".m4a"), lines[1])
+        // The chunks are cut at the recording's pauses, so the rest matches its reference run.
+        let expected = try reference("transcript_gpt4o").components(separatedBy: "\n")
+        XCTAssertEqual(Array(lines.dropFirst(2)), Array(expected.dropFirst(2)))
+        XCTAssertTrue(logs().contains("Audio track: 2 of 2 (no language tag)."), logs().joined(separator: "\n"))
+        XCTAssertTrue(logs().contains("Detected .qta input. Converting to .m4a..."))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: converted), [], "The converted copy is removed")
+    }
+
+    func testQTASubtitlesAreNamedAfterTheQTAFile() async throws {
+        let qta = try makeQTA()
+        var request = try referenceRequest("subtitles", input: qta, embedSubtitles: true)
+        request.audioTrack = 1
+        let output = try await job(request).run()
+        XCTAssertEqual(output.lastPathComponent, "lecture.srt")
+        try assertMatchesReference(output, "subtitles")
+        XCTAssertTrue(logs().contains("Subtitles can only be built into .m4v, .mkv, .mov, .mp4 videos, so no copy of this .qta was saved."), logs().joined(separator: "\n"))
     }
 }
 

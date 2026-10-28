@@ -48,11 +48,6 @@ struct TranscriptJob: Sendable {
     var diarizeSingleRequestSeconds = TranscriptJob.defaultDiarizeSingleRequestSeconds
     var diarizeChunkSeconds = TranscriptJob.defaultDiarizeChunkSeconds
 
-    /// Runs Swift does: everything but .qta files, which still go to the backend.
-    static func handles(_ request: RunRequest) -> Bool {
-        URL(fileURLWithPath: request.inputPath).pathExtension.lowercased() != "qta"
-    }
-
     static func maxParallel(environment: [String: String]) -> Int {
         max(1, Int(environment["TRANSCRIBE_MAX_PARALLEL"]?.trimmingCharacters(in: .whitespaces) ?? "") ?? defaultMaxParallel)
     }
@@ -62,7 +57,10 @@ struct TranscriptJob: Sendable {
     /// What every kind of run works from.
     private struct Setup {
         let input: URL
-        let audioTrack: Int
+        /// The audio actually transcribed: the input, or an .m4a copy of a .qta file's chosen track.
+        var workingInput: URL
+        /// The track of `workingInput` to transcribe.
+        var audioTrack: Int
         let languages: [String]?
         let runID: String
         /// The input's name made safe for file names.
@@ -114,6 +112,7 @@ struct TranscriptJob: Sendable {
         let outputDirectory = URL(fileURLWithPath: request.outputDirectory)
         let setup = Setup(
             input: input,
+            workingInput: input,
             audioTrack: audioTrack,
             languages: languages,
             runID: formatter.string(from: now()),
@@ -133,9 +132,34 @@ struct TranscriptJob: Sendable {
         return try await writeTranscript(setup)
     }
 
+    /// Where a .qta file's audio is copied to for the run; nil for other files.
+    private func convertedInput(_ setup: Setup) -> URL? {
+        guard setup.input.pathExtension.lowercased() == "qta" else { return nil }
+        return workDirectory.appendingPathComponent("converted_inputs/\(setup.stem)_\(setup.runID).m4a")
+    }
+
+    /// The audio to transcribe: a .qta file's chosen track copied out to an .m4a (holding only that track), or
+    /// the input itself. `body` gets it; the copy is removed afterwards.
+    private func withWorkingInput(_ setup: Setup, _ body: (Setup) async throws -> URL) async throws -> URL {
+        guard let converted = convertedInput(setup) else {
+            try await logChannels(setup)
+            return try await body(setup)
+        }
+        defer { try? FileManager.default.removeItem(at: converted) }
+        log("Detected .qta input. Converting to .m4a...")
+        emit(.status("Converting .qta input..."))
+        try await offload { try media.convertQTA(setup.input, to: converted, audioTrack: setup.audioTrack) }
+        var working = setup
+        working.workingInput = converted
+        working.audioTrack = 0
+        log("Converted .qta to: \(converted.lastPathComponent)")
+        try await logChannels(working)
+        return try await body(working)
+    }
+
     /// Surround sources keep dialogue in the center channel; splitting mixes them down to mono.
     private func logChannels(_ setup: Setup) async throws {
-        if let channels = try await offload({ media.channelCount(setup.input, audioTrack: setup.audioTrack) }), channels > MediaTools.maxCopyChannels {
+        if let channels = try await offload({ media.channelCount(setup.workingInput, audioTrack: setup.audioTrack) }), channels > MediaTools.maxCopyChannels {
             log("Source audio has \(channels) channels. Mixing down to mono for transcription.")
         }
     }
@@ -155,8 +179,19 @@ struct TranscriptJob: Sendable {
 
         try FileManager.default.createDirectory(at: setup.outputDirectory, withIntermediateDirectories: true)
         let output = setup.outputDirectory.appendingPathComponent("\(setup.stem)_\(setup.runID).txt")
-        try await logChannels(setup)
+        return try await withWorkingInput(setup) { setup in
+            try await writeTranscript(setup, to: output, model: model, context: context, carryContext: carryContext, keywords: keywords)
+        }
+    }
 
+    private func writeTranscript(
+        _ setup: Setup,
+        to output: URL,
+        model: String,
+        context: String?,
+        carryContext: Bool,
+        keywords: [String]
+    ) async throws -> URL {
         let chunkSeconds = request.chunkSeconds ?? Self.defaultChunkSeconds
         log("Chunk size: \(chunkSeconds / 60) minute(s) per request (cut at the nearest pause).")
         let chunksDirectory = workDirectory.appendingPathComponent("chunks/\(setup.stem)_\(setup.runID)")
@@ -189,7 +224,7 @@ struct TranscriptJob: Sendable {
         warnings.forEach { emit(.warning($0)) }
         var sections = [TranscriptText.header(
             inputPath: setup.input.path,
-            workingInputPath: setup.input.path,
+            workingInputPath: setup.workingInput.path,
             model: model,
             localChunkSeconds: chunkSeconds,
             languages: setup.languages ?? [],
@@ -239,9 +274,13 @@ struct TranscriptJob: Sendable {
     private func writeSpeakerLabels(_ setup: Setup) async throws -> URL {
         try FileManager.default.createDirectory(at: setup.outputDirectory, withIntermediateDirectories: true)
         let output = setup.outputDirectory.appendingPathComponent("\(setup.stem)_\(setup.runID)_diarize.txt")
-        try await logChannels(setup)
+        return try await withWorkingInput(setup) { try await writeSpeakerLabels($0, to: output) }
+    }
+
+    private func writeSpeakerLabels(_ setup: Setup, to output: URL) async throws -> URL {
         let input = setup.input
-        let duration = try await offload { media.duration(input) }
+        let working = setup.workingInput
+        let duration = try await offload { media.duration(working) }
 
         if 0 < duration && duration <= diarizeSingleRequestSeconds {
             emit(.status("Preparing audio..."))
@@ -262,7 +301,7 @@ struct TranscriptJob: Sendable {
             }
             let header = TranscriptText.header(
                 inputPath: input.path,
-                workingInputPath: input.path,
+                workingInputPath: working.path,
                 model: Self.diarizeModel,
                 responseFormat: "diarized_json",
                 chunkingStrategy: "auto",
@@ -292,7 +331,7 @@ struct TranscriptJob: Sendable {
         }
         let header = TranscriptText.header(
             inputPath: input.path,
-            workingInputPath: input.path,
+            workingInputPath: working.path,
             model: Self.diarizeModel,
             responseFormat: "diarized_json",
             chunkingStrategy: "auto",
@@ -317,8 +356,10 @@ struct TranscriptJob: Sendable {
         if FileManager.default.fileExists(atPath: output.path) {
             output = setup.outputDirectory.appendingPathComponent("\(name).\(setup.runID).srt")
         }
-        try await logChannels(setup)
+        return try await withWorkingInput(setup) { try await writeSubtitles($0, to: output) }
+    }
 
+    private func writeSubtitles(_ setup: Setup, to output: URL) async throws -> URL {
         emit(.status("Preparing audio chunks..."))
         let chunks = try await diarizeInChunks(
             setup,
@@ -443,7 +484,7 @@ struct TranscriptJob: Sendable {
     private func split(_ setup: Setup, into directory: URL, chunkSeconds: Int) async throws -> [URL] {
         let emit = self.emit
         return try await offload {
-            try media.split(setup.input, into: directory, chunkSeconds: chunkSeconds, audioTrack: setup.audioTrack) {
+            try media.split(setup.workingInput, into: directory, chunkSeconds: chunkSeconds, audioTrack: setup.audioTrack) {
                 emit(.progress(Self.prepareProgress * $0))
             }
         }

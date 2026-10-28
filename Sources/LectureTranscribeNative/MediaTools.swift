@@ -373,6 +373,42 @@ final class MediaTools: @unchecked Sendable {
         return parts
     }
 
+    /// Copies `audioTrack` of a .qta file (a QuickTime container) to `output`, an .m4a holding only that track
+    /// (`convert_qta_to_m4a_copy`). The audio is copied as is to avoid quality loss, or re-encoded to AAC when it
+    /// can't be copied.
+    func convertQTA(_ url: URL, to output: URL, audioTrack: Int = 0) throws {
+        try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: output)
+        let input = ["-nostdin", "-hide_banner", "-loglevel", "error", "-f", "mov", "-i", url.path, "-vn", "-map", "0:a:\(audioTrack)"]
+        let copied: Bool
+        do {
+            copied = try run(ffmpeg, input + ["-c:a", "copy", output.path]).status == 0
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            copied = false
+        }
+        if !copied {
+            try? FileManager.default.removeItem(at: output)
+            let result: (status: Int32, output: String, errors: String)
+            do {
+                result = try run(ffmpeg, input + ["-c:a", "aac", "-b:a", Self.audioBitrate, output.path])
+            } catch is Failure {
+                try? FileManager.default.removeItem(at: output)
+                // `run` stops a tool that takes too long with a Failure.
+                throw Failure("Timed out converting .qta to .m4a. Please verify the file opens normally in QuickTime.")
+            }
+            guard result.status == 0 else {
+                try? FileManager.default.removeItem(at: output)
+                let detail = result.errors.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").suffix(3).joined(separator: " ")
+                throw Failure("Failed to convert .qta to .m4a\(detail.isEmpty ? "." : ": \(detail)")")
+            }
+        }
+        guard ((try? output.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0 else {
+            throw Failure("Failed to convert .qta to .m4a.")
+        }
+    }
+
     /// A re-encoded copy of a chunk OpenAI rejected as unreadable (`repair_audio_for_api`).
     func repairedForAPI(_ url: URL) throws -> URL {
         let repaired = url.deletingLastPathComponent().appendingPathComponent(url.deletingPathExtension().lastPathComponent + "_repaired.m4a")

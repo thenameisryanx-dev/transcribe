@@ -52,4 +52,26 @@ final class MediaToolsTests: XCTestCase {
         XCTAssertEqual(parts.map(\.lastPathComponent), ["part_000.m4a", "part_001.m4a"])
         XCTAssertEqual(tools.duration(parts[0]), 52.3, accuracy: 0.3)
     }
+
+    /// AAC in a .qta is copied as is; audio an .m4a can't hold (uncompressed PCM) is re-encoded to AAC.
+    func testQTAAudioIsCopiedOrReencoded() throws {
+        let tools = try MediaTools.located()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for codec in ["aac", "pcm_s16le"] {
+            let qta = directory.appendingPathComponent("\(codec).qta")
+            let made = try tools.run(tools.ffmpeg, [
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "sine=duration=2", "-f", "lavfi", "-i", "sine=frequency=660:duration=3",
+                "-map", "0:a", "-map", "1:a", "-c:a", codec, "-f", "mov", qta.path,
+            ])
+            XCTAssertEqual(made.status, 0, made.errors)
+            let output = directory.appendingPathComponent("converted/\(codec).m4a")
+            try tools.convertQTA(qta, to: output, audioTrack: 1)
+            XCTAssertEqual(tools.audioTracks(output).count, 1, codec)
+            XCTAssertEqual(tools.codecName(output), "aac", codec)
+            XCTAssertEqual(tools.duration(output), 3, accuracy: 0.1, "The chosen (second) track, \(codec)")
+        }
+    }
 }
