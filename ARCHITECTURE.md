@@ -1,13 +1,13 @@
 # Architecture
 
-The app has two halves: a native SwiftUI front end and a Python backend that does the audio work and talks to OpenAI. The Swift app runs the Python backend as a separate process for each task. The backend is moving into Swift one piece at a time: the API key and every transcription run (plain transcripts, speaker labels, subtitles, .qta files) already run in Swift; listing a file's audio tracks and the Tracks pane still use the backend.
+The app is a native SwiftUI program that does the audio work (through the bundled ffmpeg) and talks to OpenAI itself. It started with a Python backend, which has been moved into Swift one piece at a time and now does nothing the app needs: the API key, every transcription run (plain transcripts, speaker labels, subtitles, .qta files), listing a file's tracks and the Tracks pane all run in Swift. The backend is still bundled, and `TRANSCRIBE_PYTHON_RUNS=1` sends transcription runs to it to compare the two, until it's removed.
 
 ## Module overview
 - `Sources/LectureTranscribeNative/` (SwiftUI app)
   - App entry point and window (`LectureTranscribeNativeApp.swift`)
   - Sidebar and pane navigation: Transcribe, Tracks, Runs, Settings (`RootView.swift`)
   - Transcribe pane (`TranscribePaneView.swift`)
-  - Tracks pane and its state (`TracksPaneView.swift`, `TrackEditor.swift`)
+  - Tracks pane and its state (`TracksPaneView.swift`, `TrackEditor.swift`); listing and saving a video's tracks (`TrackFiles.swift`)
   - Runs pane: run history list and details (`RunsPaneView.swift`)
   - UI state and run orchestration (`TranscribeViewModel.swift`)
   - The Transcribe pane's option types: models and their rules, chunk lengths, languages, audio tracks, keywords (`TranscriptionOptions.swift`)
@@ -41,7 +41,7 @@ The app has two halves: a native SwiftUI front end and a Python backend that doe
 5. Views update reactively from published state (status text, progress, logs, output location).
 6. The finished run is recorded in history and shown in the Runs pane.
 
-The Tracks pane works the same way: `TrackEditorModel` calls the backend's `tracks` command to list a video's tracks and `save-tracks` to write the edited video.
+The Tracks pane works the same way: `TrackEditorModel` asks `BackendClient` to list a video's tracks and to save the edited video, which `MediaTools` does in Swift (`TrackFiles.swift`, ported from the backend's `tracks` and `save-tracks`). The new file is written under a temporary name and moved into place once complete, so a failed or cancelled save leaves the video as it was.
 
 ## Key design decisions
 - SwiftUI remains thin; most run-state logic is centralized in `TranscribeViewModel`.

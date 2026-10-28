@@ -280,12 +280,20 @@ final class MediaTools: @unchecked Sendable {
 
     // MARK: - Splitting
 
-    /// Reads the lines of `-progress pipe:1`, passing the share of the input processed so far.
-    private static func progressReader(totalSeconds: Double, _ onProgress: @escaping (Double) -> Void) -> (String) -> Void {
-        { line in
+    /// Reads the lines of `-progress pipe:1`, passing the share of the input processed so far. ffmpeg reports no
+    /// position when it copies an attachment (a font or cover art); then, if `totalBytes` (the expected output
+    /// size) is given, the share of it written so far is used.
+    static func progressReader(totalSeconds: Double, totalBytes: Int? = nil, _ onProgress: @escaping (Double) -> Void) -> (String) -> Void {
+        var hasPosition = false
+        return { line in
             // out_time_us is the position reached in the input; it keeps counting across segments.
-            guard totalSeconds > 0, line.hasPrefix("out_time_us="), let micros = Int(line.dropFirst("out_time_us=".count)) else { return }
-            onProgress(min(max(Double(micros) / 1_000_000 / totalSeconds, 0), 1))
+            if totalSeconds > 0, line.hasPrefix("out_time_us="), let micros = Int(line.dropFirst("out_time_us=".count)) {
+                hasPosition = true
+                onProgress(min(max(Double(micros) / 1_000_000 / totalSeconds, 0), 1))
+            } else if let totalBytes, totalBytes > 0, !hasPosition, line.hasPrefix("total_size="),
+                      let written = Int(line.dropFirst("total_size=".count)) {
+                onProgress(min(max(Double(written) / Double(totalBytes), 0), 1))
+            }
         }
     }
 

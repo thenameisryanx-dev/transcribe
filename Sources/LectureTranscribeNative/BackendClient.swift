@@ -15,14 +15,11 @@ enum BackendStreamEvent: Sendable {
 
 final class BackendClient: @unchecked Sendable {
     private enum BackendError: Error, LocalizedError {
-        case invalidResponse(String)
         case commandFailed(String)
         case backendScriptNotFound(String)
 
         var errorDescription: String? {
             switch self {
-            case let .invalidResponse(message):
-                return message
             case let .commandFailed(message):
                 return message
             case let .backendScriptNotFound(message):
@@ -37,6 +34,8 @@ final class BackendClient: @unchecked Sendable {
         .deletingLastPathComponent() // Sources
     private let activeProcessLock = NSLock()
     private var activeProcess: Process?
+    /// The ffmpeg tools of a track save in progress, so it can be cancelled.
+    private var activeMedia: MediaTools?
     /// The OpenAI API key; each run's Python process gets it in `OPENAI_API_KEY`.
     let apiKeys: APIKeyStore
     private let openAI: OpenAIClient
@@ -200,33 +199,27 @@ final class BackendClient: @unchecked Sendable {
         }
     }
 
+    /// The file's audio tracks in order (the backend's `audio-tracks`); empty when ffprobe can't read it.
     func fetchAudioTracks(inputPath: String) async throws -> [AudioTrack] {
-        let output = try runSimpleCommand(["audio-tracks", "--input", inputPath])
-        if let error = output["error"] as? String {
-            throw BackendError.commandFailed(error)
+        guard fileManager.fileExists(atPath: inputPath) else {
+            throw BackendError.commandFailed("Input file not found: \(inputPath)")
         }
-        guard let tracks = output["tracks"] else {
-            throw BackendError.invalidResponse("Could not parse audio track list.")
-        }
-        let data = try JSONSerialization.data(withJSONObject: tracks)
-        return try JSONDecoder().decode([AudioTrack].self, from: data)
+        let media = try MediaTools.located()
+        return await Task.detached(priority: .userInitiated) { media.audioTracks(URL(fileURLWithPath: inputPath)) }.value
     }
 
-    /// Every track in a video, in file order.
+    /// Every track in a video, in file order (the backend's `tracks`).
     func fetchMediaTracks(inputPath: String) async throws -> [MediaTrack] {
-        let output = try runSimpleCommand(["tracks", "--input", inputPath])
-        if let error = output["error"] as? String {
-            throw BackendError.commandFailed(error)
+        guard fileManager.fileExists(atPath: inputPath) else {
+            throw BackendError.commandFailed("Input file not found: \(inputPath)")
         }
-        guard let tracks = output["tracks"] else {
-            throw BackendError.invalidResponse("Could not parse the track list.")
-        }
-        let data = try JSONSerialization.data(withJSONObject: tracks)
-        return try JSONDecoder().decode([MediaTrack].self, from: data)
+        let media = try MediaTools.located()
+        return try await Task.detached(priority: .userInitiated) { try media.mediaTracks(URL(fileURLWithPath: inputPath)) }.value
     }
 
-    /// Saves a video with the tracks in `planJSON` (see the backend's `save-tracks`), into the video itself
-    /// when `replaceOriginal` is set. Cancel with `cancelActiveRun()`.
+    /// Saves a video with the tracks in `planJSON` (see `TrackPlanEntry`), into the video itself when
+    /// `replaceOriginal` is set (the backend's `save-tracks`). It reports `progress` in whole percents, `done` with
+    /// the saved file's path, or `error`. Cancel with `cancelActiveRun()`, which leaves the video as it was.
     func saveTracks(
         inputPath: String,
         outputPath: String,
@@ -234,11 +227,50 @@ final class BackendClient: @unchecked Sendable {
         replaceOriginal: Bool = false,
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
     ) async throws {
-        var args = ["save-tracks", "--input", inputPath, "--output-file", outputPath, "--plan", planJSON]
-        if replaceOriginal {
-            args.append("--replace-original")
+        func fail(_ message: String) throws -> Never {
+            onEvent(.error(message))
+            throw BackendError.commandFailed(message)
         }
-        try await runStreamCommand(args: args, onEvent: onEvent)
+        let plan: [TrackPlanEntry]
+        do {
+            plan = try TrackPlanEntry.parse(planJSON)
+        } catch let error as MediaTools.Failure {
+            try fail(error.localizedDescription)
+        } catch {
+            try fail("Invalid track list: \(error.localizedDescription)")
+        }
+        guard fileManager.fileExists(atPath: inputPath) else {
+            try fail("Input file not found: \(inputPath)")
+        }
+        let media: MediaTools
+        do {
+            media = try MediaTools.located()
+        } catch {
+            try fail(error.localizedDescription)
+        }
+
+        onEvent(.status("Saving..."))
+        let video = URL(fileURLWithPath: (inputPath as NSString).expandingTildeInPath)
+        let output = URL(fileURLWithPath: (outputPath as NSString).expandingTildeInPath)
+        withActiveProcessLock { activeMedia = media }
+        defer { withActiveProcessLock { activeMedia = nil } }
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                var reported = -1
+                try media.saveEditedTracks(video: video, output: output, plan: plan, replaceOriginal: replaceOriginal) { fraction in
+                    let percent = Int(fraction * 100)
+                    if percent > reported {
+                        reported = percent
+                        onEvent(.progress(Double(percent)))
+                    }
+                }
+            }.value
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try fail(error.localizedDescription)
+        }
+        onEvent(.done(output.resolvingSymlinksInPath().path))
     }
 
     /// Runs a transcription in Swift (`TranscriptJob`). `TRANSCRIBE_PYTHON_RUNS=1` sends it to the Python backend
@@ -342,8 +374,10 @@ final class BackendClient: @unchecked Sendable {
         return args
     }
 
+    /// Stops a track save, or a run in the Python backend. (A run in Swift stops when its task is cancelled.)
     func cancelActiveRun() {
         withActiveProcessLock {
+            activeMedia?.cancel()
             guard let process = activeProcess else { return }
             guard process.isRunning else { return }
             // SIGINT first so the backend can clean up temp files; escalate if it doesn't exit.
@@ -354,45 +388,6 @@ final class BackendClient: @unchecked Sendable {
                 }
             }
         }
-    }
-
-    private func runSimpleCommand(_ args: [String]) throws -> [String: Any] {
-        let backendScriptURL = try resolveBackendScriptURL()
-        let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        let stdinPipe = Pipe()
-
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [pythonProgram, backendScriptURL.path] + args
-        process.currentDirectoryURL = backendScriptURL.deletingLastPathComponent()
-        process.environment = pythonEnvironment
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-        process.standardInput = stdinPipe
-
-        try process.run()
-        // Nothing is sent on standard input; closing it keeps the backend from waiting for any.
-        try? stdinPipe.fileHandleForWriting.close()
-        process.waitUntilExit()
-
-        let stdoutText = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderrText = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-
-        guard process.terminationStatus == 0 else {
-            let message = stderrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? stdoutText
-                : stderrText
-            throw BackendError.commandFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-
-        guard
-            let data = stdoutText.data(using: .utf8),
-            let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            throw BackendError.invalidResponse("Could not parse backend response.")
-        }
-        return object
     }
 
     private func runStreamCommand(

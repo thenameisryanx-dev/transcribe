@@ -3,7 +3,7 @@ import Foundation
 import UniformTypeIdentifiers
 
 /// One track in a video, as listed by the backend's `tracks` command.
-struct MediaTrack: Decodable, Equatable, Sendable {
+struct MediaTrack: Equatable, Sendable {
     /// Position among all of the file's tracks (ffmpeg's `0:N`).
     let index: Int
     /// "video", "audio", "subtitle", "attachment" or "data".
@@ -17,6 +17,8 @@ struct MediaTrack: Decodable, Equatable, Sendable {
     let channels: Int?
     /// True for subtitles stored as text (not pictures).
     let text: Bool
+    /// The sample format's tag, like "tx3g" for subtitles Apple's players show.
+    var codecTag = ""
 }
 
 /// An audio or subtitle track in the track editor: one of the video's own, or a subtitle file being added.

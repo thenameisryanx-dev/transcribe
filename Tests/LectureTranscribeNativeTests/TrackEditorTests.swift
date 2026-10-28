@@ -146,15 +146,14 @@ final class TrackEditorTests: XCTestCase {
         XCTAssertEqual(TrackLanguage.code(forTag: ""), "")
     }
 
-    func testTrackListDecodesBackendJSON() throws {
-        let json = """
-        [{"index": 3, "kind": "subtitle", "codec": "subrip", "language": "ita", "title": "Forced",
-          "default": true, "forced": true, "channels": null, "text": true}]
-        """
-        let tracks = try JSONDecoder().decode([MediaTrack].self, from: Data(json.utf8))
-        XCTAssertEqual(tracks.first?.index, 3)
-        XCTAssertEqual(tracks.first?.forced, true)
-        XCTAssertNil(tracks.first?.channels)
+    @MainActor
+    func testPlanJSONReadsBackAsTheSamePlan() throws {
+        let editor = loadedEditor()
+        let json = try editor.planJSON()
+        let plan = try TrackPlanEntry.parse(json)
+        XCTAssertEqual(plan.count, 5)
+        XCTAssertEqual(plan[0], TrackPlanEntry(kind: "audio", source: .original(index: 1), language: "it", title: "", isDefault: true, isForced: false))
+        XCTAssertEqual(plan[2], TrackPlanEntry(kind: "subtitle", source: .original(index: 3), language: "it", title: "Forced", isDefault: true, isForced: true))
     }
 
     @MainActor
