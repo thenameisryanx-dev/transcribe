@@ -3,8 +3,8 @@ import XCTest
 
 @testable import LectureTranscribeNative
 
-/// Saved chunk results are named and stored exactly as the Python backend stores them, so either can resume
-/// a run the other started.
+/// Saved chunk results are named and stored exactly as the app's earlier Python backend stored them, so a run it
+/// saved can still be resumed.
 final class ChunkResultStoreTests: XCTestCase {
     private var directory: URL!
     private var chunk: URL!

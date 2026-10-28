@@ -17,9 +17,6 @@ VENDOR_DIR="$PROJECT_DIR/vendor"
 FFMPEG_VENDOR_DIR="$VENDOR_DIR/ffmpeg/$ARCH"
 FFMPEG_BIN_PATH="$FFMPEG_VENDOR_DIR/ffmpeg"
 FFPROBE_BIN_PATH="$FFMPEG_VENDOR_DIR/ffprobe"
-PYTHON_RESOURCE_DIR="$PROJECT_DIR"
-PYTHON_RELEASE_REQUIREMENTS_PATH="$PROJECT_DIR/python_release_requirements.txt"
-BUNDLED_PYTHON_FRAMEWORK_NAME="Python3.framework"
 APP_ICON_ICNS_PATH="$PROJECT_DIR/Resources/AppIcon.icns"
 APP_ICON_ICONSET_PATH="$PROJECT_DIR/Resources/AppIcon.iconset"
 APP_ICON_PNG_PATH="$PROJECT_DIR/Resources/AppIcon.png"
@@ -55,48 +52,6 @@ fi
 
 cd "$PROJECT_DIR"
 mkdir -p "$DIST_DIR"
-
-resolve_python_framework_root() {
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "python3 is required to bundle the embedded Python runtime."
-    exit 1
-  fi
-
-  local framework_root
-  framework_root="$(python3 -c 'import sys; from pathlib import Path; print(Path(sys.prefix).resolve().parents[1])')"
-  if [[ -z "$framework_root" || ! -d "$framework_root" ]]; then
-    echo "Could not locate the Python framework for $(command -v python3)."
-    exit 1
-  fi
-
-  if [[ ! -x "$framework_root/Versions/Current/bin/python3" ]]; then
-    echo "Python framework at $framework_root does not expose Versions/Current/bin/python3."
-    exit 1
-  fi
-
-  echo "$framework_root"
-}
-
-install_bundled_python_dependencies() {
-  local target_dir="$1"
-
-  if [[ ! -f "$PYTHON_RELEASE_REQUIREMENTS_PATH" ]]; then
-    echo "Missing Python release requirements file:"
-    echo "  $PYTHON_RELEASE_REQUIREMENTS_PATH"
-    exit 1
-  fi
-
-  rm -rf "$target_dir"
-  mkdir -p "$target_dir"
-
-  echo "Installing bundled Python dependencies..."
-  python3 -m pip install \
-    --disable-pip-version-check \
-    --no-compile \
-    --upgrade \
-    --target "$target_dir" \
-    -r "$PYTHON_RELEASE_REQUIREMENTS_PATH"
-}
 
 write_info_plist() {
   local app_path="$1"
@@ -526,14 +481,12 @@ assemble_native_app_bundle() {
   local app_path="$1"
   local native_binary_path="$2"
   local icon_source_path="${3:-}"
-  local python_framework_root="$4"
 
   rm -rf "$app_path"
   mkdir -p "$app_path/Contents/MacOS"
-  mkdir -p "$app_path/Contents/Frameworks"
-  mkdir -p "$app_path/Contents/Resources/python/ffmpeg_bin"
+  mkdir -p "$app_path/Contents/Resources/ffmpeg_bin"
 
-  # The Swift program is the app's entry point; BackendClient sets up the bundled Python and work folder itself.
+  # The Swift program is the whole app; it finds the bundled ffmpeg in Resources/ffmpeg_bin (MediaTools.located).
   install -m 755 "$native_binary_path" "$app_path/Contents/MacOS/$NATIVE_BINARY_NAME"
   if [[ -n "$icon_source_path" ]]; then
     write_info_plist "$app_path" "1"
@@ -542,13 +495,8 @@ assemble_native_app_bundle() {
     write_info_plist "$app_path"
   fi
 
-  install -m 644 "$PYTHON_RESOURCE_DIR/transcribe_backend.py" "$app_path/Contents/Resources/python/transcribe_backend.py"
-  install -m 644 "$PYTHON_RESOURCE_DIR/lecture_transcribe.py" "$app_path/Contents/Resources/python/lecture_transcribe.py"
-  install -m 644 "$PYTHON_RESOURCE_DIR/transcription_job.py" "$app_path/Contents/Resources/python/transcription_job.py"
-  ditto "$python_framework_root" "$app_path/Contents/Frameworks/$BUNDLED_PYTHON_FRAMEWORK_NAME"
-  install_bundled_python_dependencies "$app_path/Contents/Resources/python/site-packages"
-  install -m 755 "$FFMPEG_BIN_PATH" "$app_path/Contents/Resources/python/ffmpeg_bin/ffmpeg"
-  install -m 755 "$FFPROBE_BIN_PATH" "$app_path/Contents/Resources/python/ffmpeg_bin/ffprobe"
+  install -m 755 "$FFMPEG_BIN_PATH" "$app_path/Contents/Resources/ffmpeg_bin/ffmpeg"
+  install -m 755 "$FFPROBE_BIN_PATH" "$app_path/Contents/Resources/ffmpeg_bin/ffprobe"
 }
 
 echo "Cleaning previous artifacts..."
@@ -567,7 +515,6 @@ if [[ "$SKIP_BUILD" == "1" ]]; then
   echo "  $APP_PATH"
 else
   "$PROJECT_DIR/scripts/ensure_dev_media_tools.sh"
-  PYTHON_FRAMEWORK_ROOT="$(resolve_python_framework_root)"
 
   NATIVE_BINARY_PATH="$(build_native_binary)"
   APP_ICON_SOURCE_PATH=""
@@ -586,7 +533,7 @@ else
     echo "  $APP_ICON_PNG_LEGACY_RESOURCE_PATH"
   fi
   echo "Assembling standalone native app bundle..."
-  assemble_native_app_bundle "$APP_PATH" "$NATIVE_BINARY_PATH" "$APP_ICON_SOURCE_PATH" "$PYTHON_FRAMEWORK_ROOT"
+  assemble_native_app_bundle "$APP_PATH" "$NATIVE_BINARY_PATH" "$APP_ICON_SOURCE_PATH"
 fi
 
 echo "Preparing distributable app..."

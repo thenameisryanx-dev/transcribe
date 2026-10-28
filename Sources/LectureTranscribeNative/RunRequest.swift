@@ -1,7 +1,7 @@
 import Foundation
 
-/// What one transcription run sends to the backend, worked out from the Transcribe pane's options.
-/// Options that don't apply to the run are dropped here, so the backend and run history see what really ran.
+/// What one transcription run does, worked out from the Transcribe pane's options.
+/// Options that don't apply to the run are dropped here, so the run and its history entry show what really ran.
 struct RunRequest: Equatable, Sendable {
     /// The Transcribe pane's options when Start is pressed.
     struct Options: Equatable, Sendable {
@@ -48,24 +48,6 @@ struct RunRequest: Equatable, Sendable {
         carryContext = !usesDiarizeModel && options.consistencyMode && options.model.supportsConsistencyMode
         chunkSeconds = usesDiarizeModel ? nil : options.chunkLength.seconds
         keywords = !usesDiarizeModel && options.model.supportsKeywords ? KeywordList.parse(options.keywordsText) : []
-    }
-
-    /// The backend's `run` arguments.
-    var backendArguments: [String] {
-        BackendClient.transcriptionArguments(
-            inputPath: inputPath,
-            outputDirectory: outputDirectory,
-            diarize: diarize,
-            subtitles: subtitles,
-            embedSubtitles: embedSubtitles,
-            audioTrack: audioTrack,
-            model: model.rawValue,
-            languages: languages,
-            context: context,
-            carryContext: carryContext,
-            chunkSeconds: chunkSeconds,
-            keywords: keywords
-        )
     }
 
     /// The run history entry for this run as it starts.

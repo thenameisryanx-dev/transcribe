@@ -1,7 +1,7 @@
 import Foundation
 
-/// Text handling for transcripts, ported from the Python backend (`lecture_transcribe.py`). Each function returns
-/// exactly what its Python namesake does; Tests/golden/text_functions.json records those answers.
+/// Text handling for transcripts. Each function returns exactly what the app's earlier Python version did;
+/// Tests/golden/text_functions.json records those answers.
 enum TranscriptText {
     // Repeated-passage check: wording is compared in overlapping phrases of this many words, and only a long
     // run of mostly repeated wording is flagged (short repeats like "Almost there. Almost there." are speech).
@@ -62,7 +62,7 @@ enum TranscriptText {
         return cut
     }
 
-    /// A word compared without case or punctuation (`_word_key`).
+    /// A word compared without case or punctuation.
     static func wordKey(_ word: String) -> String {
         let folded = word.folding(options: [.caseInsensitive], locale: nil)
         return String(String.UnicodeScalarView(folded.unicodeScalars.filter {
@@ -153,7 +153,7 @@ enum TranscriptText {
             .replacingOccurrences(of: "[^A-Za-z0-9._-]+", with: "_", options: .regularExpression)
     }
 
-    /// The lines at the top of a transcript file (`build_transcript_header`). `context` "" writes "none"; nil
+    /// The lines at the top of a transcript file. `context` "" writes "none"; nil
     /// leaves the line out.
     static func header(
         inputPath: String,

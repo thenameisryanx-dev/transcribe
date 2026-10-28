@@ -100,22 +100,18 @@ final class SubtitlesOptionTests: XCTestCase {
         XCTAssertFalse(viewModel.embedsSubtitlesForRun)
     }
 
-    func testEmbedSubtitlesArgumentNeedsSubtitles() {
-        func arguments(subtitles: Bool, embedSubtitles: Bool) -> [String] {
-            BackendClient.transcriptionArguments(
-                inputPath: "/tmp/Episode 3.mp4",
-                outputDirectory: "/tmp",
-                diarize: false,
-                subtitles: subtitles,
-                embedSubtitles: embedSubtitles,
-                model: "gpt-4o-transcribe"
-            )
+    func testARunEmbedsSubtitlesOnlyWithSubtitles() {
+        func request(subtitles: Bool, embedSubtitles: Bool) -> RunRequest {
+            RunRequest(inputPath: "/tmp/Episode 3.mp4", outputDirectory: "/tmp", options: RunRequest.Options(
+                model: .gpt4oTranscribe, diarize: false, subtitles: subtitles, embedSubtitles: embedSubtitles, audioTrack: 0,
+                languages: [], contextPrompt: "", consistencyMode: false, chunkLength: .fiveMinutes, keywordsText: ""
+            ))
         }
-        let both = arguments(subtitles: true, embedSubtitles: true)
-        XCTAssertTrue(both.contains("--subtitles"))
-        XCTAssertTrue(both.contains("--embed-subtitles"))
-        XCTAssertFalse(arguments(subtitles: true, embedSubtitles: false).contains("--embed-subtitles"))
-        XCTAssertFalse(arguments(subtitles: false, embedSubtitles: true).contains("--embed-subtitles"))
+        let both = request(subtitles: true, embedSubtitles: true)
+        XCTAssertTrue(both.subtitles)
+        XCTAssertTrue(both.embedSubtitles)
+        XCTAssertFalse(request(subtitles: true, embedSubtitles: false).embedSubtitles)
+        XCTAssertFalse(request(subtitles: false, embedSubtitles: true).embedSubtitles)
     }
 
     @MainActor

@@ -102,7 +102,7 @@ final class ReferenceOpenAI: URLProtocol {
     override func stopLoading() {}
 }
 
-/// Runs done in Swift, checked against the Python backend's reference runs.
+/// Whole runs, checked against the earlier Python backend's reference runs.
 final class TranscriptJobTests: XCTestCase {
     private static let golden = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent("golden")

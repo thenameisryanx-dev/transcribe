@@ -90,12 +90,13 @@ final class RunRequestTests: XCTestCase {
         XCTAssertNil(entry.subtitles)
     }
 
-    func testBackendArgumentsCarryTheRequest() {
-        let args = request(options()).backendArguments
-        XCTAssertEqual(Array(args.prefix(7)), ["run", "--input", "/tmp/lecture.mp4", "--output", "/tmp/out", "--model", "gpt-transcribe"])
-        XCTAssertTrue(args.contains("--carry-context"))
-        XCTAssertEqual(args.firstIndex(of: "--chunk-seconds").map { args[$0 + 1] }, "600")
-        XCTAssertEqual(args.firstIndex(of: "--audio-track").map { args[$0 + 1] }, "1")
+    func testTheRequestCarriesTheFileModelAndTrack() {
+        let run = request(options())
+        XCTAssertEqual(run.inputPath, "/tmp/lecture.mp4")
+        XCTAssertEqual(run.outputDirectory, "/tmp/out")
+        XCTAssertEqual(run.model, .gptTranscribe)
+        XCTAssertEqual(run.languages, ["en"])
+        XCTAssertEqual(run.audioTrack, 1)
     }
 
     @MainActor

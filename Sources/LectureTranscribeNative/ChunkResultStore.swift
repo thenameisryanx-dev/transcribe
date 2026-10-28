@@ -3,10 +3,10 @@ import Foundation
 
 /// Saves each finished chunk of a run, so a run that fails or is cancelled can pick up where it stopped:
 /// running it again with the same settings reuses the saved chunks instead of paying OpenAI for them twice.
-/// The Swift side of the backend's `ChunkResults`, with the same folder, file names and contents, so a run
-/// started by either one can be resumed by the other.
+/// The folder, file names and contents are the ones the app's earlier Python backend used, so results it saved can
+/// still be resumed.
 final class ChunkResultStore: @unchecked Sendable {
-    /// Bump with the backend's RESULTS_FORMAT when what a saved result holds changes.
+    /// Bump when what a saved result holds changes, so results saved by an older version aren't reused.
     static let format = 1
     static let maxAge: TimeInterval = 7 * 24 * 60 * 60
 
@@ -24,7 +24,7 @@ final class ChunkResultStore: @unchecked Sendable {
     var keptCount: Int { lock.withLock { kept.count } }
     var reusedCount: Int { lock.withLock { reused } }
 
-    /// A hash of the chunk's audio and everything sent with it, as the backend computes it.
+    /// A hash of the chunk's audio and everything sent with it, computed as earlier versions did.
     func key(chunk: URL, request: [String: Any?]) throws -> String {
         var description = request
         description["format"] = Self.format

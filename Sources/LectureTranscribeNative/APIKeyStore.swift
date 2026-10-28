@@ -1,7 +1,7 @@
 import Foundation
 
 /// The OpenAI API key: from the `OPENAI_API_KEY` environment variable, a key entered for this session, or the
-/// login keychain, in that order. The Python backend gets it from here (see `BackendClient`).
+/// login keychain, in that order. Each run gets it from here (see `BackendClient`).
 ///
 /// The keychain is reached through `/usr/bin/security`, not the Security framework: keys saved by earlier versions
 /// were created by that tool, so only it can read them without a "wants to access" prompt, and the app is ad-hoc
@@ -43,7 +43,7 @@ final class APIKeyStore: @unchecked Sendable {
         self.security = security
     }
 
-    /// Whether `key` looks like an OpenAI key. Mirrors `is_valid_api_key` in the backend.
+    /// Whether `key` looks like an OpenAI key.
     static func isValid(_ key: String) -> Bool {
         key.hasPrefix("sk-") && !key.contains("\n") && !key.contains("\r")
             && key == key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -87,7 +87,7 @@ final class APIKeyStore: @unchecked Sendable {
     }
 
     /// Uses `key` from now on; saved in the keychain too when `save` is set.
-    /// Returns the status to show, like the backend's `set-key`.
+    /// Returns the status to show.
     func setKey(_ key: String, save: Bool) throws -> String {
         guard Self.isValid(key) else {
             throw KeyError("Invalid API key format. It should start with 'sk-'.")

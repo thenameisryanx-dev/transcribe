@@ -22,7 +22,7 @@ A Mac app that turns lecture recordings (audio or video) into text transcripts o
    - Enter your password. After this the app opens normally.
 4. Enter an [OpenAI API key](https://platform.openai.com/api-keys) when asked. You can save it in the macOS keychain so you only enter it once.
 
-Requires macOS 13 or later. Nothing else needs to be installed: Python and FFmpeg ship inside the app.
+Requires macOS 13 or later. Nothing else needs to be installed: FFmpeg ships inside the app.
 
 ## Cost
 

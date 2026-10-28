@@ -3,8 +3,8 @@ import XCTest
 
 @testable import LectureTranscribeNative
 
-/// The app and the Python backend each state what every model can do. Both are checked against
-/// Tests/model_rules.json (test_backend.py checks the Python side), so the two can't drift apart.
+/// What every model can do, checked against Tests/model_rules.json, so a change to a model's rules shows up as a
+/// change to that file too.
 final class ModelRulesTests: XCTestCase {
     private struct Rules: Decodable {
         let speaker_labels: Bool

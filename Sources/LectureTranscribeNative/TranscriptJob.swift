@@ -1,9 +1,9 @@
 import Foundation
 
-/// A transcription run done in Swift: a plain transcript, one with speaker labels, or subtitles. Ported from the
-/// backend's `run_transcription_job`: the recording is cut into chunks at pauses, each chunk is sent to OpenAI
-/// (and a plain transcript's text checked), finished chunks are saved so a failed run can resume, and the output
-/// is written only once every chunk succeeds. Tests check its output against the backend's (Tests/golden/runs).
+/// A transcription run: a plain transcript, one with speaker labels, or subtitles. The recording is cut into
+/// chunks at pauses, each chunk is sent to OpenAI (and a plain transcript's text checked), finished chunks are
+/// saved so a failed run can resume, and the output is written only once every chunk succeeds. Tests check its
+/// output against reference runs of the app's earlier Python backend (Tests/golden/runs).
 struct TranscriptJob: Sendable {
     struct Failure: LocalizedError {
         let errorDescription: String?
@@ -168,7 +168,7 @@ struct TranscriptJob: Sendable {
 
     private func writeTranscript(_ setup: Setup) async throws -> URL {
         let model = request.model.rawValue
-        // Accents kept with their letters (NFC), as the backend does, so either can reuse the other's saved chunks.
+        // Accents kept with their letters (NFC), as earlier versions did, so their saved chunks can still be reused.
         let trimmedContext = request.context.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
         let context: String? = trimmedContext.isEmpty ? nil : trimmedContext
         let carryContext = request.carryContext && request.model.supportsConsistencyMode
@@ -471,7 +471,7 @@ struct TranscriptJob: Sendable {
             return TranscriptionResult(object: saved)
         }
         let result = try await send(diarizeRequest(languages), audio: chunk)
-        // Only the parts the transcript and subtitles use, in the form the backend saves them.
+        // Only the parts the transcript and subtitles use, in the form earlier versions saved them.
         results.save(key, [
             "text": result.text,
             "segments": result.segments.map { ["speaker": $0.speaker, "start": $0.start, "end": $0.end, "text": $0.text] as [String: Any?] },
@@ -582,7 +582,7 @@ struct TranscriptJob: Sendable {
         return results.map { $0! }
     }
 
-    /// One request to OpenAI, re-encoding the chunk once if OpenAI can't read it (`create_transcription_with_retry`).
+    /// One request to OpenAI, re-encoding the chunk once if OpenAI can't read it.
     func send(_ request: TranscriptionRequest, audio chunk: URL) async throws -> TranscriptionResult {
         let onRetry: @Sendable (String) -> Void = { [emit] in emit(.log($0)) }
         do {
@@ -617,7 +617,7 @@ struct TranscriptJob: Sendable {
         }
     }
 
-    /// The short message for the error alert and run history (the backend's `describe_run_error`), and whether
+    /// The short message for the error alert and run history, and whether
     /// the API key caused it, so the app can ask for a new one.
     static func describe(_ error: Error) -> (message: String, isAPIKeyProblem: Bool) {
         if let error = error as? OpenAIError {
@@ -648,7 +648,7 @@ private final class Counter: @unchecked Sendable {
     init(_ value: Int) { self.value = value }
 }
 
-/// Transcribes one chunk, reusing its saved result when there is one (`transcribe_chunk_checked`).
+/// Transcribes one chunk, reusing its saved result when there is one.
 private struct ChunkTranscriber: Sendable {
     let job: TranscriptJob
     let results: ChunkResultStore

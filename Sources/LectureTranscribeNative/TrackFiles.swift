@@ -1,6 +1,6 @@
 import Foundation
 
-/// One track the Tracks pane saves (the backend's `save-tracks` plan entry): a track of the video or a subtitle
+/// One track the Tracks pane saves: a track of the video or a subtitle
 /// file to add, with the language, title and flags it's saved with.
 struct TrackPlanEntry: Equatable, Sendable {
     enum Source: Equatable, Sendable {
@@ -41,8 +41,7 @@ struct TrackPlanEntry: Equatable, Sendable {
     }
 }
 
-/// Reading and saving a video's tracks for the Tracks pane, ported from the backend (`list_media_tracks`,
-/// `save_edited_tracks`) with the same ffprobe and ffmpeg commands.
+/// Reading and saving a video's tracks for the Tracks pane, with ffprobe and ffmpeg.
 extension MediaTools {
     /// Subtitle codecs stored as text. Others (PGS, VobSub) are pictures, which only some containers hold.
     static let textSubtitleCodecs: Set<String> = ["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"]
@@ -290,7 +289,7 @@ extension MediaTools {
     }
 
     /// Clears the "enabled" flag of every subtitle track in an .mp4/.mov file, in place, so players start with
-    /// subtitles off (`disable_mov_subtitle_tracks`). Only the track header flags change.
+    /// subtitles off. Only the track header flags change.
     static func disableMOVSubtitleTracks(_ url: URL) throws {
         let handle = try FileHandle(forUpdating: url)
         defer { try? handle.close() }

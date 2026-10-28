@@ -15,11 +15,10 @@ DerivedData/
 /Lecture Transcribe.spec
 
 # Runtime/generated files
-/__pycache__
-**/__pycache__/
-*.pyc
 /chunks
 /converted_inputs
+# Left in older checkouts by the Python backend the app used to have
 /.venv
+__pycache__/
 # Pinned ffmpeg, downloaded and checked by scripts/ensure_dev_media_tools.sh
 /vendor/

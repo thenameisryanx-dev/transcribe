@@ -82,7 +82,7 @@ enum ChunkLength: Int, CaseIterable, Identifiable, Sendable {
 }
 
 struct SpokenLanguage: Identifiable, Hashable {
-    /// ISO-639-1 code sent to the backend; empty means auto-detect.
+    /// ISO-639-1 code sent with a run; empty means auto-detect.
     let code: String
 
     var id: String { code }
@@ -113,14 +113,14 @@ struct SpokenLanguage: Identifiable, Hashable {
         return all.contains { $0.code == first } ? first : ""
     }
 
-    /// Codes sent to the backend for `model`.
+    /// Codes sent with a run for `model`.
     static func backendCodes(for code: String, model: TranscriptionModel) -> [String] {
         if !code.isEmpty { return [code] }
         return model.requiresSpokenLanguages ? [fallbackCode] : []
     }
 }
 
-/// One audio track in the selected file, as listed by the backend's `audio-tracks` command.
+/// One audio track in the selected file, as `MediaTools.audioTracks` lists it.
 /// Videos often carry one track per language (e.g. Italian first, English second).
 struct AudioTrack: Identifiable, Equatable, Sendable, Decodable {
     /// Position among the file's audio tracks, from 0 (ffmpeg's `0:a:N`).
@@ -185,7 +185,7 @@ struct AudioTrack: Identifiable, Equatable, Sendable, Decodable {
     }
 }
 
-/// Keywords typed as one string, separated by commas or new lines. Mirrors `parse_keywords` in the backend.
+/// Keywords typed as one string, separated by commas or new lines.
 enum KeywordList {
     /// Characters OpenAI rejects in a keyword (the whole request fails).
     static let rejectedCharacters: Set<Character> = ["<", ">"]

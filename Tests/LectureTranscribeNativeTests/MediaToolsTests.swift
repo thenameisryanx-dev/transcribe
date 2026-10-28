@@ -9,7 +9,7 @@ final class MediaToolsTests: XCTestCase {
         let vendor = try MediaTools.located(environment: [:])
         let app = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)/Lecture Transcribe.app")
         defer { try? FileManager.default.removeItem(at: app.deletingLastPathComponent()) }
-        let tools = app.appendingPathComponent("Contents/Resources/python/ffmpeg_bin")
+        let tools = app.appendingPathComponent("Contents/Resources/ffmpeg_bin")
         try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: vendor.ffmpeg, to: tools.appendingPathComponent("ffmpeg"))

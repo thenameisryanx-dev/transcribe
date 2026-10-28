@@ -83,16 +83,13 @@ final class CoreFeaturesTests: XCTestCase {
         XCTAssertFalse(viewModel.isDiarizationAvailable)
     }
 
-    func testTranscriptionArgumentsSendTheModel() {
-        let args = BackendClient.transcriptionArguments(
-            inputPath: "/tmp/lecture.m4a",
-            outputDirectory: "/tmp",
-            diarize: false,
-            model: "gpt-4o-mini-transcribe"
-        )
-        XCTAssertEqual(Array(args.prefix(7)), [
-            "run", "--input", "/tmp/lecture.m4a", "--output", "/tmp", "--model", "gpt-4o-mini-transcribe",
-        ])
+    func testARunUsesTheChosenModel() {
+        let request = RunRequest(inputPath: "/tmp/lecture.m4a", outputDirectory: "/tmp", options: RunRequest.Options(
+            model: .gpt4oMiniTranscribe, diarize: false, subtitles: false, embedSubtitles: false, audioTrack: 0,
+            languages: [], contextPrompt: "", consistencyMode: false, chunkLength: .fiveMinutes, keywordsText: ""
+        ))
+        XCTAssertEqual(request.model, .gpt4oMiniTranscribe)
+        XCTAssertEqual(request.historyEntry().model, "gpt-4o-mini-transcribe")
     }
 
     @MainActor

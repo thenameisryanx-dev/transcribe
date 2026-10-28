@@ -13,32 +13,23 @@ lacks_fixed() { ! grep -Fq -- "$1" "$2"; }
 
 BUILD_DIR="$("$ROOT_DIR/scripts/swift_build_dir.sh" "$ROOT_DIR")"
 
-# The Swift and Python tests both use the pinned ffmpeg in vendor/ffmpeg (downloaded and checked against its
+# The Swift tests use the pinned ffmpeg in vendor/ffmpeg (downloaded and checked against its
 # checksums by scripts/ensure_dev_media_tools.sh; it isn't kept in git).
 scripts/ensure_dev_media_tools.sh
 
-echo "[1/5] Building Swift app..."
+echo "[1/4] Building Swift app..."
 swift build --scratch-path "$BUILD_DIR" >/dev/null
 
 # Core features (sidebar panes, run history, default output folder, model options, clear draft)
 # are checked by Tests/LectureTranscribeNativeTests/CoreFeaturesTests.swift.
-echo "[2/5] Running Swift unit tests..."
+echo "[2/4] Running Swift unit tests..."
 # Quiet when the tests pass; on a failure, show which tests failed and why (without the linker's warnings).
 if ! SWIFT_TEST_OUTPUT="$(swift test --scratch-path "$BUILD_DIR" 2>&1)"; then
   print -r -- "$SWIFT_TEST_OUTPUT" | grep -E ': error: |^error: |failed \(|Executed [0-9]+ tests' | grep -v 'ld: warning' | tail -80
   exit 1
 fi
 
-# Backend behavior (model choice, speaker-label rules, media tool architecture, track editing) is checked by
-# Tests/python/test_backend.py, using the repo-local .venv and the pinned ffmpeg in vendor/ffmpeg.
-echo "[3/5] Running Python backend tests..."
-scripts/ensure_dev_python.sh
-if ! PYTHON_TEST_OUTPUT="$(.venv/bin/python3 -m unittest discover -s Tests/python 2>&1)"; then
-  print -r -- "$PYTHON_TEST_OUTPUT"
-  exit 1
-fi
-
-echo "[4/5] Verifying UI wiring and backend features..."
+echo "[3/4] Verifying UI wiring..."
 # Sidebar panes opening, the Runs list and the toolbar's model menu are tested by drawing the real window
 # (Tests/LectureTranscribeNativeTests/PaneRenderingTests.swift). Controls inside a pane aren't visible to those
 # tests, so these check that each control's label is still somewhere in the app: moving or restyling a control
@@ -60,34 +51,28 @@ in_app 'await updateChecker.checkOnLaunch()'
 not_in_app '.disabled(!viewModel.canOpenOutputFolder)'
 not_in_app 'canCreateNewTranscript'
 not_in_app '"New Transcription"'
-lacks_fixed '"/usr/bin/arch", "-x86_64"' lecture_transcribe.py
-# The app ships the copies under Resources/python; they must match the root scripts.
-cmp -s lecture_transcribe.py Sources/LectureTranscribeNative/Resources/python/lecture_transcribe.py
-cmp -s transcription_job.py Sources/LectureTranscribeNative/Resources/python/transcription_job.py
-cmp -s transcribe_backend.py Sources/LectureTranscribeNative/Resources/python/transcribe_backend.py
+# The app is all Swift: no Python backend to run, bundle or keep in step.
+[[ ! -e transcribe_backend.py && ! -e Sources/LectureTranscribeNative/Resources/python ]]
+not_in_app 'TRANSCRIBE_PYTHON'
 grep -Eq '^[0-9]+(\.[0-9]+)*$' VERSION
 has_fixed '<string>$APP_VERSION</string>' build_macos_dmg.sh
 
-echo "[5/5] Verifying launcher entry point..."
+echo "[4/4] Verifying launcher entry point..."
 LAUNCHER="Open Lecture Transcribe.command"
 [[ -f "$LAUNCHER" ]]
 [[ -x "$LAUNCHER" ]]
 [[ ! -e "Open Lecture Transcribe Native.command" ]]
-[[ -f "scripts/ensure_dev_python.sh" ]]
 [[ -f "scripts/ensure_dev_media_tools.sh" ]]
 [[ -x "scripts/swift_build_dir.sh" ]]
 zsh -n "scripts/swift_build_dir.sh"
 [[ "$(scripts/swift_build_dir.sh "$ROOT_DIR")" != "$ROOT_DIR"/* ]]
 zsh -n "$LAUNCHER"
-zsh -n "scripts/ensure_dev_python.sh"
 zsh -n "scripts/ensure_dev_media_tools.sh"
 has_fixed 'PROJECT_DIR="${0:A:h}"' "$LAUNCHER"
 lacks '/Users/[^/]+/' "$LAUNCHER"
-has_fixed 'DEV_PYTHON_SETUP=' "$LAUNCHER"
-has_fixed '"$DEV_PYTHON_SETUP"' "$LAUNCHER"
 has_fixed 'DEV_MEDIA_SETUP=' "$LAUNCHER"
 has_fixed '"$DEV_MEDIA_SETUP"' "$LAUNCHER"
-has_fixed 'export TRANSCRIBE_PYTHON="$PROJECT_DIR/.venv/bin/python3"' "$LAUNCHER"
+lacks 'python|\.venv' "$LAUNCHER"
 has_fixed 'export FFMPEG_BIN="$PROJECT_DIR/vendor/ffmpeg/$(uname -m)/ffmpeg"' "$LAUNCHER"
 has_fixed 'export FFPROBE_BIN="$PROJECT_DIR/vendor/ffmpeg/$(uname -m)/ffprobe"' "$LAUNCHER"
 has_fixed 'BUILD_DIR="$("$PROJECT_DIR/scripts/swift_build_dir.sh" "$PROJECT_DIR")"' "$LAUNCHER"
@@ -97,6 +82,7 @@ lacks_fixed 'TRANSCRIBE_PREFER_SOURCE=0 TRANSCRIBE_PREFER_DEV_BINARY=0 exec' "$L
 bash -n build_macos_dmg.sh
 has_fixed '<string>$NATIVE_BINARY_NAME</string>' build_macos_dmg.sh
 lacks_fixed 'Contents/MacOS/launcher' build_macos_dmg.sh
+lacks '[Pp]ython' build_macos_dmg.sh
 has_fixed '"$PROJECT_DIR/scripts/ensure_dev_media_tools.sh"' build_macos_dmg.sh
 lacks 'homebrew|brew install ffmpeg|command -v ffmpeg' build_macos_dmg.sh
 lacks 'homebrew|brew install ffmpeg|command -v ffmpeg' scripts/ensure_dev_media_tools.sh

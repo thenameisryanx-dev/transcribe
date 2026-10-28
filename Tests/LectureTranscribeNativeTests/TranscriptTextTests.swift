@@ -3,7 +3,7 @@ import XCTest
 
 @testable import LectureTranscribeNative
 
-/// The Swift text functions give the Python backend's answers (Tests/golden/text_functions.json).
+/// The text functions give the earlier Python backend's answers (Tests/golden/text_functions.json).
 final class TranscriptTextTests: XCTestCase {
     static func goldenCases(_ function: String) throws -> [(input: [String: Any], output: Any)] {
         let url = URL(fileURLWithPath: #filePath)

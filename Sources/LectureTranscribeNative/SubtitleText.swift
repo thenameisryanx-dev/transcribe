@@ -1,8 +1,7 @@
 import Foundation
 
-/// Subtitles (.srt) made from the diarize model's timed segments, ported from the Python backend
-/// (`lecture_transcribe.py`). Each function returns exactly what its Python namesake does;
-/// Tests/golden/text_functions.json records those answers. Lengths count Unicode code points, like Python's `len`.
+/// Subtitles (.srt) made from the diarize model's timed segments. Each function returns exactly what the app's
+/// earlier Python version did; Tests/golden/text_functions.json records those answers. Lengths count Unicode code points, like Python's `len`.
 enum SubtitleText {
     // Limits follow Netflix's English (USA) Timed Text Style Guide and its Subtitle Timing Guidelines.
     static let lineChars = 42

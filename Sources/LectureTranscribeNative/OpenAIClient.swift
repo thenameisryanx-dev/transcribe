@@ -1,7 +1,6 @@
 import Foundation
 
-/// Calls to the OpenAI API made from Swift. `OPENAI_BASE_URL` points it at another server, like the `openai`
-/// Python package (the tests use a local stand-in).
+/// Calls to the OpenAI API. `OPENAI_BASE_URL` points it at another server (the tests use a local stand-in).
 struct OpenAIClient: Sendable {
     enum KeyCheck: Equatable, Sendable {
         case ok
@@ -21,7 +20,7 @@ struct OpenAIClient: Sendable {
 
     /// Asks OpenAI whether `key` works by listing models, which is free. Only a 401 means the key itself was
     /// refused; any other answer from OpenAI (rate limits, server errors) means it accepted the key.
-    /// Mirrors `check_api_key_with_openai` in the backend, including its one retry when OpenAI can't be reached.
+    /// It tries once more when OpenAI can't be reached.
     func checkKey(_ key: String) async -> KeyCheck {
         var request = URLRequest(url: baseURL.appendingPathComponent("models"), timeoutInterval: 15)
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
@@ -38,15 +37,14 @@ struct OpenAIClient: Sendable {
 
     // MARK: - Transcription
 
-    /// How long one request may take, and how failed ones are retried. Match the backend's API settings.
+    /// How long one request may take, and how failed ones are retried.
     static let requestTimeout: TimeInterval = 20 * 60
     static let maxAttempts = 4
     static let retryBaseSeconds: Double = 2
 
     /// Sends one audio file to `/audio/transcriptions`, retrying transient failures (timeouts, lost
-    /// connections, rate limits, server errors) with exponential backoff like the backend's
-    /// `create_transcription_with_retry`. The `openai` Python package also retries twice inside each attempt;
-    /// this doesn't. Re-encoding audio OpenAI rejects is left to the caller (see `OpenAIError.isInvalidAudio`).
+    /// connections, rate limits, server errors) with exponential backoff. Re-encoding audio OpenAI rejects is left
+    /// to the caller (see `OpenAIError.isInvalidAudio`).
     func transcribe(
         _ request: TranscriptionRequest,
         audio: URL,
@@ -80,7 +78,7 @@ struct OpenAIClient: Sendable {
         throw CancellationError()
     }
 
-    /// Mirrors `is_retryable_transcription_error` in the backend.
+    /// Whether a failed request is worth sending again.
     static func isRetryable(_ error: Error) -> Bool {
         if let error = error as? OpenAIError {
             if [408, 409, 429, 500, 502, 503, 504].contains(error.status) { return true }
@@ -118,7 +116,7 @@ struct OpenAIError: LocalizedError, Equatable {
 
     var errorDescription: String? { "OpenAI returned an error (\(status)): \(message)" }
 
-    /// OpenAI couldn't read the audio; the backend re-encodes the file once and tries again.
+    /// OpenAI couldn't read the audio; the file is re-encoded once and sent again.
     var isInvalidAudio: Bool {
         let message = message.lowercased()
         return status == 400 && message.contains("audio file might be corrupted or unsupported") && message.contains("invalid_value")
@@ -126,7 +124,7 @@ struct OpenAIError: LocalizedError, Equatable {
 }
 
 /// One request to `/audio/transcriptions`. Options a model doesn't take are left out, by the same rules as the
-/// backend's `create_transcription_with_retry` (Tests/golden/openai_requests.json records what it sends).
+/// earlier Python backend (Tests/golden/openai_requests.json records what each kind of request sends).
 struct TranscriptionRequest: Equatable, Sendable {
     let model: String
     let responseFormat: String
@@ -165,7 +163,7 @@ struct TranscriptionRequest: Equatable, Sendable {
         self.keywords = Self.keywordModels.contains(model) ? keywords : []
     }
 
-    /// The one `language` to send to models that take only one (`single_language_hint`). Several languages, or a
+    /// The one `language` to send to models that take only one. Several languages, or a
     /// code that isn't two letters, mean auto-detect, so mixed-language audio isn't forced into one.
     static func singleLanguage(_ languages: [String]?) -> String? {
         guard let languages, languages.count == 1, languages[0].count == 2 else { return nil }
@@ -210,7 +208,7 @@ struct TranscriptionRequest: Equatable, Sendable {
 }
 
 /// What a transcription request returned: the text, the timed segments the diarize model adds, and the output
-/// tokens used (GPT-4o models stop at a limit, which the backend detects from this).
+/// tokens used (GPT-4o models stop at a limit, which `TranscriptJob` detects from this).
 struct TranscriptionResult: Equatable, Sendable {
     struct Segment: Equatable, Sendable {
         let speaker: String?
@@ -238,8 +236,7 @@ struct TranscriptionResult: Equatable, Sendable {
 
     /// From OpenAI's answer, or a diarize result saved in that form (see `ChunkResultStore`).
     init(object: [String: Any]) {
-        // Like the backend's `_coerce_optional_float`: a time written as text is read as a number; anything else
-        // counts as missing.
+        // A time written as text is read as a number; anything else counts as missing.
         func seconds(_ value: Any?) -> Double? {
             (value as? NSNumber)?.doubleValue ?? (value as? String).flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
         }

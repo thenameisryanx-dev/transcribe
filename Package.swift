@@ -44,9 +44,6 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "LectureTranscribeNative",
-            resources: [
-                .copy("Resources/python"),
-            ],
             linkerSettings: sdkVersionLinkerSettings
         ),
         .testTarget(

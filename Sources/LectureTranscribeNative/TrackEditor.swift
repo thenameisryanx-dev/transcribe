@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
-/// One track in a video, as listed by the backend's `tracks` command.
+/// One track in a video, as `MediaTools.mediaTracks` lists it.
 struct MediaTrack: Equatable, Sendable {
     /// Position among all of the file's tracks (ffmpeg's `0:N`).
     let index: Int
@@ -99,7 +99,7 @@ struct EditableTrack: Identifiable, Equatable {
         }
     }
 
-    /// The backend's `save-tracks` entry for this track.
+    /// This track's entry in the save plan (see `TrackPlanEntry`).
     var planEntry: [String: Any] {
         var entry: [String: Any] = [
             "kind": kind.rawValue,
@@ -290,7 +290,7 @@ final class TrackEditorModel: ObservableObject {
         }
     }
 
-    /// Fills the editor from the backend's track list. The tracks are known from here on, so any listing still
+    /// Fills the editor from the video's track list. The tracks are known from here on, so any listing still
     /// running is dropped.
     func load(_ tracks: [MediaTrack]) {
         loadTask?.cancel()
@@ -397,7 +397,7 @@ final class TrackEditorModel: ObservableObject {
         }
     }
 
-    /// The kept tracks in order, as the backend's `save-tracks` plan.
+    /// The kept tracks in order, as the save plan (see `TrackPlanEntry`).
     var plan: [[String: Any]] {
         (audioTracks + subtitleTracks).filter(\.keep).map(\.planEntry)
     }
@@ -481,7 +481,7 @@ final class TrackEditorModel: ObservableObject {
             }
             self.pendingOpen = nil
             if self.cancelRequested {
-                // The backend reports a cancel as a failed exit; it isn't one.
+                // A cancelled save ends with an error; it isn't one.
                 self.errorMessage = nil
                 self.lastSaveCancelled = true
             } else if let runError, self.errorMessage == nil, !(runError is CancellationError) {

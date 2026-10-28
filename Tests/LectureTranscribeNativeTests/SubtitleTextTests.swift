@@ -3,7 +3,7 @@ import XCTest
 
 @testable import LectureTranscribeNative
 
-/// The Swift subtitle functions give the Python backend's answers (Tests/golden/text_functions.json).
+/// The subtitle functions give the earlier Python backend's answers (Tests/golden/text_functions.json).
 final class SubtitleTextTests: XCTestCase {
     private func segments(_ input: [String: Any]) -> [TranscriptionResult.Segment] {
         TranscriptionResult(object: ["text": "", "segments": input["segments"] as! [[String: Any]]]).segments

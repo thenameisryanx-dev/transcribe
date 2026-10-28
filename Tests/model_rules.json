@@ -1,5 +1,5 @@
 {
-  "_about": "What each transcription model can do. TranscriptionModel (Swift) and lecture_transcribe.py (Python) each state these rules; ModelRulesTests.swift and test_backend.py check both against this file.",
+  "_about": "What each transcription model can do. TranscriptionModel states these rules; ModelRulesTests.swift checks it against this file.",
   "gpt-transcribe": {
     "speaker_labels": true,
     "consistency_mode": true,

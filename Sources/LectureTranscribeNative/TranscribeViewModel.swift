@@ -98,7 +98,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             }
         }
     }
-    /// The model subtitle runs use whatever model is selected (the backend's MODEL_DIARIZE).
+    /// The model subtitle runs use, whichever model is selected (`TranscriptJob.diarizeModel`).
     nonisolated static let subtitlesModelDisplayName = "GPT-4o Transcribe Diarize"
     /// Write timed subtitles (.srt) for a video instead of a transcript. Subtitles always use the diarize model,
     /// the only one that returns timing, so this works with any selected model and turns speaker labels off.
@@ -246,7 +246,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         subtitlesEnabled ? Self.subtitlesModelDisplayName : selectedTranscriptionModel.displayName
     }
 
-    /// Language codes sent to the backend. Auto-detect becomes English when the model needs a language.
+    /// Language codes sent with the run. Auto-detect becomes English when the model needs a language.
     var spokenLanguageCodesForRun: [String] {
         if !spokenLanguage.isEmpty { return [spokenLanguage] }
         return runRequiresSpokenLanguage ? [SpokenLanguage.fallbackCode] : []
@@ -587,7 +587,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         if let chunkLength = entry.chunkSeconds.flatMap(ChunkLength.init(rawValue:)) {
             chunkLengthPreference = chunkLength
         }
-        // The same prompt settings too, so the backend can reuse chunks a failed or cancelled run saved.
+        // The same prompt settings too, so the run can reuse chunks a failed or cancelled run saved.
         // Set after audioFilePath, whose change can clear them. Speaker-label and subtitle runs sent none.
         if !entry.diarize, entry.subtitles != true {
             contextPrompt = entry.context ?? ""
@@ -694,7 +694,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         runTask = Task { [weak self] in
             guard let self else { return }
 
-            // Funnel backend events through one FIFO stream so they apply in order and are fully
+            // Funnel run events through one FIFO stream so they apply in order and are fully
             // drained before the run is finalized below.
             let (events, eventContinuation) = AsyncStream.makeStream(of: BackendStreamEvent.self)
             let eventConsumer = Task { @MainActor [weak self] in
@@ -721,7 +721,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
                 appendLog("Run cancelled.")
                 finalizeActiveHistoryEntry(status: .cancelled, errorMessage: "Run cancelled.")
             } else {
-                let message = runError?.localizedDescription ?? "The transcription backend exited without reporting a result."
+                let message = runError?.localizedDescription ?? "The transcription ended without reporting a result."
                 statusText = "Failed"
                 appendLog("Error: \(message)")
                 showError(message)

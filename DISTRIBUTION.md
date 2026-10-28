@@ -3,7 +3,7 @@
 How to build the app into a `.dmg` and publish it so other people (and the in-app update check) can get it.
 
 ## What you need
-- Everything in [CONTRIBUTING.md](CONTRIBUTING.md) (Xcode with Swift 6.2 and `python3`).
+- Everything in [CONTRIBUTING.md](CONTRIBUTING.md) (Xcode with Swift 6.2).
 - The GitHub CLI, signed in, for publishing: `brew install gh`, then `gh auth login`.
 - Optional: `brew install create-dmg` for a nicer DMG window layout. Without it the script uses Finder for the same layout.
 
@@ -21,7 +21,7 @@ To install the update, they open the new DMG, drag the app into Applications and
 
 ## What your friend does
 
-Nothing needs to be installed first (no Homebrew, ffmpeg, Python or Xcode); everything ships inside the app.
+Nothing needs to be installed first (no Homebrew, ffmpeg or Xcode); everything ships inside the app.
 
 1. Open the DMG.
 2. Drag `Lecture Transcribe.app` to `Applications`.
@@ -43,6 +43,6 @@ Nothing needs to be installed first (no Homebrew, ffmpeg, Python or Xcode); ever
 
 - The DMG only runs on the kind of Mac it was built on (`arm64` for Apple Silicon, `x86_64` for Intel). A DMG built on Apple Silicon does not run on Intel Macs, and Intel copies of the app only see updates if an `x86_64` DMG is attached to the release.
 - Requires macOS 13 or later.
-- The app bundles the Python runtime, the Python dependencies in `python_release_requirements.txt`, and native `ffmpeg` + `ffprobe`. The build runs `scripts/ensure_dev_media_tools.sh`, which downloads the pinned ffmpeg build for the Mac's architecture and checks it against its checksums; to move to a newer ffmpeg, update the build and checksums in that script.
+- The app bundles native `ffmpeg` + `ffprobe` (in `Contents/Resources/ffmpeg_bin`). The build runs `scripts/ensure_dev_media_tools.sh`, which downloads the pinned ffmpeg build for the Mac's architecture and checks it against its checksums; to move to a newer ffmpeg, update the build and checksums in that script.
 - The app is ad-hoc signed during the build, and the script fails if the app inside the DMG is not validly signed (an unsigned app is reported as "damaged" on other Macs). Staging and signing happen in `~/Library/Caches/LectureTranscribe/dmg_staging` because iCloud Drive metadata under `~/Documents` breaks `codesign`.
 - For clean one-click installs without the Privacy & Security step, sign with a Developer ID certificate (Apple Developer Program, $99/year) and notarize with `xcrun notarytool`.

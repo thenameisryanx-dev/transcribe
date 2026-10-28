@@ -24,6 +24,5 @@ jobs:
         run: |
           xcodebuild -version
           swift --version
-          python3 --version
       - name: Regression check
         run: ./scripts/regression_check.sh

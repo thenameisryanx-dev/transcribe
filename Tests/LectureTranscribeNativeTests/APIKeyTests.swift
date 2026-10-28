@@ -39,7 +39,7 @@ final class StubOpenAI: URLProtocol {
     override func stopLoading() {}
 }
 
-/// The API key's status, saving and check with OpenAI, now in Swift instead of the Python backend.
+/// The API key's status, saving and check with OpenAI.
 final class APIKeyTests: XCTestCase {
     /// A stand-in for `/usr/bin/security` that keeps one saved key.
     private final class FakeKeychain: @unchecked Sendable {
@@ -145,13 +145,13 @@ final class APIKeyTests: XCTestCase {
         XCTAssertNil(keychain.saved)
     }
 
-    func testEveryBackendProcessGetsTheKey() async throws {
+    func testRunsUseTheCurrentKey() async throws {
         let keychain = FakeKeychain()
         keychain.saved = "sk-saved"
         let client = backend(keychain: keychain)
-        XCTAssertEqual(client.pythonEnvironment["OPENAI_API_KEY"], "sk-saved")
+        XCTAssertEqual(client.apiKeys.currentKey()?.key, "sk-saved")
         _ = try await client.setAPIKey("sk-session", saveToKeychain: false)
-        XCTAssertEqual(client.pythonEnvironment["OPENAI_API_KEY"], "sk-session")
+        XCTAssertEqual(client.apiKeys.currentKey()?.key, "sk-session")
     }
 
     func testOpenAIBaseURLCanPointElsewhere() {

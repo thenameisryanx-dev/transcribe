@@ -39,7 +39,8 @@ final class ScriptedOpenAI: URLProtocol {
     override func stopLoading() {}
 }
 
-/// The Swift OpenAI transcription client, checked against what the Python backend sends today.
+/// The OpenAI transcription client, checked against what the app's earlier Python backend sent
+/// (Tests/golden/openai_requests.json).
 final class OpenAIClientTests: XCTestCase {
     private var directory: URL!
     private var audio: URL!

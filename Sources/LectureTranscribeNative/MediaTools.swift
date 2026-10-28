@@ -2,8 +2,8 @@ import Foundation
 
 /// ffmpeg and ffprobe, run from Swift: reading a recording, finding pauses, cutting it into chunks, and saving a
 /// copy of a video with subtitles.
-/// Ported from the Python backend (`lecture_transcribe.py`), with the same commands, so the chunks come out
-/// byte for byte the same.
+/// The commands are the ones the app's earlier Python backend ran, so chunks come out byte for byte the same and
+/// chunks saved by an older version can still be reused.
 final class MediaTools: @unchecked Sendable {
     struct Failure: LocalizedError {
         let errorDescription: String?
@@ -64,7 +64,7 @@ final class MediaTools: @unchecked Sendable {
         executable: URL = URL(fileURLWithPath: CommandLine.arguments.first ?? "").resolvingSymlinksInPath()
     ) throws -> MediaTools {
         let bundled = executable.deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Resources/python/ffmpeg_bin")
+            .appendingPathComponent("Resources/ffmpeg_bin")
         var architecture = utsname()
         uname(&architecture)
         let machine = withUnsafeBytes(of: &architecture.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
@@ -417,7 +417,7 @@ final class MediaTools: @unchecked Sendable {
         }
     }
 
-    /// A re-encoded copy of a chunk OpenAI rejected as unreadable (`repair_audio_for_api`).
+    /// A re-encoded copy of a chunk OpenAI rejected as unreadable.
     func repairedForAPI(_ url: URL) throws -> URL {
         let repaired = url.deletingLastPathComponent().appendingPathComponent(url.deletingPathExtension().lastPathComponent + "_repaired.m4a")
         try? FileManager.default.removeItem(at: repaired)
@@ -444,7 +444,7 @@ final class MediaTools: @unchecked Sendable {
     }
 
     /// Writes a copy of `video`, in the same container, with `srt` as its only subtitle track, shown by default
-    /// (`embed_subtitles_copy`). Video and every audio track are copied without re-encoding; `audioTrack` (the one
+    /// Video and every audio track are copied without re-encoding; `audioTrack` (the one
     /// the subtitles were made from) becomes the default audio. `output`'s extension must be one of
     /// `embedSubtitleCodecs` and the file must not exist yet; it is never overwritten. `language` is a
     /// spoken-language code ("en") that tags the subtitles when known. A failed or cancelled copy is removed.
