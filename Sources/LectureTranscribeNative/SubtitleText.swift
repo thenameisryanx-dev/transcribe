@@ -335,11 +335,24 @@ enum SubtitleText {
 
     // MARK: - Speaker labels
 
-    /// "[Speaker] text" lines for a speaker-labelled transcript; segments without timing are left out.
+    /// "[Speaker] text" lines for a speaker-labelled transcript, one per sentence. The diarize model often splits
+    /// one person's sentence at its commas, so timed segments in a row from the same speaker are joined into one
+    /// turn, which is then broken into sentences like a plain transcript (a lecture is one long turn). Untimed or
+    /// empty segments are left out.
     static func diarizedLines(_ segments: [TranscriptionResult.Segment]) -> [String] {
-        segments.compactMap { segment in
-            guard segment.start != nil, segment.end != nil else { return nil }
-            return "[\(segment.speaker ?? "Speaker")] \(segment.text)"
+        var turns: [(speaker: String, texts: [String])] = []
+        for segment in segments {
+            let text = TranscriptText.words(segment.text).joined(separator: " ")
+            guard segment.start != nil, segment.end != nil, !text.isEmpty else { continue }
+            let speaker = segment.speaker ?? "Speaker"
+            if turns.last?.speaker == speaker {
+                turns[turns.count - 1].texts.append(text)
+            } else {
+                turns.append((speaker, [text]))
+            }
+        }
+        return turns.flatMap { turn in
+            TranscriptText.sentenceLines(turn.texts.joined(separator: " ")).map { "[\(turn.speaker)] \($0)" }
         }
     }
 }

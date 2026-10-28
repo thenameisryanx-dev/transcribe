@@ -456,7 +456,8 @@
       "offset_seconds": 0.0
     },
     "output": [
-      "[A] Good morning, everyone. Today we're talking about substitution.",
+      "[A] Good morning, everyone.",
+      "[A] Today we're talking about substitution.",
       "[A] The SN2 reaction happens in a single concerted step, where the nucleophile attacks from the back side while the leaving group departs, and the stereochemistry inverts like an umbrella in the wind.",
       "[A] Okay.",
       "[A] Any questions so far?"
@@ -585,7 +586,8 @@
     "output": [
       "[A] Where were you?",
       "[B] Out.",
-      "[A] Out where? The lab closes at six.",
+      "[A] Out where?",
+      "[A] The lab closes at six.",
       "[B] Library.",
       "[A] Fine, but next time leave a note on the board."
     ]
@@ -713,8 +715,7 @@
     "output": [
       "[A] First line.",
       "[A] Hm.",
-      "[B] Much later.",
-      "[B]    "
+      "[B] Much later."
     ]
   },
   {

@@ -524,21 +524,37 @@ def _segment_fields(seg: Any) -> tuple[Any, float | None, float | None, str]:
 
 
 def format_diarized_lines(segments: list[Any], offset_seconds: float = 0.0) -> list[str]:
-    lines: list[str] = []
+    """
+    One labelled line per sentence. The diarize model often splits one person's sentence at its commas, so timed
+    segments in a row from the same speaker are joined into one turn, which is then broken into sentences like a
+    plain transcript (a lecture is one long turn). Untimed or empty segments are left out.
+    """
+    # [label, start, end, texts] for each turn.
+    turns: list[list[Any]] = []
     for seg in segments:
         speaker, start, end, text = _segment_fields(seg)
-        if start is None or end is None:
+        text = " ".join(text.split())
+        if start is None or end is None or not text:
             continue
-
         speaker_label = speaker if speaker is not None else "Speaker"
-        if DIARIZE_INCLUDE_TIMESTAMPS:
-            lines.append(
-                f"[{speaker_label}] "
-                f"{hhmmss(offset_seconds + start)}-{hhmmss(offset_seconds + end)} "
-                f"{text}"
-            )
+        if turns and turns[-1][0] == speaker_label:
+            turns[-1][2] = end
+            turns[-1][3].append(text)
         else:
-            lines.append(f"[{speaker_label}] {text}")
+            turns.append([speaker_label, start, end, [text]])
+
+    lines: list[str] = []
+    for speaker_label, start, end, texts in turns:
+        for n, sentence in enumerate(sentence_lines(" ".join(texts))):
+            if DIARIZE_INCLUDE_TIMESTAMPS and n == 0:
+                # The turn's time goes on its first line.
+                lines.append(
+                    f"[{speaker_label}] "
+                    f"{hhmmss(offset_seconds + start)}-{hhmmss(offset_seconds + end)} "
+                    f"{sentence}"
+                )
+            else:
+                lines.append(f"[{speaker_label}] {sentence}")
     return lines
 
 

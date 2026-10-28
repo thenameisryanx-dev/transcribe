@@ -5,6 +5,7 @@ RESPONSE_FORMAT: diarized_json
 CHUNKING_STRATEGY: "auto"
 DURATION_SECONDS: 150.000
 
-[A] Part 1. Where were you?
+[A] Part 1.
+[A] Where were you?
 [B] Out.
 [A] Then let's go over the mechanism again, because the nucleophile attacks from the back side and the stereochemistry inverts.
