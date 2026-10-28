@@ -1,6 +1,7 @@
 import Foundation
 
-/// ffmpeg and ffprobe, run from Swift: reading a recording, finding pauses, and cutting it into chunks.
+/// ffmpeg and ffprobe, run from Swift: reading a recording, finding pauses, cutting it into chunks, and saving a
+/// copy of a video with subtitles.
 /// Ported from the Python backend (`lecture_transcribe.py`), with the same commands, so the chunks come out
 /// byte for byte the same.
 final class MediaTools: @unchecked Sendable {
@@ -23,6 +24,27 @@ final class MediaTools: @unchecked Sendable {
     static let audioBitrate = "128k"
     static let audioChannels = "1"
     static let processTimeout: TimeInterval = 30 * 60
+
+    /// Containers a subtitled copy of a video can be saved in (by extension), with the subtitle format each takes.
+    /// The .srt is added without re-encoding, so only containers that hold text subtitles qualify. The subtitles
+    /// are the copy's only subtitle track: QuickTime showed none at all for an episode that also carried its 32
+    /// original subtitle tracks.
+    static let embedSubtitleCodecs = ["mp4": "mov_text", "m4v": "mov_text", "mov": "mov_text", "mkv": "srt"]
+    /// The sample format ffmpeg writes for mov_text subtitles. In a .mov it labels them "text" (old QuickTime text)
+    /// unless told otherwise, and Apple's players then list the track but show nothing.
+    static let movTextTag = "tx3g"
+    /// MP4 and QuickTime files need three-letter ISO 639-2 language codes (ffmpeg silently drops "en"). These cover
+    /// the languages the app offers; Matroska asks for the bibliographic form where it differs.
+    static let iso639_2: [String: String] = [
+        "ar": "ara", "cs": "ces", "da": "dan", "de": "deu", "el": "ell", "en": "eng", "es": "spa", "fa": "fas",
+        "fi": "fin", "fr": "fra", "he": "heb", "hi": "hin", "hu": "hun", "id": "ind", "it": "ita", "ja": "jpn",
+        "ko": "kor", "ms": "msa", "nl": "nld", "no": "nor", "pl": "pol", "pt": "por", "ro": "ron", "ru": "rus",
+        "sv": "swe", "th": "tha", "tl": "tgl", "tr": "tur", "uk": "ukr", "ur": "urd", "vi": "vie", "zh": "zho",
+    ]
+    static let iso639_2Bibliographic: [String: String] = [
+        "ces": "cze", "deu": "ger", "ell": "gre", "fas": "per", "fra": "fre", "msa": "may", "nld": "dut",
+        "ron": "rum", "zho": "chi",
+    ]
 
     let ffmpeg: URL
     let ffprobe: URL
@@ -187,6 +209,15 @@ final class MediaTools: @unchecked Sendable {
             .flatMap { $0.split(separator: "\n").first.flatMap { Int($0) } }
     }
 
+    /// Codecs of the file's video tracks, leaving out cover art (empty if ffprobe can't tell).
+    func videoCodecNames(_ url: URL) -> [String] {
+        let output = probe(["-select_streams", "V", "-show_entries", "stream=codec_name", "-of", "csv=p=0", url.path]) ?? ""
+        // Side data (e.g. a Dolby Vision record) adds empty fields after the codec: "hevc,".
+        return output.split(separator: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .map { $0.split(separator: ",", omittingEmptySubsequences: false)[0].trimmingCharacters(in: .whitespaces).lowercased() }
+    }
+
     // MARK: - Finding pauses
 
     /// The time of the quietest ~0.5s inside [windowStart, windowStart + windowSeconds], or nil.
@@ -249,13 +280,18 @@ final class MediaTools: @unchecked Sendable {
 
     // MARK: - Splitting
 
-    /// Runs an ffmpeg command that writes `-progress pipe:1`, passing the share of the input processed so far.
-    private func runWithProgress(_ arguments: [String], totalSeconds: Double, quiet: Bool, onProgress: @escaping (Double) -> Void) throws {
-        let result = try run(ffmpeg, arguments, captureErrors: !quiet) { line in
+    /// Reads the lines of `-progress pipe:1`, passing the share of the input processed so far.
+    private static func progressReader(totalSeconds: Double, _ onProgress: @escaping (Double) -> Void) -> (String) -> Void {
+        { line in
             // out_time_us is the position reached in the input; it keeps counting across segments.
             guard totalSeconds > 0, line.hasPrefix("out_time_us="), let micros = Int(line.dropFirst("out_time_us=".count)) else { return }
             onProgress(min(max(Double(micros) / 1_000_000 / totalSeconds, 0), 1))
         }
+    }
+
+    /// Runs an ffmpeg command that writes `-progress pipe:1`, passing the share of the input processed so far.
+    private func runWithProgress(_ arguments: [String], totalSeconds: Double, quiet: Bool, onProgress: @escaping (Double) -> Void) throws {
+        let result = try run(ffmpeg, arguments, captureErrors: !quiet, onLine: Self.progressReader(totalSeconds: totalSeconds, onProgress))
         guard result.status == 0 else {
             let detail = result.errors.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").suffix(3).joined(separator: " ")
             throw Failure("ffmpeg failed (exit \(result.status))\(detail.isEmpty ? "" : ": \(detail)")")
@@ -348,6 +384,86 @@ final class MediaTools: @unchecked Sendable {
             throw Failure("Could not repair audio for transcription: \(result.errors.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         return repaired
+    }
+
+    // MARK: - Subtitled copies
+
+    /// Three-letter language tag for a subtitle track in this container, or nil if the code isn't known.
+    static func subtitleTrackLanguage(_ code: String?, containerExtension: String) -> String? {
+        let code = (code ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let isThreeLetters = code.unicodeScalars.count == 3 && code.unicodeScalars.allSatisfy { ("a"..."z").contains($0) }
+        guard var tag = iso639_2[code] ?? (isThreeLetters ? code : nil) else { return nil }
+        if containerExtension.lowercased() == "mkv" {
+            tag = iso639_2Bibliographic[tag] ?? tag
+        }
+        return tag
+    }
+
+    /// Writes a copy of `video`, in the same container, with `srt` as its only subtitle track, shown by default
+    /// (`embed_subtitles_copy`). Video and every audio track are copied without re-encoding; `audioTrack` (the one
+    /// the subtitles were made from) becomes the default audio. `output`'s extension must be one of
+    /// `embedSubtitleCodecs` and the file must not exist yet; it is never overwritten. `language` is a
+    /// spoken-language code ("en") that tags the subtitles when known. A failed or cancelled copy is removed.
+    func embedSubtitlesCopy(
+        video: URL,
+        srt: URL,
+        output: URL,
+        language: String?,
+        audioTrack: Int = 0,
+        onProgress: @escaping (Double) -> Void = { _ in }
+    ) throws {
+        let container = output.pathExtension.lowercased()
+        guard let codec = Self.embedSubtitleCodecs[container] else {
+            throw Failure("Subtitles can't be built into .\(container) videos.")
+        }
+        var trackOptions = ["-c:s", codec, "-disposition:s:0", "default"]
+        if container != "mkv" {
+            trackOptions += ["-tag:s:0", Self.movTextTag]
+            // QuickTime only plays HEVC tagged hvc1 in these containers; ffmpeg's default tag for it is hev1.
+            for (index, codec) in videoCodecNames(video).enumerated() where codec == "hevc" {
+                trackOptions += ["-tag:v:\(index)", "hvc1"]
+            }
+        }
+        // Play the language the subtitles were made from; the others stay selectable.
+        let audioCount = audioTracks(video).count
+        if audioCount > 1 && (0..<audioCount).contains(audioTrack) {
+            for index in 0..<audioCount {
+                trackOptions += ["-disposition:a:\(index)", index == audioTrack ? "default" : "-default"]
+            }
+        }
+        if let tag = Self.subtitleTrackLanguage(language, containerExtension: container) {
+            trackOptions += ["-metadata:s:s:0", "language=\(tag)"]
+        }
+
+        let arguments = [
+            "-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
+            // Refuse to overwrite, in case a file appeared at `output` after it was chosen.
+            "-n",
+            "-i", video.path,
+            "-i", srt.path,
+            // Video (not cover art) and audio from the original, then the subtitles. The original's own subtitle
+            // and data tracks are left out (see embedSubtitleCodecs); chapters are kept.
+            "-map", "0:V",
+            "-map", "0:a?",
+            "-map", "1:0",
+            "-c", "copy",
+        ] + trackOptions + [output.path]
+        let status: Int32
+        do {
+            status = try run(ffmpeg, arguments, onLine: Self.progressReader(totalSeconds: duration(video), onProgress)).status
+        } catch {
+            try? FileManager.default.removeItem(at: output)
+            // `run` stops a tool that takes too long with a Failure.
+            if error is Failure { throw Failure("Timed out saving the copy of the video with subtitles.") }
+            throw error
+        }
+        guard status == 0 else {
+            try? FileManager.default.removeItem(at: output)
+            throw Failure("ffmpeg couldn't copy this video's tracks into .\(output.pathExtension) (exit code \(status)).")
+        }
+        guard ((try? output.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0 else {
+            throw Failure("ffmpeg didn't write the copy of the video with subtitles.")
+        }
     }
 
     /// Removes a chunk folder's `part_*.m4a` files, then the folder if that left it empty (`cleanup_dir`).

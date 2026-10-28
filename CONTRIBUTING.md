@@ -20,7 +20,7 @@
   - Python backend: `.venv/bin/python3 -m unittest discover -s Tests/python` (no OpenAI calls; uses `vendor/ffmpeg`, so run `scripts/ensure_dev_media_tools.sh` first on a fresh clone)
 - When you add or fix a feature, add a test for it in the same change.
 - If you change a model's abilities (speaker labels, keywords, consistency mode, languages), update `Tests/model_rules.json` along with both `TranscriptionModel` and `lecture_transcribe.py`.
-- Plain transcript runs are done in Swift (`TranscriptJob.swift`) and must match the backend's reference runs in `Tests/golden/runs`; to compare with the Python backend, launch with `TRANSCRIBE_PYTHON_RUNS=1`.
+- Transcription runs (plain transcripts, speaker labels and subtitles) are done in Swift (`TranscriptJob.swift`, `SubtitleText.swift`) and must match the backend's reference runs in `Tests/golden/runs`; to compare with the Python backend, launch with `TRANSCRIBE_PYTHON_RUNS=1`.
 - `Tests/golden/` records the backend's exact output. If you change the output on purpose, regenerate it with `.venv/bin/python3 Tests/python/golden.py --update` and check the diff shows only the change you meant.
 - Minimum manual validation for UI/backend changes:
   - Start one transcription from the app and confirm progress/status updates and output file creation.

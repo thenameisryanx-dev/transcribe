@@ -356,7 +356,33 @@
   {
     "function": "format_srt(subtitle_cues)",
     "input": {
-      "segments": "one_speaker",
+      "name": "one_speaker",
+      "segments": [
+        {
+          "speaker": "A",
+          "start": 0.0,
+          "end": 4.2,
+          "text": "Good morning, everyone. Today we're talking about substitution."
+        },
+        {
+          "speaker": "A",
+          "start": 4.6,
+          "end": 13.9,
+          "text": "The SN2 reaction happens in a single concerted step, where the nucleophile attacks from the back side while the leaving group departs, and the stereochemistry inverts like an umbrella in the wind."
+        },
+        {
+          "speaker": "A",
+          "start": 14.0,
+          "end": 14.4,
+          "text": "Okay."
+        },
+        {
+          "speaker": "A",
+          "start": 14.5,
+          "end": 16.0,
+          "text": "Any questions so far?"
+        }
+      ],
       "offset_seconds": 0.0,
       "chunk": 0
     },
@@ -365,7 +391,33 @@
   {
     "function": "format_srt(subtitle_cues)",
     "input": {
-      "segments": "one_speaker",
+      "name": "one_speaker",
+      "segments": [
+        {
+          "speaker": "A",
+          "start": 0.0,
+          "end": 4.2,
+          "text": "Good morning, everyone. Today we're talking about substitution."
+        },
+        {
+          "speaker": "A",
+          "start": 4.6,
+          "end": 13.9,
+          "text": "The SN2 reaction happens in a single concerted step, where the nucleophile attacks from the back side while the leaving group departs, and the stereochemistry inverts like an umbrella in the wind."
+        },
+        {
+          "speaker": "A",
+          "start": 14.0,
+          "end": 14.4,
+          "text": "Okay."
+        },
+        {
+          "speaker": "A",
+          "start": 14.5,
+          "end": 16.0,
+          "text": "Any questions so far?"
+        }
+      ],
       "offset_seconds": 599.586,
       "chunk": 1
     },
@@ -374,7 +426,33 @@
   {
     "function": "format_diarized_lines",
     "input": {
-      "segments": "one_speaker",
+      "name": "one_speaker",
+      "segments": [
+        {
+          "speaker": "A",
+          "start": 0.0,
+          "end": 4.2,
+          "text": "Good morning, everyone. Today we're talking about substitution."
+        },
+        {
+          "speaker": "A",
+          "start": 4.6,
+          "end": 13.9,
+          "text": "The SN2 reaction happens in a single concerted step, where the nucleophile attacks from the back side while the leaving group departs, and the stereochemistry inverts like an umbrella in the wind."
+        },
+        {
+          "speaker": "A",
+          "start": 14.0,
+          "end": 14.4,
+          "text": "Okay."
+        },
+        {
+          "speaker": "A",
+          "start": 14.5,
+          "end": 16.0,
+          "text": "Any questions so far?"
+        }
+      ],
       "offset_seconds": 0.0
     },
     "output": [
@@ -387,7 +465,39 @@
   {
     "function": "format_srt(subtitle_cues)",
     "input": {
-      "segments": "quick_exchange",
+      "name": "quick_exchange",
+      "segments": [
+        {
+          "speaker": "A",
+          "start": 0.0,
+          "end": 0.6,
+          "text": "Where were you?"
+        },
+        {
+          "speaker": "B",
+          "start": 0.7,
+          "end": 1.0,
+          "text": "Out."
+        },
+        {
+          "speaker": "A",
+          "start": 1.2,
+          "end": 3.0,
+          "text": "Out where? The lab closes at six."
+        },
+        {
+          "speaker": "B",
+          "start": 3.1,
+          "end": 3.3,
+          "text": "Library."
+        },
+        {
+          "speaker": "A",
+          "start": 6.0,
+          "end": 9.5,
+          "text": "Fine, but next time leave a note on the board."
+        }
+      ],
       "offset_seconds": 0.0,
       "chunk": 0
     },
@@ -396,7 +506,39 @@
   {
     "function": "format_srt(subtitle_cues)",
     "input": {
-      "segments": "quick_exchange",
+      "name": "quick_exchange",
+      "segments": [
+        {
+          "speaker": "A",
+          "start": 0.0,
+          "end": 0.6,
+          "text": "Where were you?"
+        },
+        {
+          "speaker": "B",
+          "start": 0.7,
+          "end": 1.0,
+          "text": "Out."
+        },
+        {
+          "speaker": "A",
+          "start": 1.2,
+          "end": 3.0,
+          "text": "Out where? The lab closes at six."
+        },
+        {
+          "speaker": "B",
+          "start": 3.1,
+          "end": 3.3,
+          "text": "Library."
+        },
+        {
+          "speaker": "A",
+          "start": 6.0,
+          "end": 9.5,
+          "text": "Fine, but next time leave a note on the board."
+        }
+      ],
       "offset_seconds": 599.586,
       "chunk": 1
     },
@@ -405,7 +547,39 @@
   {
     "function": "format_diarized_lines",
     "input": {
-      "segments": "quick_exchange",
+      "name": "quick_exchange",
+      "segments": [
+        {
+          "speaker": "A",
+          "start": 0.0,
+          "end": 0.6,
+          "text": "Where were you?"
+        },
+        {
+          "speaker": "B",
+          "start": 0.7,
+          "end": 1.0,
+          "text": "Out."
+        },
+        {
+          "speaker": "A",
+          "start": 1.2,
+          "end": 3.0,
+          "text": "Out where? The lab closes at six."
+        },
+        {
+          "speaker": "B",
+          "start": 3.1,
+          "end": 3.3,
+          "text": "Library."
+        },
+        {
+          "speaker": "A",
+          "start": 6.0,
+          "end": 9.5,
+          "text": "Fine, but next time leave a note on the board."
+        }
+      ],
       "offset_seconds": 0.0
     },
     "output": [
@@ -419,7 +593,39 @@
   {
     "function": "format_srt(subtitle_cues)",
     "input": {
-      "segments": "gaps_and_untimed",
+      "name": "gaps_and_untimed",
+      "segments": [
+        {
+          "speaker": "A",
+          "start": 0.0,
+          "end": 2.0,
+          "text": "First line."
+        },
+        {
+          "speaker": "A",
+          "start": null,
+          "end": null,
+          "text": "This one has no timing and is skipped."
+        },
+        {
+          "speaker": "A",
+          "start": 2.05,
+          "end": 2.3,
+          "text": "Hm."
+        },
+        {
+          "speaker": "B",
+          "start": 30.0,
+          "end": 31.0,
+          "text": "Much later."
+        },
+        {
+          "speaker": "B",
+          "start": 31.0,
+          "end": 31.0,
+          "text": "   "
+        }
+      ],
       "offset_seconds": 0.0,
       "chunk": 0
     },
@@ -428,7 +634,39 @@
   {
     "function": "format_srt(subtitle_cues)",
     "input": {
-      "segments": "gaps_and_untimed",
+      "name": "gaps_and_untimed",
+      "segments": [
+        {
+          "speaker": "A",
+          "start": 0.0,
+          "end": 2.0,
+          "text": "First line."
+        },
+        {
+          "speaker": "A",
+          "start": null,
+          "end": null,
+          "text": "This one has no timing and is skipped."
+        },
+        {
+          "speaker": "A",
+          "start": 2.05,
+          "end": 2.3,
+          "text": "Hm."
+        },
+        {
+          "speaker": "B",
+          "start": 30.0,
+          "end": 31.0,
+          "text": "Much later."
+        },
+        {
+          "speaker": "B",
+          "start": 31.0,
+          "end": 31.0,
+          "text": "   "
+        }
+      ],
       "offset_seconds": 599.586,
       "chunk": 1
     },
@@ -437,7 +675,39 @@
   {
     "function": "format_diarized_lines",
     "input": {
-      "segments": "gaps_and_untimed",
+      "name": "gaps_and_untimed",
+      "segments": [
+        {
+          "speaker": "A",
+          "start": 0.0,
+          "end": 2.0,
+          "text": "First line."
+        },
+        {
+          "speaker": "A",
+          "start": null,
+          "end": null,
+          "text": "This one has no timing and is skipped."
+        },
+        {
+          "speaker": "A",
+          "start": 2.05,
+          "end": 2.3,
+          "text": "Hm."
+        },
+        {
+          "speaker": "B",
+          "start": 30.0,
+          "end": 31.0,
+          "text": "Much later."
+        },
+        {
+          "speaker": "B",
+          "start": 31.0,
+          "end": 31.0,
+          "text": "   "
+        }
+      ],
       "offset_seconds": 0.0
     },
     "output": [

@@ -1,9 +1,9 @@
 import Foundation
 
-/// A plain transcript run (no speaker labels or subtitles), done in Swift. Ported from the backend's
-/// `run_transcription_job`: the recording is cut into chunks at pauses, each chunk is sent to OpenAI and
-/// checked, finished chunks are saved so a failed run can resume, and the transcript is written only once
-/// every chunk succeeds. Tests check its output against the backend's (Tests/golden/runs).
+/// A transcription run done in Swift: a plain transcript, one with speaker labels, or subtitles. Ported from the
+/// backend's `run_transcription_job`: the recording is cut into chunks at pauses, each chunk is sent to OpenAI
+/// (and a plain transcript's text checked), finished chunks are saved so a failed run can resume, and the output
+/// is written only once every chunk succeeds. Tests check its output against the backend's (Tests/golden/runs).
 struct TranscriptJob: Sendable {
     struct Failure: LocalizedError {
         let errorDescription: String?
@@ -26,6 +26,16 @@ struct TranscriptJob: Sendable {
     static let defaultChunkSeconds = 300
     static let defaultMaxParallel = 4
 
+    /// Speaker labels and subtitles both use the diarize model: it labels speakers, and it's the only model
+    /// that returns a start and end time for what it hears.
+    static let diarizeModel = "gpt-4o-transcribe-diarize"
+    /// The diarize model refuses longer audio.
+    static let diarizeMaxSeconds = 1400
+    /// Speaker labels for audio up to this long are made in one request (kept under the limit to be safe).
+    static let defaultDiarizeSingleRequestSeconds = 1300.0
+    /// Smaller chunks reduce timeout risk on long recordings.
+    static let defaultDiarizeChunkSeconds = 600
+
     let request: RunRequest
     let apiKey: String
     let openAI: OpenAIClient
@@ -35,11 +45,12 @@ struct TranscriptJob: Sendable {
     let maxParallel: Int
     let emit: @Sendable (BackendStreamEvent) -> Void
     var now: @Sendable () -> Date = { Date() }
+    var diarizeSingleRequestSeconds = TranscriptJob.defaultDiarizeSingleRequestSeconds
+    var diarizeChunkSeconds = TranscriptJob.defaultDiarizeChunkSeconds
 
-    /// Runs Swift does: plain transcripts. Speaker labels, subtitles and .qta files still go to the backend.
+    /// Runs Swift does: everything but .qta files, which still go to the backend.
     static func handles(_ request: RunRequest) -> Bool {
-        !request.diarize && !request.subtitles
-            && URL(fileURLWithPath: request.inputPath).pathExtension.lowercased() != "qta"
+        URL(fileURLWithPath: request.inputPath).pathExtension.lowercased() != "qta"
     }
 
     static func maxParallel(environment: [String: String]) -> Int {
@@ -48,7 +59,19 @@ struct TranscriptJob: Sendable {
 
     private func log(_ message: String) { emit(.log(message)) }
 
-    /// The transcript file it wrote.
+    /// What every kind of run works from.
+    private struct Setup {
+        let input: URL
+        let audioTrack: Int
+        let languages: [String]?
+        let runID: String
+        /// The input's name made safe for file names.
+        let stem: String
+        let outputDirectory: URL
+        let results: ChunkResultStore
+    }
+
+    /// The transcript or subtitle file it wrote.
     func run() async throws -> URL {
         let resultsRoot = workDirectory.appendingPathComponent("chunk_results")
         ChunkResultStore.prune(resultsRoot)
@@ -67,17 +90,60 @@ struct TranscriptJob: Sendable {
             log("Audio track: \(audioTrack + 1) of \(tracks.count) (\(details.isEmpty ? "no language tag" : details)).")
         }
 
-        log("Using transcription model: \(model)")
-        // gpt-transcribe takes the whole list; the GPT-4o models take at most one `language`.
+        // RunRequest has already turned off what doesn't apply: speaker labels with subtitles, and the prompt,
+        // keywords and chunk length with either (the diarize model takes none of them).
+        let usesDiarizeModel = request.diarize || request.subtitles
+        if request.subtitles {
+            log("Making subtitles with \(Self.diarizeModel), the model that returns timing for each line.")
+        } else {
+            log("Using transcription model: \(model)")
+        }
+        // gpt-transcribe takes the whole list; the GPT-4o and diarize models take at most one `language`.
         let languages: [String]?
-        if request.model == .gptTranscribe {
+        if request.model == .gptTranscribe && !usesDiarizeModel {
             languages = request.languages.isEmpty ? Self.defaultLanguages : request.languages
             log("Spoken languages: \(languages!.joined(separator: ", "))")
         } else {
             languages = request.languages.isEmpty ? nil : request.languages
-            let single = languages.flatMap { $0.count == 1 && $0[0].count == 2 ? $0[0] : nil }
-            log("Spoken language: \(single ?? "auto-detect")")
+            log("Spoken language: \(TranscriptionRequest.singleLanguage(languages) ?? "auto-detect")")
         }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        let outputDirectory = URL(fileURLWithPath: request.outputDirectory)
+        let setup = Setup(
+            input: input,
+            audioTrack: audioTrack,
+            languages: languages,
+            runID: formatter.string(from: now()),
+            stem: TranscriptText.safeStem(input),
+            outputDirectory: outputDirectory,
+            results: ChunkResultStore(root: resultsRoot)
+        )
+
+        // Transcripts are written only after every chunk succeeds, so a failed or cancelled run never leaves
+        // a partial file in the output folder.
+        if request.subtitles {
+            return try await writeSubtitles(setup)
+        }
+        if request.diarize {
+            return try await writeSpeakerLabels(setup)
+        }
+        return try await writeTranscript(setup)
+    }
+
+    /// Surround sources keep dialogue in the center channel; splitting mixes them down to mono.
+    private func logChannels(_ setup: Setup) async throws {
+        if let channels = try await offload({ media.channelCount(setup.input, audioTrack: setup.audioTrack) }), channels > MediaTools.maxCopyChannels {
+            log("Source audio has \(channels) channels. Mixing down to mono for transcription.")
+        }
+    }
+
+    // MARK: - Plain transcripts
+
+    private func writeTranscript(_ setup: Setup) async throws -> URL {
+        let model = request.model.rawValue
         // Accents kept with their letters (NFC), as the backend does, so either can reuse the other's saved chunks.
         let trimmedContext = request.context.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
         let context: String? = trimmedContext.isEmpty ? nil : trimmedContext
@@ -87,63 +153,46 @@ struct TranscriptJob: Sendable {
         log("Keywords: \(keywords.isEmpty ? "none" : keywords.joined(separator: ", "))")
         log("Consistency mode (carry context between chunks): \(carryContext ? "on" : "off")")
 
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        let runID = formatter.string(from: now())
-        let stem = TranscriptText.safeStem(input)
-        let outputDirectory = URL(fileURLWithPath: request.outputDirectory)
-        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        let output = outputDirectory.appendingPathComponent("\(stem)_\(runID).txt")
-
-        // Surround sources keep dialogue in the center channel; splitting mixes them down to mono.
-        if let channels = try await offload({ media.channelCount(input, audioTrack: audioTrack) }), channels > MediaTools.maxCopyChannels {
-            log("Source audio has \(channels) channels. Mixing down to mono for transcription.")
-        }
+        try FileManager.default.createDirectory(at: setup.outputDirectory, withIntermediateDirectories: true)
+        let output = setup.outputDirectory.appendingPathComponent("\(setup.stem)_\(setup.runID).txt")
+        try await logChannels(setup)
 
         let chunkSeconds = request.chunkSeconds ?? Self.defaultChunkSeconds
         log("Chunk size: \(chunkSeconds / 60) minute(s) per request (cut at the nearest pause).")
-        let chunksDirectory = workDirectory.appendingPathComponent("chunks/\(stem)_\(runID)")
-        let results = ChunkResultStore(root: resultsRoot)
+        let chunksDirectory = workDirectory.appendingPathComponent("chunks/\(setup.stem)_\(setup.runID)")
+        let results = setup.results
         emit(.status("Preparing audio chunks..."))
 
-        // Transcripts are written only after every chunk succeeds, so a failed or cancelled run never leaves
-        // a partial file in the output folder.
         let chunkResults: [(text: String, warning: String?)]
         let spans: [(start: Double, end: Double)]
         let parts: [URL]
         do {
             defer { media.removeChunks(in: chunksDirectory) }
-            let emit = self.emit
-            parts = try await offload {
-                try media.split(input, into: chunksDirectory, chunkSeconds: chunkSeconds, audioTrack: audioTrack) {
-                    emit(.progress(Self.prepareProgress * $0))
-                }
-            }
+            parts = try await split(setup, into: chunksDirectory, chunkSeconds: chunkSeconds)
             log("Prepared \(parts.count) chunk(s) for transcription.")
             results.total = parts.count
             // Chunks are cut at pauses, so their lengths vary; measure them for the section headers.
             spans = try await offload { chunkSpans(parts, fallbackSeconds: Double(chunkSeconds)) }
 
             let transcriber = ChunkTranscriber(
-                job: self, results: results, model: model, languages: languages, context: context, keywords: keywords
+                job: self, results: results, model: model, languages: setup.languages, context: context, keywords: keywords
             )
             chunkResults = try await reportingSavedChunks(results) {
                 if carryContext && parts.count > 1 {
                     return try await transcribeInOrder(parts, transcriber: transcriber)
                 }
-                return try await transcribeInParallel(parts, transcriber: transcriber)
+                return try await inParallel(parts, label: "Transcribing") { try await transcriber.transcribe($0, previousTail: nil) }
             }
         }
 
         let warnings = chunkResults.compactMap(\.warning)
         warnings.forEach { emit(.warning($0)) }
         var sections = [TranscriptText.header(
-            inputPath: input.path,
-            workingInputPath: input.path,
+            inputPath: setup.input.path,
+            workingInputPath: setup.input.path,
             model: model,
             localChunkSeconds: chunkSeconds,
-            languages: languages ?? [],
+            languages: setup.languages ?? [],
             context: context ?? "",
             keywords: keywords,
             consistencyMode: carryContext,
@@ -160,6 +209,244 @@ struct TranscriptJob: Sendable {
         try Data(sections.joined().utf8).write(to: output)
         results.discard()
         return output
+    }
+
+    /// One chunk at a time, each one's prompt ending with the previous chunk's closing words.
+    private func transcribeInOrder(_ parts: [URL], transcriber: ChunkTranscriber) async throws -> [(text: String, warning: String?)] {
+        let total = parts.count
+        log("Transcribing \(total) chunk(s) one at a time, carrying context between chunks.")
+        emit(.status("Transcribing: 0/\(total) chunks done"))
+        var results: [(text: String, warning: String?)] = []
+        for (index, part) in parts.enumerated() {
+            var tail: String?
+            if let previous = results.last {
+                if previous.warning != nil || previous.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    log("Not carrying context into \(part.lastPathComponent): the previous chunk failed its check.")
+                } else {
+                    tail = TranscriptText.transcriptTail(previous.text)
+                }
+            }
+            results.append(try await transcriber.transcribe(part, previousTail: tail))
+            log("Finished chunk \(index + 1)/\(total): \(part.lastPathComponent)")
+            emit(.status("Transcribing: \(index + 1)/\(total) chunks done"))
+            emit(.progress(progress(done: index + 1, total: total)))
+        }
+        return results
+    }
+
+    // MARK: - Speaker labels
+
+    private func writeSpeakerLabels(_ setup: Setup) async throws -> URL {
+        try FileManager.default.createDirectory(at: setup.outputDirectory, withIntermediateDirectories: true)
+        let output = setup.outputDirectory.appendingPathComponent("\(setup.stem)_\(setup.runID)_diarize.txt")
+        try await logChannels(setup)
+        let input = setup.input
+        let duration = try await offload { media.duration(input) }
+
+        if 0 < duration && duration <= diarizeSingleRequestSeconds {
+            emit(.status("Preparing audio..."))
+            let singleDirectory = workDirectory.appendingPathComponent("chunks/\(setup.stem)_\(setup.runID)_single")
+            let content: String
+            do {
+                defer { media.removeChunks(in: singleDirectory) }
+                // The original file can be too big (WAV, video) or in a format the API rejects, so it goes through
+                // the same copy-or-convert step as chunks. The audio is shorter than the diarize model's limit, so
+                // this yields exactly one piece.
+                let parts = try await split(setup, into: singleDirectory, chunkSeconds: Self.diarizeMaxSeconds)
+                guard parts.count == 1 else {
+                    throw Failure("Expected one audio piece for a single diarize request, got \(parts.count).")
+                }
+                emit(.status("Diarizing (single request)..."))
+                let result = try await send(diarizeRequest(setup.languages), audio: parts[0])
+                content = result.segments.isEmpty ? result.text : SubtitleText.diarizedLines(result.segments).joined(separator: "\n")
+            }
+            let header = TranscriptText.header(
+                inputPath: input.path,
+                workingInputPath: input.path,
+                model: Self.diarizeModel,
+                responseFormat: "diarized_json",
+                chunkingStrategy: "auto",
+                durationSeconds: duration
+            )
+            try Data((header + content).utf8).write(to: output)
+            emit(.progress(100))
+            return output
+        }
+
+        log("Long audio detected. Using local chunks for diarization...")
+        emit(.status("Preparing audio chunks..."))
+        let chunks = try await diarizeInChunks(
+            setup,
+            into: workDirectory.appendingPathComponent("chunks/\(setup.stem)_\(setup.runID)_diarize"),
+            preparedFor: "diarization",
+            label: "Diarizing"
+        )
+        var lines: [String] = []
+        for chunk in chunks {
+            if chunk.result.segments.isEmpty {
+                lines.append("\n===== \(chunk.part.lastPathComponent) =====\n")
+                lines += TranscriptText.sentenceLines(chunk.result.text)
+            } else {
+                lines += SubtitleText.diarizedLines(chunk.result.segments)
+            }
+        }
+        let header = TranscriptText.header(
+            inputPath: input.path,
+            workingInputPath: input.path,
+            model: Self.diarizeModel,
+            responseFormat: "diarized_json",
+            chunkingStrategy: "auto",
+            localChunkSeconds: diarizeChunkSeconds,
+            durationSeconds: duration
+        )
+        try Data((header + lines.joined(separator: "\n")).utf8).write(to: output)
+        setup.results.discard()
+        return output
+    }
+
+    // MARK: - Subtitles
+
+    /// Transcribes the audio with the diarize model, whose segments are timed, and writes them as an .srt file,
+    /// then saves a copy of the video with the subtitles built in when asked.
+    private func writeSubtitles(_ setup: Setup) async throws -> URL {
+        try FileManager.default.createDirectory(at: setup.outputDirectory, withIntermediateDirectories: true)
+        // Video players load subtitles named after the video when they sit next to it, so use its exact name when
+        // that file doesn't exist yet. Players that match loosely also find the run-stamped name.
+        let name = setup.input.deletingPathExtension().lastPathComponent
+        var output = setup.outputDirectory.appendingPathComponent("\(name).srt")
+        if FileManager.default.fileExists(atPath: output.path) {
+            output = setup.outputDirectory.appendingPathComponent("\(name).\(setup.runID).srt")
+        }
+        try await logChannels(setup)
+
+        emit(.status("Preparing audio chunks..."))
+        let chunks = try await diarizeInChunks(
+            setup,
+            into: workDirectory.appendingPathComponent("chunks/\(setup.stem)_\(setup.runID)_subtitles"),
+            preparedFor: "subtitles",
+            label: "Transcribing"
+        )
+        var cues: [SubtitleText.Cue] = []
+        for (index, chunk) in chunks.enumerated() {
+            let chunkCues = SubtitleText.cues(chunk.result.segments, offsetSeconds: chunk.offset, chunk: index)
+            if chunkCues.isEmpty && !chunk.result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                emit(.warning("\(chunk.part.lastPathComponent): the model returned text without timing, so this part has no subtitles."))
+            }
+            cues += chunkCues
+        }
+        guard !cues.isEmpty else {
+            throw Failure("No speech was found in this file, so there are no subtitles to write.")
+        }
+        try Data(SubtitleText.srt(cues).utf8).write(to: output)
+        log("Wrote \(cues.count) subtitle lines.")
+        setup.results.discard()
+
+        if request.embedSubtitles {
+            try await saveSubtitledCopy(setup, srt: output)
+        }
+        return output
+    }
+
+    /// Saves a copy of the original video with the .srt built in as a subtitle track, for players like QuickTime
+    /// which can't load an .srt file. The .srt is already written, so a failed copy is a warning, not a failed run.
+    private func saveSubtitledCopy(_ setup: Setup, srt: URL) async throws {
+        let input = setup.input
+        let suffix = input.pathExtension.isEmpty ? "" : ".\(input.pathExtension)"
+        guard MediaTools.embedSubtitleCodecs[input.pathExtension.lowercased()] != nil else {
+            let kinds = MediaTools.embedSubtitleCodecs.keys.sorted().map { ".\($0)" }.joined(separator: ", ")
+            log("Subtitles can only be built into \(kinds) videos, so no copy of this \(suffix.isEmpty ? "file" : suffix.lowercased()) was saved.")
+            return
+        }
+
+        // Named after the video like the .srt; a run-stamped name keeps an earlier copy from being overwritten.
+        let name = input.deletingPathExtension().lastPathComponent
+        let plainName = setup.outputDirectory.appendingPathComponent("\(name).subtitled\(suffix)")
+        let output = FileManager.default.fileExists(atPath: plainName.path)
+            ? setup.outputDirectory.appendingPathComponent("\(name).subtitled.\(setup.runID)\(suffix)")
+            : plainName
+        if FileManager.default.fileExists(atPath: output.path) {
+            emit(.warning("\(output.lastPathComponent) already exists, so no copy of the video with subtitles was saved."))
+            return
+        }
+
+        emit(.status("Saving a copy of the video with subtitles..."))
+        let emit = self.emit
+        let reported = Counter(-1)
+        let language = TranscriptionRequest.singleLanguage(setup.languages)
+        do {
+            try await offload {
+                try media.embedSubtitlesCopy(video: input, srt: srt, output: output, language: language, audioTrack: setup.audioTrack) { fraction in
+                    // The progress bar is already full from transcribing, so the copy's progress goes in the status.
+                    let percent = Int(fraction * 100)
+                    if percent >= reported.value + 10 {
+                        reported.value = percent
+                        emit(.status("Saving a copy of the video with subtitles (\(percent)%)..."))
+                    }
+                }
+            }
+        } catch let error as MediaTools.Failure {
+            emit(.warning("Couldn't save a copy of the video with subtitles: \(error.localizedDescription) The .srt file was saved."))
+            return
+        }
+        log("Saved a copy of the video with subtitles: \(output.path)")
+        emit(.subtitledCopy(output.resolvingSymlinksInPath().path))
+    }
+
+    // MARK: - Diarize requests
+
+    private func diarizeRequest(_ languages: [String]?) -> TranscriptionRequest {
+        TranscriptionRequest(model: Self.diarizeModel, responseFormat: "diarized_json", chunkingStrategy: "auto", languages: languages ?? [])
+    }
+
+    /// Splits the recording into the diarize model's chunks and sends them, reusing saved results. Each chunk
+    /// comes back with where it starts in the recording.
+    private func diarizeInChunks(
+        _ setup: Setup,
+        into directory: URL,
+        preparedFor purpose: String,
+        label: String
+    ) async throws -> [(part: URL, offset: Double, result: TranscriptionResult)] {
+        let results = setup.results
+        defer { media.removeChunks(in: directory) }
+        let parts = try await split(setup, into: directory, chunkSeconds: diarizeChunkSeconds)
+        log("Prepared \(parts.count) chunk(s) for \(purpose).")
+        results.total = parts.count
+        // Offsets depend on earlier chunks' real lengths, so measure them before fanning out.
+        let fallback = Double(diarizeChunkSeconds)
+        let spans = try await offload { chunkSpans(parts, fallbackSeconds: fallback) }
+        let languages = setup.languages
+        let responses = try await reportingSavedChunks(results) {
+            try await inParallel(parts, label: label) { try await diarizeSaved($0, languages: languages, results: results) }
+        }
+        return zip(parts, zip(spans, responses)).map { ($0, $1.0.start, $1.1) }
+    }
+
+    /// One chunk's diarize response, or its saved result from an earlier attempt.
+    private func diarizeSaved(_ chunk: URL, languages: [String]?, results: ChunkResultStore) async throws -> TranscriptionResult {
+        let key = try results.key(chunk: chunk, request: ["kind": "diarize", "model": Self.diarizeModel, "languages": languages])
+        if let saved = results.load(key), saved["segments"] is [Any], saved["text"] is String {
+            results.markReused(key)
+            log("Using the saved result of \(chunk.lastPathComponent) from an earlier attempt.")
+            return TranscriptionResult(object: saved)
+        }
+        let result = try await send(diarizeRequest(languages), audio: chunk)
+        // Only the parts the transcript and subtitles use, in the form the backend saves them.
+        results.save(key, [
+            "text": result.text,
+            "segments": result.segments.map { ["speaker": $0.speaker, "start": $0.start, "end": $0.end, "text": $0.text] as [String: Any?] },
+        ])
+        return result
+    }
+
+    // MARK: - Shared steps
+
+    private func split(_ setup: Setup, into directory: URL, chunkSeconds: Int) async throws -> [URL] {
+        let emit = self.emit
+        return try await offload {
+            try media.split(setup.input, into: directory, chunkSeconds: chunkSeconds, audioTrack: setup.audioTrack) {
+                emit(.progress(Self.prepareProgress * $0))
+            }
+        }
     }
 
     /// (start, end) of each chunk within the recording, from the chunks' measured lengths.
@@ -196,13 +483,17 @@ struct TranscriptJob: Sendable {
     /// Up to `maxParallel` chunks at a time, results in chunk order. When a chunk fails, chunks already sent
     /// are paid for either way, so they finish (and are saved) before the failure is reported; chunks not sent
     /// yet aren't sent. A cancel stops them all at once.
-    private func transcribeInParallel(_ parts: [URL], transcriber: ChunkTranscriber) async throws -> [(text: String, warning: String?)] {
+    private func inParallel<T: Sendable>(
+        _ parts: [URL],
+        label: String,
+        _ work: @escaping @Sendable (URL) async throws -> T
+    ) async throws -> [T] {
         let total = parts.count
         let workers = max(1, min(maxParallel, total))
-        log("Transcribing \(total) chunk(s), up to \(workers) at a time.")
-        emit(.status("Transcribing: 0/\(total) chunks done"))
-        var results = [(text: String, warning: String?)?](repeating: nil, count: total)
-        try await withThrowingTaskGroup(of: (Int, Result<(text: String, warning: String?), Error>).self) { group in
+        log("\(label) \(total) chunk(s), up to \(workers) at a time.")
+        emit(.status("\(label): 0/\(total) chunks done"))
+        var results = [T?](repeating: nil, count: total)
+        try await withThrowingTaskGroup(of: (Int, Result<T, Error>).self) { group in
             var next = 0
             var running = 0
             var failure: Error?
@@ -214,7 +505,7 @@ struct TranscriptJob: Sendable {
                 running += 1
                 group.addTask {
                     do {
-                        return (index, .success(try await transcriber.transcribe(parts[index], previousTail: nil)))
+                        return (index, .success(try await work(parts[index])))
                     } catch {
                         return (index, .failure(error))
                     }
@@ -228,7 +519,7 @@ struct TranscriptJob: Sendable {
                     results[index] = value
                     done += 1
                     log("Finished chunk \(index + 1)/\(total): \(parts[index].lastPathComponent)")
-                    emit(.status("Transcribing: \(done)/\(total) chunks done"))
+                    emit(.status("\(label): \(done)/\(total) chunks done"))
                     emit(.progress(progress(done: done, total: total)))
                     startNext()
                 case let .failure(error):
@@ -250,27 +541,26 @@ struct TranscriptJob: Sendable {
         return results.map { $0! }
     }
 
-    /// One chunk at a time, each one's prompt ending with the previous chunk's closing words.
-    private func transcribeInOrder(_ parts: [URL], transcriber: ChunkTranscriber) async throws -> [(text: String, warning: String?)] {
-        let total = parts.count
-        log("Transcribing \(total) chunk(s) one at a time, carrying context between chunks.")
-        emit(.status("Transcribing: 0/\(total) chunks done"))
-        var results: [(text: String, warning: String?)] = []
-        for (index, part) in parts.enumerated() {
-            var tail: String?
-            if let previous = results.last {
-                if previous.warning != nil || previous.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    log("Not carrying context into \(part.lastPathComponent): the previous chunk failed its check.")
-                } else {
-                    tail = TranscriptText.transcriptTail(previous.text)
-                }
+    /// One request to OpenAI, re-encoding the chunk once if OpenAI can't read it (`create_transcription_with_retry`).
+    func send(_ request: TranscriptionRequest, audio chunk: URL) async throws -> TranscriptionResult {
+        let onRetry: @Sendable (String) -> Void = { [emit] in emit(.log($0)) }
+        do {
+            return try await openAI.transcribe(request, audio: chunk, apiKey: apiKey, onRetry: onRetry)
+        } catch let error as OpenAIError where error.isInvalidAudio {
+            log("API rejected \(chunk.lastPathComponent) as unsupported. Re-encoding once and retrying...")
+            let repaired = try await offload { try media.repairedForAPI(chunk) }
+            defer { try? FileManager.default.removeItem(at: repaired) }
+            return try await openAI.transcribe(request, audio: repaired, apiKey: apiKey, onRetry: onRetry)
+        } catch let error as OpenAIError {
+            let message = error.message.lowercased()
+            if let prompt = request.prompt, message.contains("prompt") {
+                log("The API rejected the prompt for \(chunk.lastPathComponent) (\(prompt.count) characters). Try a shorter Context in Settings.")
             }
-            results.append(try await transcriber.transcribe(part, previousTail: tail))
-            log("Finished chunk \(index + 1)/\(total): \(part.lastPathComponent)")
-            emit(.status("Transcribing: \(index + 1)/\(total) chunks done"))
-            emit(.progress(progress(done: index + 1, total: total)))
+            if !request.keywords.isEmpty, message.contains("keyword") {
+                log("The API rejected the keywords for \(chunk.lastPathComponent) (\(request.keywords.count) keywords). Try fewer or shorter keywords.")
+            }
+            throw error
         }
-        return results
     }
 
     /// Runs blocking ffmpeg work off Swift's shared threads; a cancel stops the tool that's running.
@@ -309,6 +599,12 @@ struct TranscriptJob: Sendable {
         let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         return (message.isEmpty ? String(describing: type(of: error)) : message, false)
     }
+}
+
+/// A number one closure updates across calls (ffmpeg's progress lines arrive one at a time).
+private final class Counter: @unchecked Sendable {
+    var value: Int
+    init(_ value: Int) { self.value = value }
 }
 
 /// Transcribes one chunk, reusing its saved result when there is one (`transcribe_chunk_checked`).
@@ -365,11 +661,14 @@ private struct ChunkTranscriber: Sendable {
                 logPrompt(chunk, prompt)
             }
             let isGPTTranscribe = model == TranscriptionRequest.gptTranscribe
-            let response = try await send(
-                chunk,
+            let request = TranscriptionRequest(
+                model: model,
+                responseFormat: "json",
                 languages: isGPTTranscribe ? (languages ?? TranscriptJob.defaultLanguages) : (languages ?? []),
-                prompt: prompt
+                prompt: prompt,
+                keywords: keywords
             )
+            let response = try await job.send(request, audio: chunk)
             let raw = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !isGPTTranscribe, TranscriptJob.outputLimitedModels.contains(model), (response.outputTokens ?? 0) >= TranscriptJob.outputTokenLimit {
                 return try await inPieces(chunk, cappedText: raw, splitDepth: splitDepth)
@@ -415,29 +714,6 @@ private struct ChunkTranscriber: Sendable {
             return "\(name): \(model) repeated a passage of about \(repeated.length) words, starting \"\(repeated.opening)…\" (check this part of the transcript)"
         }
         return nil
-    }
-
-    /// One request to OpenAI, re-encoding the chunk once if OpenAI can't read it (`create_transcription_with_retry`).
-    private func send(_ chunk: URL, languages: [String], prompt: String?) async throws -> TranscriptionResult {
-        let request = TranscriptionRequest(model: model, responseFormat: "json", languages: languages, prompt: prompt, keywords: keywords)
-        let onRetry: @Sendable (String) -> Void = { [job] in job.emit(.log($0)) }
-        do {
-            return try await job.openAI.transcribe(request, audio: chunk, apiKey: job.apiKey, onRetry: onRetry)
-        } catch let error as OpenAIError where error.isInvalidAudio {
-            log("API rejected \(chunk.lastPathComponent) as unsupported. Re-encoding once and retrying...")
-            let repaired = try await job.offload { try job.media.repairedForAPI(chunk) }
-            defer { try? FileManager.default.removeItem(at: repaired) }
-            return try await job.openAI.transcribe(request, audio: repaired, apiKey: job.apiKey, onRetry: onRetry)
-        } catch let error as OpenAIError {
-            let message = error.message.lowercased()
-            if let prompt = request.prompt, message.contains("prompt") {
-                log("The API rejected the prompt for \(chunk.lastPathComponent) (\(prompt.count) characters). Try a shorter Context in Settings.")
-            }
-            if !request.keywords.isEmpty, message.contains("keyword") {
-                log("The API rejected the keywords for \(chunk.lastPathComponent) (\(request.keywords.count) keywords). Try fewer or shorter keywords.")
-            }
-            throw error
-        }
     }
 
     /// Re-transcribes a chunk whose text hit the GPT-4o output cap, as smaller pieces cut at pauses, named after

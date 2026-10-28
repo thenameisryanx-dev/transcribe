@@ -109,6 +109,9 @@ enum PythonJSON {
             return value ? "true" : "false"
         case let value as Int:
             return String(value)
+        case let value as Double:
+            // Swift and Python both write the shortest form that reads back the same ("1.5", "10.0").
+            return value.description
         case let value as String:
             return string(value)
         case let value as [String]:

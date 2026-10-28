@@ -71,14 +71,22 @@ final class ReferenceOpenAI: URLProtocol {
             status = 200
             let answers = Self.answers
             let n = Int(file.split(separator: "_")[1].prefix { $0.isNumber })! + 1
-            var text = (answers["transcript"] as! String).replacingOccurrences(of: "{n}", with: String(n))
-            if let prompt, prompt.contains(answers["echo_marker"] as! String) {
-                text = (answers["echo_prefix"] as! String) + text
+            let usage = ["output_tokens": answers["output_tokens"] as! Int]
+            if fields["response_format"] == "diarized_json" {
+                let segments = (answers["segments"] as! [[String: Any]]).map { segment in
+                    segment.merging(["text": (segment["text"] as! String).replacingOccurrences(of: "{n}", with: String(n))]) { $1 }
+                }
+                json = ["text": segments.map { $0["text"] as! String }.joined(separator: " "), "segments": segments, "usage": usage]
+            } else {
+                var text = (answers["transcript"] as! String).replacingOccurrences(of: "{n}", with: String(n))
+                if let prompt, prompt.contains(answers["echo_marker"] as! String) {
+                    text = (answers["echo_prefix"] as! String) + text
+                }
+                if n == answers["looped_chunk"] as! Int {
+                    text += " " + (answers["looped"] as! String)
+                }
+                json = ["text": text, "usage": usage]
             }
-            if n == answers["looped_chunk"] as! Int {
-                text += " " + (answers["looped"] as! String)
-            }
-            json = ["text": text, "usage": ["output_tokens": answers["output_tokens"] as! Int]]
         }
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
         let data = try! JSONSerialization.data(withJSONObject: json)
@@ -94,7 +102,7 @@ final class ReferenceOpenAI: URLProtocol {
     override func stopLoading() {}
 }
 
-/// Plain transcript runs done in Swift, checked against the Python backend's reference runs.
+/// Runs done in Swift, checked against the Python backend's reference runs.
 final class TranscriptJobTests: XCTestCase {
     private static let golden = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent("golden")
@@ -127,8 +135,9 @@ final class TranscriptJobTests: XCTestCase {
         events.all.compactMap { if case let .log(message) = $0 { return message } else { return nil } }
     }
 
-    private func job(_ request: RunRequest, maxParallel: Int = 1) throws -> TranscriptJob {
-        TranscriptJob(
+    /// A job like the reference runs': diarized in short chunks, unless `singleRequestSeconds` is raised.
+    private func job(_ request: RunRequest, maxParallel: Int = 1, singleRequestSeconds: Double? = nil) throws -> TranscriptJob {
+        var job = TranscriptJob(
             request: request,
             apiKey: "sk-test",
             openAI: OpenAIClient(environment: ["OPENAI_BASE_URL": "http://openai.test/v1"], session: ReferenceOpenAI.session),
@@ -137,19 +146,29 @@ final class TranscriptJobTests: XCTestCase {
             maxParallel: maxParallel,
             emit: { [events] event in events.append(event) }
         )
+        job.diarizeChunkSeconds = try XCTUnwrap(spec["diarize_chunk_seconds"] as? Int)
+        job.diarizeSingleRequestSeconds = try singleRequestSeconds ?? XCTUnwrap((spec["diarize_single_request_seconds"] as? NSNumber)?.doubleValue)
+        return job
+    }
+
+    private func referenceRun(_ name: String) throws -> [String: Any] {
+        let runs = try XCTUnwrap(spec["runs"] as? [String: [String: Any]])
+        return try XCTUnwrap(runs[name])
     }
 
     /// A request with the settings of one of the reference runs.
-    private func referenceRequest(_ name: String) throws -> RunRequest {
-        let runs = try XCTUnwrap(spec["runs"] as? [String: [String: Any]])
-        let run = try XCTUnwrap(runs[name])
+    private func referenceRequest(_ name: String, input: URL? = nil, embedSubtitles: Bool = false, languages: [String]? = nil) throws -> RunRequest {
+        let run = try referenceRun(name)
         var request = RunRequest(
-            inputPath: recording.path,
+            inputPath: (input ?? recording).path,
             outputDirectory: directory.appendingPathComponent("out").path,
             options: RunRequest.Options(
                 model: try XCTUnwrap(TranscriptionModel(rawValue: run["model"] as! String)),
-                diarize: false, subtitles: false, embedSubtitles: false, audioTrack: 0,
-                languages: run["languages"] as? [String] ?? [],
+                diarize: run["diarize"] as? Bool ?? false,
+                subtitles: run["subtitles"] as? Bool ?? false,
+                embedSubtitles: embedSubtitles,
+                audioTrack: 0,
+                languages: languages ?? run["languages"] as? [String] ?? [],
                 contextPrompt: run["context"] as? String ?? "",
                 consistencyMode: run["carry_context"] as? Bool ?? false,
                 chunkLength: .fiveMinutes,
@@ -160,11 +179,22 @@ final class TranscriptJobTests: XCTestCase {
         return request
     }
 
-    private func assertMatchesReference(_ name: String) async throws {
-        let output = try await job(try referenceRequest(name)).run()
+    /// The reference run's output file (a transcript or subtitles).
+    private func reference(_ name: String) throws -> String {
+        let runs = Self.golden.appendingPathComponent("runs")
+        let file = try XCTUnwrap(FileManager.default.contentsOfDirectory(atPath: runs.path).first { ($0 as NSString).deletingPathExtension == name })
+        return try String(contentsOf: runs.appendingPathComponent(file), encoding: .utf8)
+    }
+
+    private func assertMatchesReference(_ output: URL, _ name: String) throws {
         let text = try String(contentsOf: output, encoding: .utf8).replacingOccurrences(of: recording.path, with: "<RECORDING>")
-        let expected = try String(contentsOf: Self.golden.appendingPathComponent("runs/\(name).txt"), encoding: .utf8)
-        XCTAssertEqual(text, expected, name)
+        XCTAssertEqual(text, try reference(name), name)
+    }
+
+    private func assertMatchesReference(_ name: String) async throws {
+        let singleRequestSeconds = (try referenceRun(name)["single_request_seconds"] as? NSNumber)?.doubleValue
+        let output = try await job(try referenceRequest(name), singleRequestSeconds: singleRequestSeconds).run()
+        try assertMatchesReference(output, name)
     }
 
     func testPlainTranscriptMatchesTheBackend() async throws {
@@ -224,15 +254,106 @@ final class TranscriptJobTests: XCTestCase {
         XCTAssertEqual(TranscriptJob.describe(URLError(.notConnectedToInternet)).message, "Couldn't reach OpenAI. Check your internet connection, then try again.")
     }
 
-    func testOnlyPlainTranscriptsRunInSwift() throws {
+    func testSpeakerLabelsMatchTheBackend() async throws {
+        try await assertMatchesReference("speaker_labels")
+        XCTAssertEqual(ReferenceOpenAI.sent.map(\.file), ["part_000.m4a", "part_001.m4a", "part_002.m4a"])
+    }
+
+    func testShortSpeakerLabelRunsAreOneRequest() async throws {
+        try await assertMatchesReference("speaker_labels_single_request")
+        XCTAssertEqual(ReferenceOpenAI.sent.map(\.file), ["part_000.m4a"])
+    }
+
+    func testSubtitlesMatchTheBackend() async throws {
+        let output = try await job(try referenceRequest("subtitles")).run()
+        XCTAssertEqual(output.lastPathComponent, "lecture.srt", "Named after the recording, so players find it")
+        try assertMatchesReference(output, "subtitles")
+        XCTAssertTrue(logs().contains("Wrote 12 subtitle lines."), logs().joined(separator: "\n"))
+
+        // A second run doesn't replace the first one's subtitles.
+        let second = try await job(try referenceRequest("subtitles")).run()
+        XCTAssertNotEqual(second, output)
+        XCTAssertTrue(second.lastPathComponent.hasPrefix("lecture.") && second.lastPathComponent.hasSuffix(".srt"), second.lastPathComponent)
+    }
+
+    func testAFailedSubtitleRunResumesWithTheMissingChunks() async throws {
+        ReferenceOpenAI.failOnce = ["part_001.m4a"]
+        let request = try referenceRequest("subtitles")
+        do {
+            _ = try await job(request).run()
+            XCTFail("The first run should fail")
+        } catch {}
+        XCTAssertTrue(logs().contains("1 of 3 chunk(s) finished and were saved. Run this again with the same settings to send only the rest."), logs().joined(separator: "\n"))
+
+        ReferenceOpenAI.sent = []
+        let output = try await job(request).run()
+        XCTAssertEqual(ReferenceOpenAI.sent.map(\.file), ["part_001.m4a", "part_002.m4a"])
+        XCTAssertTrue(logs().contains("Reused 1 of 3 chunk(s) saved from an earlier attempt."))
+        try assertMatchesReference(output, "subtitles")
+    }
+
+    /// A short video with a picture, one audio track and a subtitle track of its own, in each container that can
+    /// hold a subtitled copy.
+    private func makeVideo(_ fileExtension: String) throws -> URL {
+        let tools = try MediaTools.located()
+        let video = directory.appendingPathComponent("clip.\(fileExtension)")
+        let srt = directory.appendingPathComponent("own.srt")
+        try Data("1\n00:00:00,000 --> 00:00:01,000\nOriginal\n".utf8).write(to: srt)
+        let result = try tools.run(tools.ffmpeg, [
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=3",
+            "-f", "lavfi", "-i", "sine=duration=3",
+            "-i", srt.path,
+            "-map", "0", "-map", "1", "-map", "2",
+            "-c:v", "libx264", "-c:a", "aac", "-c:s", fileExtension == "mkv" ? "srt" : "mov_text",
+            video.path,
+        ])
+        XCTAssertEqual(result.status, 0, result.errors)
+        return video
+    }
+
+    private func subtitleTracks(_ video: URL) throws -> [String] {
+        let tools = try MediaTools.located()
+        let result = try tools.run(tools.ffprobe, [
+            "-v", "error", "-select_streams", "s",
+            "-show_entries", "stream=codec_name,codec_tag_string:stream_tags=language:stream_disposition=default",
+            "-of", "csv=p=0", video.path,
+        ])
+        return result.output.split(separator: "\n").map(String.init)
+    }
+
+    func testSubtitledCopiesHoldOnlyTheNewSubtitles() async throws {
+        let expected = [
+            "mp4": ["mov_text,tx3g,1,fra"],
+            "mov": ["mov_text,tx3g,1,fra"],
+            "mkv": ["subrip,[0][0][0][0],1,fre"],
+        ]
+        for (fileExtension, tracks) in expected.sorted(by: { $0.key < $1.key }) {
+            let video = try makeVideo(fileExtension)
+            events = EventLog()
+            _ = try await job(try referenceRequest("subtitles", input: video, embedSubtitles: true, languages: ["fr"])).run()
+            let copy = directory.appendingPathComponent("out/clip.subtitled.\(fileExtension)")
+            XCTAssertEqual(try subtitleTracks(copy), tracks, fileExtension)
+            let reported = events.all.compactMap { if case let .subtitledCopy(path) = $0 { return path } else { return nil } }
+            XCTAssertEqual(reported, [copy.resolvingSymlinksInPath().path], fileExtension)
+            XCTAssertTrue(logs().contains("Saved a copy of the video with subtitles: \(copy.path)"), logs().joined(separator: "\n"))
+        }
+    }
+
+    func testAudioFilesGetNoSubtitledCopy() async throws {
+        _ = try await job(try referenceRequest("subtitles", embedSubtitles: true)).run()
+        XCTAssertTrue(logs().contains("Subtitles can only be built into .m4v, .mkv, .mov, .mp4 videos, so no copy of this .m4a was saved."), logs().joined(separator: "\n"))
+        XCTAssertFalse(events.all.contains { if case .subtitledCopy = $0 { return true } else { return false } })
+    }
+
+    func testOnlyQTAFilesStillRunInTheBackend() throws {
         var request = try referenceRequest("transcript_gpt4o")
         XCTAssertTrue(TranscriptJob.handles(request))
         request.subtitles = true
-        XCTAssertFalse(TranscriptJob.handles(request))
+        XCTAssertTrue(TranscriptJob.handles(request))
         request.subtitles = false
         request.diarize = true
-        XCTAssertFalse(TranscriptJob.handles(request))
-        request.diarize = false
+        XCTAssertTrue(TranscriptJob.handles(request))
         request.inputPath = "/tmp/recording.qta"
         XCTAssertFalse(TranscriptJob.handles(request))
     }

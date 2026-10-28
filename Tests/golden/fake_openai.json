@@ -80,10 +80,17 @@
       "model": "gpt-4o-transcribe",
       "diarize": true
     },
+    "speaker_labels_single_request": {
+      "model": "gpt-4o-transcribe",
+      "diarize": true,
+      "single_request_seconds": 200
+    },
     "subtitles": {
       "model": "gpt-4o-transcribe",
       "subtitles": true
     }
   },
-  "max_parallel": 1
+  "max_parallel": 1,
+  "diarize_chunk_seconds": 60,
+  "diarize_single_request_seconds": 60
 }

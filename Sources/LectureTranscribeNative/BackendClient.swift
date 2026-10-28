@@ -241,8 +241,8 @@ final class BackendClient: @unchecked Sendable {
         try await runStreamCommand(args: args, onEvent: onEvent)
     }
 
-    /// Runs a transcription. Plain transcripts run in Swift (`TranscriptJob`); speaker labels, subtitles and
-    /// .qta files still run in the Python backend. `TRANSCRIBE_PYTHON_RUNS=1` sends every run to the backend.
+    /// Runs a transcription. Plain transcripts, speaker labels and subtitles run in Swift (`TranscriptJob`); .qta
+    /// files still run in the Python backend. `TRANSCRIBE_PYTHON_RUNS=1` sends every run to the backend.
     func startTranscription(
         _ request: RunRequest,
         onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
@@ -255,8 +255,8 @@ final class BackendClient: @unchecked Sendable {
         }
     }
 
-    /// A plain transcript run in Swift. It reports through the same events as the backend: `error` (and
-    /// `apiKeyProblem`) when it fails, `done` with the transcript's path when it finishes.
+    /// A run in Swift. It reports through the same events as the backend: `error` (and `apiKeyProblem`) when it
+    /// fails, `subtitledCopy` when it saves a video with subtitles, `done` with the output's path when it finishes.
     private func runInSwift(_ request: RunRequest, onEvent: @escaping @Sendable (BackendStreamEvent) -> Void) async throws {
         func fail(_ message: String, apiKeyProblem: Bool = false) throws -> Never {
             if apiKeyProblem { onEvent(.apiKeyProblem) }

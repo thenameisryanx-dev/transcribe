@@ -159,11 +159,17 @@ struct TranscriptionRequest: Equatable, Sendable {
             language = nil
         } else {
             self.languages = []
-            // Several languages, or a code that isn't two letters, mean auto-detect (`single_language_hint`).
-            language = languages.count == 1 && languages[0].count == 2 ? languages[0] : nil
+            language = Self.singleLanguage(languages)
         }
         self.prompt = Self.promptModels.contains(model) ? prompt.flatMap { $0.isEmpty ? nil : $0 } : nil
         self.keywords = Self.keywordModels.contains(model) ? keywords : []
+    }
+
+    /// The one `language` to send to models that take only one (`single_language_hint`). Several languages, or a
+    /// code that isn't two letters, mean auto-detect, so mixed-language audio isn't forced into one.
+    static func singleLanguage(_ languages: [String]?) -> String? {
+        guard let languages, languages.count == 1, languages[0].count == 2 else { return nil }
+        return languages[0]
     }
 
     /// The form fields before the file, in the order the `openai` package sends them.
@@ -227,11 +233,21 @@ struct TranscriptionResult: Equatable, Sendable {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw OpenAIError(status: 200, message: "OpenAI's answer wasn't the expected JSON.")
         }
+        self.init(object: object)
+    }
+
+    /// From OpenAI's answer, or a diarize result saved in that form (see `ChunkResultStore`).
+    init(object: [String: Any]) {
+        // Like the backend's `_coerce_optional_float`: a time written as text is read as a number; anything else
+        // counts as missing.
+        func seconds(_ value: Any?) -> Double? {
+            (value as? NSNumber)?.doubleValue ?? (value as? String).flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        }
         let segments = (object["segments"] as? [[String: Any]] ?? []).map { segment in
             Segment(
                 speaker: (segment["speaker"] as? String) ?? (segment["speaker"] as? NSNumber)?.stringValue,
-                start: (segment["start"] as? NSNumber)?.doubleValue,
-                end: (segment["end"] as? NSNumber)?.doubleValue,
+                start: seconds(segment["start"]),
+                end: seconds(segment["end"]),
                 text: segment["text"] as? String ?? ""
             )
         }

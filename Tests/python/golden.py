@@ -139,8 +139,8 @@ def text_function_cases() -> list[dict]:
     for name, segments in SUBTITLE_SEGMENTS.items():
         for offset, chunk in [(0.0, 0), (599.586, 1)]:
             srt = lt.format_srt(lt.subtitle_cues(segments, offset, chunk))
-            add("format_srt(subtitle_cues)", {"segments": name, "offset_seconds": offset, "chunk": chunk}, srt)
-        add("format_diarized_lines", {"segments": name, "offset_seconds": 0.0}, lt.format_diarized_lines(segments))
+            add("format_srt(subtitle_cues)", {"name": name, "segments": segments, "offset_seconds": offset, "chunk": chunk}, srt)
+        add("format_diarized_lines", {"name": name, "segments": segments, "offset_seconds": 0.0}, lt.format_diarized_lines(segments))
 
     for raw in ["SN2, Grignard reagent\nsn2\n\n  carbocation  ", "", "bad <tag>"]:
         add("parse_keywords", {"raw": raw}, _error(lt.parse_keywords, raw))
@@ -256,8 +256,14 @@ RUNS = {
         "context": "Organic chemistry, week 3", "keywords": ["SN2", "Grignard"], "languages": ["en"],
     },
     "speaker_labels": {"model": lt.MODEL_NORMAL, "diarize": True},
+    # Short enough for one request (see DIARIZE_SINGLE_REQUEST_SECONDS).
+    "speaker_labels_single_request": {"model": lt.MODEL_NORMAL, "diarize": True, "single_request_seconds": 200},
     "subtitles": {"model": lt.MODEL_NORMAL, "subtitles": True},
 }
+# Smaller than the backend's, so the 150s recording is diarized in chunks, unless a run sets its own
+# single_request_seconds.
+DIARIZE_CHUNK_SECONDS = 60
+DIARIZE_SINGLE_REQUEST_SECONDS = 60
 
 
 # 150s of tone with a clear pause at 52s and 110s, so the cuts land in known places (ffmpeg lavfi sources).
@@ -293,10 +299,11 @@ def run_outputs(workdir: Path) -> dict[str, str]:
         options = dict(options)
         model = options.pop("model")
         diarize = options.pop("diarize", False)
+        single_request_seconds = options.pop("single_request_seconds", DIARIZE_SINGLE_REQUEST_SECONDS)
         with mock.patch.object(tj, "OpenAI", return_value=FakeOpenAI()), \
              mock.patch.dict(os.environ, {"TRANSCRIBE_MAX_PARALLEL": "1"}), \
-             mock.patch.object(tj, "DIARIZE_SINGLE_BUFFER", 60), \
-             mock.patch.object(tj, "DIARIZE_CHUNK_SECONDS", 60):
+             mock.patch.object(tj, "DIARIZE_SINGLE_BUFFER", single_request_seconds), \
+             mock.patch.object(tj, "DIARIZE_CHUNK_SECONDS", DIARIZE_CHUNK_SECONDS):
             out = tj.run_transcription_job(recording, diarize, out_dir, model, lambda *_: None, **options)
         suffix = out.suffix
         outputs[name + suffix] = out.read_text(encoding="utf-8").replace(str(recording), "<RECORDING>")
@@ -310,6 +317,8 @@ def fake_openai_spec() -> dict:
         "recording_ffmpeg_arguments": recording_arguments(Path("<RECORDING>")),
         "runs": RUNS,
         "max_parallel": 1,
+        "diarize_chunk_seconds": DIARIZE_CHUNK_SECONDS,
+        "diarize_single_request_seconds": DIARIZE_SINGLE_REQUEST_SECONDS,
     }
 
 
