@@ -50,7 +50,9 @@ in_app 'await updateChecker.checkOnLaunch()'
 # Removed on purpose; must not come back.
 not_in_app '.disabled(!viewModel.canOpenOutputFolder)'
 not_in_app 'canCreateNewTranscript'
-not_in_app '"New Transcription"'
+# The Transcribe pane uses Clear Draft, not a New Transcription button; File ▸ New Transcription (⌘N) stays.
+lacks_fixed '"New Transcription"' Sources/LectureTranscribeNative/TranscribePaneView.swift
+in_app 'Button("New Transcription")'
 # The app is all Swift: no Python backend to run, bundle or keep in step.
 [[ ! -e transcribe_backend.py && ! -e Sources/LectureTranscribeNative/Resources/python ]]
 not_in_app 'TRANSCRIBE_PYTHON'
