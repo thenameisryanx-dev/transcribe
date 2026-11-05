@@ -72,6 +72,39 @@ final class CoreFeaturesTests: XCTestCase {
     }
 
     @MainActor
+    func testNewUsersStartOnGPTTranscribeWithConsistencyModeAndFiveMinuteChunks() {
+        let keys = ["selectedTranscriptionModel", "consistencyMode", "chunkLengthSeconds"]
+        let stored = keys.map { UserDefaults.standard.object(forKey: $0) }
+        keys.forEach { UserDefaults.standard.removeObject(forKey: $0) }
+        defer { zip(keys, stored).forEach { UserDefaults.standard.set($1, forKey: $0) } }
+
+        let viewModel = TranscribeViewModel()
+        XCTAssertEqual(viewModel.selectedTranscriptionModel, .gptTranscribe)
+        XCTAssertTrue(viewModel.consistencyModeEnabled)
+        XCTAssertEqual(viewModel.effectiveChunkLength.seconds, 300)
+
+        let run = RunRequest(inputPath: "/tmp/lecture.m4a", outputDirectory: "/tmp", options: viewModel.runOptions)
+        XCTAssertEqual(run.model, .gptTranscribe)
+        XCTAssertTrue(run.carryContext)
+        XCTAssertEqual(run.chunkSeconds, 300)
+    }
+
+    @MainActor
+    func testSavedOptionsStillWinOverTheDefaults() {
+        let keys = ["selectedTranscriptionModel", "consistencyMode", "chunkLengthSeconds"]
+        let stored = keys.map { UserDefaults.standard.object(forKey: $0) }
+        defer { zip(keys, stored).forEach { UserDefaults.standard.set($1, forKey: $0) } }
+        UserDefaults.standard.set("gpt-4o-mini-transcribe", forKey: "selectedTranscriptionModel")
+        UserDefaults.standard.set(false, forKey: "consistencyMode")
+        UserDefaults.standard.set(600, forKey: "chunkLengthSeconds")
+
+        let viewModel = TranscribeViewModel()
+        XCTAssertEqual(viewModel.selectedTranscriptionModel, .gpt4oMiniTranscribe)
+        XCTAssertFalse(viewModel.consistencyModeEnabled)
+        XCTAssertEqual(viewModel.effectiveChunkLength.seconds, 600)
+    }
+
+    @MainActor
     func testSpeakerLabelsFollowTheSelectedModel() {
         let viewModel = TranscribeViewModel()
         let original = viewModel.selectedTranscriptionModel

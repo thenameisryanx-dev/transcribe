@@ -28,7 +28,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
             UserDefaults.standard.set(outputFolderPath, forKey: Self.outputFolderDefaultsKey)
         }
     }
-    @Published var selectedTranscriptionModel: TranscriptionModel = .gpt4oTranscribe {
+    @Published var selectedTranscriptionModel: TranscriptionModel = .standard {
         didSet {
             if !selectedTranscriptionModel.supportsDiarization && diarizeEnabled {
                 diarizeEnabled = false
@@ -68,8 +68,8 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         }
     }
     /// Consistency mode: transcribe chunks in order, adding the end of each chunk's transcript to the
-    /// next chunk's prompt. Slower, so it's a remembered preference rather than on by default.
-    /// Only GPT Transcribe uses it (see `supportsConsistencyMode`); the stored choice is kept when
+    /// next chunk's prompt. Slower, but gave the best transcripts in testing, so it's on until the user
+    /// turns it off. Only GPT Transcribe uses it (see `supportsConsistencyMode`); the stored choice is kept when
     /// another model is selected so switching back restores it.
     @Published var consistencyModeEnabled: Bool {
         didSet {
@@ -193,7 +193,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
         )
         recentContextPrompts = UserDefaults.standard.stringArray(forKey: Self.recentContextPromptsDefaultsKey) ?? []
         recentKeywords = UserDefaults.standard.stringArray(forKey: Self.recentKeywordsDefaultsKey) ?? []
-        consistencyModeEnabled = UserDefaults.standard.bool(forKey: Self.consistencyModeDefaultsKey)
+        consistencyModeEnabled = UserDefaults.standard.object(forKey: Self.consistencyModeDefaultsKey) as? Bool ?? true
         chunkLengthPreference = ChunkLength(rawValue: UserDefaults.standard.integer(forKey: Self.chunkLengthDefaultsKey))
         if let rawModel = UserDefaults.standard.string(forKey: Self.selectedModelDefaultsKey),
            let storedModel = TranscriptionModel(rawValue: rawModel)

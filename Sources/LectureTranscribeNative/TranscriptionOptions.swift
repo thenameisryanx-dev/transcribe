@@ -5,6 +5,9 @@ enum TranscriptionModel: String, CaseIterable, Identifiable, Sendable {
     case gpt4oTranscribe = "gpt-4o-transcribe"
     case gpt4oMiniTranscribe = "gpt-4o-mini-transcribe"
 
+    /// Used until the user picks one. With consistency mode and 5-minute chunks it gave the best transcripts in testing.
+    static let standard: TranscriptionModel = .gptTranscribe
+
     var id: String { rawValue }
 
     var displayName: String {
