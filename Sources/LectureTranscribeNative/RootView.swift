@@ -25,9 +25,10 @@ enum NavigationPane: String, CaseIterable, Identifiable {
 struct RootView: View {
     @EnvironmentObject private var viewModel: TranscribeViewModel
     @EnvironmentObject private var updateChecker: UpdateChecker
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             List(NavigationPane.allCases, selection: $viewModel.selectedPane) { pane in
                 HStack(spacing: 10) {
                     Image(systemName: pane.systemImage)
@@ -39,6 +40,7 @@ struct RootView: View {
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 240)
+            .modifier(RemoveSystemSidebarToggle())
         } detail: {
             Group {
                 switch viewModel.selectedPane {
@@ -62,6 +64,7 @@ struct RootView: View {
                     UpdateBannerView(update: update)
                 }
             }
+            .modifier(PaneSidebarButton(columnVisibility: $columnVisibility))
         }
         .navigationSplitViewStyle(.balanced)
         .task {
@@ -78,6 +81,47 @@ struct RootView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(viewModel.errorMessage)
+        }
+    }
+}
+
+/// Removes the system sidebar button, which `PaneSidebarButton` replaces (macOS 14+; macOS 13 keeps the system one).
+private struct RemoveSystemSidebarToggle: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content.toolbar(removing: .sidebarToggle)
+        } else {
+            content
+        }
+    }
+}
+
+/// The Hide/Show Sidebar button, in the pane's toolbar beside the title. The system button sits in the sidebar's
+/// own toolbar section, which is too narrow while the sidebar slides open, so macOS briefly moved it into a "»"
+/// overflow menu at the top right of the window.
+private struct PaneSidebarButton: ViewModifier {
+    @Binding var columnVisibility: NavigationSplitViewVisibility
+
+    private var isSidebarHidden: Bool {
+        columnVisibility == .detailOnly
+    }
+
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content.toolbar {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        withAnimation {
+                            columnVisibility = isSidebarHidden ? .all : .detailOnly
+                        }
+                    } label: {
+                        Label(isSidebarHidden ? "Show Sidebar" : "Hide Sidebar", systemImage: "sidebar.left")
+                    }
+                    .help(isSidebarHidden ? "Show Sidebar" : "Hide Sidebar")
+                }
+            }
+        } else {
+            content
         }
     }
 }

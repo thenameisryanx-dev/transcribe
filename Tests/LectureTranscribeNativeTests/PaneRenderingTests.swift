@@ -91,6 +91,29 @@ final class PaneRenderingTests: XCTestCase {
         XCTAssertEqual(window.title, "Runs")
         XCTAssertEqual(window.subtitle, "2 of 2")
     }
+
+    /// The sidebar button belongs to the pane's toolbar, not the sidebar's own toolbar section. That section is
+    /// too narrow while the sidebar slides open, so macOS moved the system button into a "»" overflow menu that
+    /// flashed at the top right.
+    @MainActor
+    func testSidebarButtonIsInThePaneToolbarOnEveryPane() throws {
+        let viewModel = try makeViewModel()
+        let window = showWindow(viewModel)
+        defer { window.close() }
+
+        for pane in NavigationPane.allCases {
+            viewModel.selectedPane = pane
+            settle()
+            let items = window.toolbar?.items ?? []
+            let identifiers = items.map(\.itemIdentifier.rawValue)
+            XCTAssertEqual(items.filter { $0.label == "Hide Sidebar" }.count, 1,
+                           "\(pane.rawValue) should show one Hide Sidebar button")
+            XCTAssertFalse(identifiers.contains("com.apple.SwiftUI.navigationSplitView.toggleSidebar"),
+                           "\(pane.rawValue) should not show the system sidebar button")
+            XCTAssertFalse(identifiers.contains { $0.hasPrefix("com.apple.SwiftUI.splitViewSeparator") },
+                           "\(pane.rawValue) should not give the sidebar its own toolbar section")
+        }
+    }
 }
 
 /// The toolbar's model menu names the model the run will use. (macOS 26 doesn't expose toolbar text to tests,
