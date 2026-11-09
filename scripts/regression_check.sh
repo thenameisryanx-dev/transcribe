@@ -57,6 +57,9 @@ in_app 'Menu("Export Track")'
 # Removed on purpose; must not come back.
 not_in_app '.disabled(!viewModel.canOpenOutputFolder)'
 not_in_app 'canCreateNewTranscript'
+# The minimum width belongs to RootView's pane, not the whole window: a window-wide one pushed the sidebar button
+# into a toolbar overflow menu while the sidebar slid open.
+not_in_app 'minWidth: 1120'
 # The Transcribe pane uses Clear Draft, not a New Transcription button; File ▸ New Transcription (⌘N) stays.
 lacks_fixed '"New Transcription"' Sources/LectureTranscribeNative/TranscribePaneView.swift
 in_app 'Button("New Transcription")'

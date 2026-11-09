@@ -101,7 +101,8 @@ struct LectureTranscribeNativeApp: App {
             RootView()
                 .environmentObject(viewModel)
                 .environmentObject(updateChecker)
-                .frame(minWidth: 1120, minHeight: 760)
+                // Minimum width is set on RootView's pane, so it doesn't count the sidebar twice.
+                .frame(minHeight: 760)
         }
         .defaultSize(width: 1120, height: 812)
         .windowResizability(.contentSize)

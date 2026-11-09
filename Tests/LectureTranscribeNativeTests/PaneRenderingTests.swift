@@ -92,11 +92,11 @@ final class PaneRenderingTests: XCTestCase {
         XCTAssertEqual(window.subtitle, "2 of 2")
     }
 
-    /// The sidebar button belongs to the pane's toolbar, not the sidebar's own toolbar section. That section is
-    /// too narrow while the sidebar slides open, so macOS moved the system button into a "»" overflow menu that
-    /// flashed at the top right.
+    /// The Hide Sidebar button is the system one, in the sidebar's own part of the toolbar (before the separator
+    /// that tracks the sidebar's edge), as Apple's guidelines place it. When the sidebar collapses, macOS moves it
+    /// beside the pane title.
     @MainActor
-    func testSidebarButtonIsInThePaneToolbarOnEveryPane() throws {
+    func testSystemSidebarButtonIsInTheSidebarOnEveryPane() throws {
         let viewModel = try makeViewModel()
         let window = showWindow(viewModel)
         defer { window.close() }
@@ -104,14 +104,14 @@ final class PaneRenderingTests: XCTestCase {
         for pane in NavigationPane.allCases {
             viewModel.selectedPane = pane
             settle()
-            let items = window.toolbar?.items ?? []
-            let identifiers = items.map(\.itemIdentifier.rawValue)
-            XCTAssertEqual(items.filter { $0.label == "Hide Sidebar" }.count, 1,
-                           "\(pane.rawValue) should show one Hide Sidebar button")
-            XCTAssertFalse(identifiers.contains("com.apple.SwiftUI.navigationSplitView.toggleSidebar"),
-                           "\(pane.rawValue) should not show the system sidebar button")
-            XCTAssertFalse(identifiers.contains { $0.hasPrefix("com.apple.SwiftUI.splitViewSeparator") },
-                           "\(pane.rawValue) should not give the sidebar its own toolbar section")
+            let identifiers = (window.toolbar?.items ?? []).map(\.itemIdentifier.rawValue)
+            let button = identifiers.firstIndex(of: "com.apple.SwiftUI.navigationSplitView.toggleSidebar")
+            let separator = identifiers.firstIndex { $0.hasPrefix("com.apple.SwiftUI.splitViewSeparator") }
+            XCTAssertNotNil(button, "\(pane.rawValue) should show the system sidebar button")
+            XCTAssertNotNil(separator, "\(pane.rawValue) should give the sidebar its own part of the toolbar")
+            if let button, let separator {
+                XCTAssertLessThan(button, separator, "\(pane.rawValue) should show the sidebar button over the sidebar")
+            }
         }
     }
 }
