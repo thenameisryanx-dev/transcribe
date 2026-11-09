@@ -35,6 +35,7 @@ final class UpdateCheckerTests: XCTestCase {
         ))
         XCTAssertEqual(update.version, "1.1.0")
         XCTAssertEqual(update.downloadURL.absoluteString, "https://example.com/arm.dmg")
+        XCTAssertEqual(update.dmgURL?.absoluteString, "https://example.com/arm.dmg", "Install and Relaunch needs the DMG.")
     }
 
     func testReleaseWithoutMatchingDMGFallsBackToReleasePage() throws {
@@ -45,6 +46,7 @@ final class UpdateCheckerTests: XCTestCase {
             arch: "arm64"
         ))
         XCTAssertEqual(update.downloadURL.absoluteString, "https://github.com/example/releases/tag/1.1")
+        XCTAssertNil(update.dmgURL, "Without a DMG the update can only be downloaded, not installed.")
     }
 
     func testSameOrOlderReleaseIsNotAnUpdate() {

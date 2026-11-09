@@ -47,6 +47,10 @@ in_app 'Unavailable for'
 # The How-To guide opens when asked for, and update checks run on launch.
 in_app 'handleHowToGuideRequestIfNeeded()'
 in_app 'await updateChecker.checkOnLaunch()'
+# Updates install in place (download, swap the app once it quits, reopen), with manual Download as the fallback.
+in_app '"Install and Relaunch"'
+in_app 'updateChecker.installUpdate()'
+in_app 'updateChecker.openDownload()'
 # Removed on purpose; must not come back.
 not_in_app '.disabled(!viewModel.canOpenOutputFolder)'
 not_in_app 'canCreateNewTranscript'

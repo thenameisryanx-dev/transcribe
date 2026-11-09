@@ -42,10 +42,30 @@ struct AvailableUpdate: Equatable {
     let version: String
     /// The DMG for this Mac's architecture when the release has one, otherwise the release page.
     let downloadURL: URL
+    /// The DMG for this Mac's architecture, which Install and Relaunch needs; nil when the release has none.
+    var dmgURL: URL? = nil
 }
 
-/// Checks GitHub Releases for a newer version of the app. Updating stays manual: the user downloads
-/// the new DMG and replaces the app in Applications.
+enum UpdateInstallState: Equatable {
+    case idle
+    /// Downloading the new version; the fraction done, when known.
+    case downloading(Double?)
+    /// Checking the download and handing over to the helper that swaps the app.
+    case installing
+    case failed(String)
+
+    var isBusy: Bool {
+        switch self {
+        case .downloading, .installing:
+            return true
+        case .idle, .failed:
+            return false
+        }
+    }
+}
+
+/// Checks GitHub Releases for a newer version of the app and installs it: Install and Relaunch downloads the
+/// new DMG and replaces this copy (see `UpdateInstaller`). Download opens the DMG for a manual install instead.
 @MainActor
 final class UpdateChecker: ObservableObject {
     static let latestReleaseURL = URL(string: "https://api.github.com/repos/thenameisryanx-dev/transcribe/releases/latest")!
@@ -55,11 +75,17 @@ final class UpdateChecker: ObservableObject {
     @Published private(set) var isChecking = false
     @Published private(set) var lastCheckMessage = ""
     @Published private(set) var isBannerDismissed = false
+    @Published private(set) var installState: UpdateInstallState = .idle
 
     /// Nil when running from source (`swift run`), which has no Info.plist version.
     let currentVersion: AppVersion?
+    private let bundle: Bundle
+    private let failureFileURL: URL
+    private var installTask: Task<Void, Never>?
 
-    init(bundle: Bundle = .main) {
+    init(bundle: Bundle = .main, failureFileURL: URL = UpdateInstaller.defaultFailureFileURL) {
+        self.bundle = bundle
+        self.failureFileURL = failureFileURL
         let versionString = bundle.infoDictionary?["CFBundleShortVersionString"] as? String
         let version = versionString.flatMap(AppVersion.init)
         // 0.0.0 marks an unversioned build; treat it like a development build.
@@ -74,18 +100,47 @@ final class UpdateChecker: ObservableObject {
         availableUpdate != nil && !isBannerDismissed
     }
 
+    /// True when the update can be installed in place rather than only downloaded.
+    var offersInstall: Bool {
+        availableUpdate?.dmgURL != nil
+    }
+
+    /// The Settings status line: install progress or a failed install, otherwise the last check's result.
+    var statusMessage: String {
+        switch installState {
+        case .idle:
+            return lastCheckMessage
+        case .downloading(let fraction):
+            let version = availableUpdate?.version ?? ""
+            guard let fraction else { return "Downloading \(version)…" }
+            return "Downloading \(version)… \(Int((fraction * 100).rounded()))%"
+        case .installing:
+            return "Installing… Lecture Transcribe will reopen in a moment."
+        case .failed(let message):
+            return "Couldn't install the update. \(message)"
+        }
+    }
+
     /// Runs on launch. Stays silent on failure so offline launches show nothing.
     func checkOnLaunch() async {
         guard currentVersion != nil else { return }
+        // A failed Install and Relaunch reopens this copy and leaves a message saying why.
+        let installFailure = UpdateInstaller.takeFailureMessage(at: failureFileURL)
+        if let installFailure {
+            installState = .failed(installFailure)
+        }
         await check()
-        if let update = availableUpdate,
+        if installFailure == nil,
+           let update = availableUpdate,
            UserDefaults.standard.string(forKey: Self.dismissedVersionDefaultsKey) == update.version {
             isBannerDismissed = true
         }
     }
 
     func checkNow() async {
+        guard !installState.isBusy else { return }
         isBannerDismissed = false
+        installState = .idle
         await check()
     }
 
@@ -99,6 +154,78 @@ final class UpdateChecker: ObservableObject {
     func openDownload() {
         guard let update = availableUpdate else { return }
         NSWorkspace.shared.open(update.downloadURL)
+    }
+
+    /// Downloads the update, checks it, and quits so a helper can swap in the new copy and reopen it.
+    func installUpdate() {
+        guard installTask == nil, !installState.isBusy,
+              let update = availableUpdate, let dmgURL = update.dmgURL,
+              let expectedVersion = AppVersion(update.version)
+        else {
+            return
+        }
+        let appURL = bundle.bundleURL
+        if let reason = UpdateInstaller.reasonCannotInstall(appURL: appURL) {
+            installState = .failed(reason)
+            return
+        }
+        guard let bundleIdentifier = bundle.bundleIdentifier else {
+            installState = .failed("This copy of the app has no bundle identifier.")
+            return
+        }
+
+        isBannerDismissed = false
+        installState = .downloading(nil)
+        let failureFileURL = failureFileURL
+        installTask = Task {
+            var workDirectory: URL?
+            do {
+                let directory = try UpdateInstaller.makeWorkDirectory()
+                workDirectory = directory
+                let dmgFile = directory.appendingPathComponent("update.dmg")
+                try await UpdateDownload.run(from: dmgURL, to: dmgFile) { fraction in
+                    Task { @MainActor [weak self] in
+                        guard let self, case .downloading = self.installState else { return }
+                        self.installState = .downloading(fraction)
+                    }
+                }
+                try Task.checkCancellation()
+                installState = .installing
+                let stagedApp = try await Task.detached {
+                    try UpdateInstaller.stageApp(
+                        fromDMG: dmgFile,
+                        bundleIdentifier: bundleIdentifier,
+                        expectedVersion: expectedVersion,
+                        workDirectory: directory
+                    )
+                }.value
+                try Task.checkCancellation()
+                try UpdateInstaller.launchSwapHelper(
+                    newApp: stagedApp,
+                    target: appURL,
+                    waitingFor: ProcessInfo.processInfo.processIdentifier,
+                    workDirectory: directory,
+                    failureFile: failureFileURL
+                )
+                // The helper owns the work directory now and swaps the app once this process exits.
+                workDirectory = nil
+                NSApplication.shared.terminate(nil)
+            } catch is CancellationError {
+                installState = .idle
+            } catch let error as URLError where error.code == .cancelled {
+                installState = .idle
+            } catch {
+                installState = .failed(error.localizedDescription)
+            }
+            if let workDirectory {
+                try? FileManager.default.removeItem(at: workDirectory)
+            }
+            installTask = nil
+        }
+    }
+
+    func cancelInstall() {
+        installTask?.cancel()
     }
 
     private func check() async {
@@ -165,6 +292,6 @@ final class UpdateChecker: ObservableObject {
         guard let downloadURL = dmgURL ?? pageURL else {
             return nil
         }
-        return AvailableUpdate(version: releaseVersion.description, downloadURL: downloadURL)
+        return AvailableUpdate(version: releaseVersion.description, downloadURL: downloadURL, dmgURL: dmgURL)
     }
 }

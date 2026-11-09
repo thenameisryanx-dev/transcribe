@@ -88,17 +88,57 @@ private struct UpdateBannerView: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "arrow.down.circle.fill")
-                .foregroundStyle(.tint)
-            Text("Lecture Transcribe \(update.version) is available.")
-            Spacer()
-            Button("Later") {
-                updateChecker.dismissBanner()
+            switch updateChecker.installState {
+            case .idle:
+                Image(systemName: "arrow.down.circle.fill")
+                    .foregroundStyle(.tint)
+                Text("Lecture Transcribe \(update.version) is available.")
+                Spacer()
+                Button("Later") {
+                    updateChecker.dismissBanner()
+                }
+                if updateChecker.offersInstall {
+                    InstallUpdateButton()
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Download") {
+                        updateChecker.openDownload()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            case .downloading(let fraction):
+                Image(systemName: "arrow.down.circle.fill")
+                    .foregroundStyle(.tint)
+                Text("Downloading Lecture Transcribe \(update.version)…")
+                ProgressView(value: fraction, total: 1)
+                    .frame(maxWidth: 200)
+                Spacer()
+                Button("Cancel") {
+                    updateChecker.cancelInstall()
+                }
+            case .installing:
+                ProgressView()
+                    .controlSize(.small)
+                Text("Installing \(update.version)… Lecture Transcribe will reopen in a moment.")
+                Spacer()
+            case .failed(let message):
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.yellow)
+                Text("Couldn't install \(update.version). \(message)")
+                    .lineLimit(2)
+                    .help("To update by hand: download it, quit Lecture Transcribe (⌘Q), then drag the new version into Applications and choose Replace.")
+                Spacer()
+                Button("Later") {
+                    updateChecker.dismissBanner()
+                }
+                if updateChecker.offersInstall {
+                    InstallUpdateButton(title: "Try Again")
+                }
+                Button("Download") {
+                    updateChecker.openDownload()
+                }
+                .buttonStyle(.borderedProminent)
             }
-            Button("Download") {
-                updateChecker.openDownload()
-            }
-            .buttonStyle(.borderedProminent)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -106,6 +146,23 @@ private struct UpdateBannerView: View {
         .overlay(alignment: .bottom) {
             Divider()
         }
+    }
+}
+
+/// Starts Install and Relaunch. Disabled during a transcription, since installing quits the app.
+private struct InstallUpdateButton: View {
+    @EnvironmentObject private var viewModel: TranscribeViewModel
+    @EnvironmentObject private var updateChecker: UpdateChecker
+    var title = "Install and Relaunch"
+
+    var body: some View {
+        Button(title) {
+            updateChecker.installUpdate()
+        }
+        .disabled(viewModel.isRunning || updateChecker.installState.isBusy)
+        .help(viewModel.isRunning
+            ? "Finish or stop the current transcription first. Installing quits and reopens the app."
+            : "Downloads \(updateChecker.availableUpdate?.version ?? "the update"), replaces this copy, and reopens the app.")
     }
 }
 
@@ -189,28 +246,36 @@ private struct SettingsPaneView: View {
                         .textSelection(.enabled)
                 }
                 HStack {
-                    Text(updateChecker.lastCheckMessage)
+                    Text(updateChecker.statusMessage)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    if updateChecker.isChecking {
+                    if updateChecker.isChecking || updateChecker.installState.isBusy {
                         ProgressView()
                             .controlSize(.small)
                     }
-                    if updateChecker.availableUpdate != nil {
-                        Button("Download Update") {
+                    if case .downloading = updateChecker.installState {
+                        Button("Cancel") {
+                            updateChecker.cancelInstall()
+                        }
+                    } else if updateChecker.availableUpdate != nil {
+                        if updateChecker.offersInstall {
+                            InstallUpdateButton()
+                        }
+                        Button(updateChecker.offersInstall ? "Download" : "Download Update") {
                             updateChecker.openDownload()
                         }
                     }
                     Button("Check for Updates") {
                         Task { await updateChecker.checkNow() }
                     }
-                    .disabled(updateChecker.isChecking || updateChecker.currentVersion == nil)
+                    .disabled(updateChecker.isChecking || updateChecker.installState.isBusy || updateChecker.currentVersion == nil)
                 }
             } header: {
                 Text("About")
             } footer: {
-                Text("To update, download the new version, drag it into Applications, and choose Replace. "
-                    + "Your settings, run history, and API key are kept.")
+                Text("Install and Relaunch downloads the new version, replaces this copy, and reopens the app. "
+                    + "To update by hand instead, download it, quit Lecture Transcribe (⌘Q), then drag the new version "
+                    + "into Applications and choose Replace. Your settings, run history, and API key are kept.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
