@@ -29,7 +29,7 @@ final class BackendClient: @unchecked Sendable {
     }
 
     private let activeLock = NSLock()
-    /// The ffmpeg tools of a track save in progress, so it can be cancelled.
+    /// The ffmpeg tools of a track save or export in progress, so it can be cancelled.
     private var activeMedia: MediaTools?
     /// The OpenAI API key each run uses.
     let apiKeys: APIKeyStore
@@ -154,6 +154,53 @@ final class BackendClient: @unchecked Sendable {
         onEvent(.done(output.resolvingSymlinksInPath().path))
     }
 
+    /// Exports the video's track at `index` as a file of its own (see `MediaTools.exportTrack`). It reports
+    /// `progress` in whole percents, `done` with the exported file's path, or `error`. Cancel with
+    /// `cancelActiveRun()`, which leaves nothing behind.
+    func exportTrack(
+        inputPath: String,
+        index: Int,
+        outputPath: String,
+        onEvent: @escaping @Sendable (BackendStreamEvent) -> Void
+    ) async throws {
+        func fail(_ message: String) throws -> Never {
+            onEvent(.error(message))
+            throw BackendError.commandFailed(message)
+        }
+        guard fileManager.fileExists(atPath: inputPath) else {
+            try fail("Input file not found: \(inputPath)")
+        }
+        let media: MediaTools
+        do {
+            media = try MediaTools.located()
+        } catch {
+            try fail(error.localizedDescription)
+        }
+
+        onEvent(.status("Exporting..."))
+        let video = URL(fileURLWithPath: (inputPath as NSString).expandingTildeInPath)
+        let output = URL(fileURLWithPath: (outputPath as NSString).expandingTildeInPath)
+        withActiveLock { activeMedia = media }
+        defer { withActiveLock { activeMedia = nil } }
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                var reported = -1
+                try media.exportTrack(video: video, index: index, output: output) { fraction in
+                    let percent = Int(fraction * 100)
+                    if percent > reported {
+                        reported = percent
+                        onEvent(.progress(Double(percent)))
+                    }
+                }
+            }.value
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try fail(error.localizedDescription)
+        }
+        onEvent(.done(output.resolvingSymlinksInPath().path))
+    }
+
     /// Runs a transcription (`TranscriptJob`). It reports `error` (and `apiKeyProblem`) when it fails,
     /// `subtitledCopy` when it saves a video with subtitles, and `done` with the output's path when it finishes.
     /// Cancel the task running it to stop it.
@@ -194,7 +241,7 @@ final class BackendClient: @unchecked Sendable {
         }
     }
 
-    /// Stops a track save in progress, leaving the video as it was. (A transcription stops when its task is
+    /// Stops a track save or export in progress, leaving the video as it was. (A transcription stops when its task is
     /// cancelled.)
     func cancelActiveRun() {
         withActiveLock { activeMedia?.cancel() }

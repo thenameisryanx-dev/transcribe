@@ -261,6 +261,78 @@ extension MediaTools {
         }
     }
 
+    // MARK: - Exporting one track
+
+    /// The file one track is exported as: `fileExtension`, and the subtitle codec it's converted to (`nil` copies
+    /// it as it is). Audio is never re-encoded, so it goes in a file of its own format; Matroska (.mka, .mks) holds
+    /// any format with no file of its own. Text subtitles become .srt, except ASS/SSA, which keep their styling.
+    struct ExportFormat: Equatable {
+        let fileExtension: String
+        let convertTo: String?
+    }
+
+    static func exportFormat(kind: String, codec: String) -> ExportFormat {
+        if kind == "subtitle" {
+            switch codec {
+            case "subrip", "srt": return ExportFormat(fileExtension: "srt", convertTo: nil)
+            case "mov_text", "webvtt", "text": return ExportFormat(fileExtension: "srt", convertTo: "srt")
+            case "ass", "ssa": return ExportFormat(fileExtension: "ass", convertTo: nil)
+            case "hdmv_pgs_subtitle": return ExportFormat(fileExtension: "sup", convertTo: nil)
+            default: return ExportFormat(fileExtension: "mks", convertTo: nil)
+            }
+        }
+        switch codec {
+        case "aac", "alac": return ExportFormat(fileExtension: "m4a", convertTo: nil)
+        case "mp3", "flac", "ac3", "eac3", "dts", "opus": return ExportFormat(fileExtension: codec, convertTo: nil)
+        case "vorbis": return ExportFormat(fileExtension: "ogg", convertTo: nil)
+        case "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le": return ExportFormat(fileExtension: "wav", convertTo: nil)
+        default: return ExportFormat(fileExtension: "mka", convertTo: nil)
+        }
+    }
+
+    /// Writes the audio or subtitle track at `index` of `video` to `output` as a file of its own, in the format
+    /// `exportFormat` gives it (`output` must have its extension). The track is taken as it is in the video, so
+    /// unsaved edits to its language or title aren't in it. Like a save, it's written under a temporary name next
+    /// to `output` and moved into place once complete. `onProgress` gets how far along it is (0 to 1).
+    func exportTrack(video: URL, index: Int, output: URL, onProgress: @escaping (Double) -> Void = { _ in }) throws {
+        guard let track = try mediaTracks(video).first(where: { $0.index == index }),
+              track.kind == "audio" || track.kind == "subtitle"
+        else {
+            throw Failure("The video has no audio or subtitle track #\(index + 1).")
+        }
+        let format = Self.exportFormat(kind: track.kind, codec: track.codec)
+        guard output.pathExtension.lowercased() == format.fileExtension else {
+            throw Failure("Export this track as a .\(format.fileExtension) file.")
+        }
+
+        let stem = output.deletingPathExtension().lastPathComponent
+        let partial = output.deletingLastPathComponent()
+            .appendingPathComponent(".\(stem).partial-\(ProcessInfo.processInfo.processIdentifier).\(format.fileExtension)")
+        let arguments = ["-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats", "-y",
+                         "-i", video.path, "-map", "0:\(index)", "-c", format.convertTo ?? "copy", partial.path]
+        do {
+            let status: Int32
+            do {
+                status = try run(ffmpeg, arguments, onLine: Self.progressReader(totalSeconds: duration(video), onProgress)).status
+            } catch is Failure {
+                // `run` stops a tool that takes too long with a Failure.
+                throw Failure("Timed out exporting the track.")
+            }
+            guard status == 0 else {
+                throw Failure("ffmpeg couldn't export this track as a .\(format.fileExtension) file (exit code \(status)).")
+            }
+            guard ((try? partial.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0 else {
+                throw Failure("The track came out empty, so nothing was exported.")
+            }
+            guard rename(partial.path, output.path) == 0 else {
+                throw Failure("Couldn't move the exported track into place: \(String(cString: strerror(errno))).")
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: partial)
+            throw error
+        }
+    }
+
     // MARK: - .mp4/.mov boxes
 
     /// (type, payload start, box end) for each box between `start` and `end` of an .mp4/.mov byte range.

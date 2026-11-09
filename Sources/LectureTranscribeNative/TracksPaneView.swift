@@ -1,8 +1,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Shows a video's audio and subtitle tracks so they can be removed, reordered, retagged, or added to.
-/// Save writes the changes into the video; Save As writes another file.
+/// Shows a video's audio and subtitle tracks so they can be removed, reordered, retagged, added to, or exported
+/// one at a time as files of their own. Save writes the changes into the video; Save As writes another file.
 struct TracksPaneView: View {
     @ObservedObject var editor: TrackEditorModel
     @State private var isDropTargeted = false
@@ -20,7 +20,7 @@ struct TracksPaneView: View {
             }
         }
         .overlay {
-            if isDropTargeted && !editor.isSaving {
+            if isDropTargeted && !editor.isBusy {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
                     .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -74,7 +74,8 @@ struct TracksPaneView: View {
             Text("Choose a video, or drop one here")
                 .font(.title3)
             Text("See its audio and subtitle tracks, remove or reorder them, pick which ones play first, "
-                + "and add subtitle files. Save writes the changes into the video; Save As makes a new file.")
+                + "add subtitle files, or export a track as a file of its own. "
+                + "Save writes the changes into the video; Save As makes a new file.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -116,7 +117,7 @@ struct TracksPaneView: View {
                             .controlSize(.small)
                     }
                     Button("Choose Different Video…", action: editor.chooseVideo)
-                        .disabled(editor.isSaving)
+                        .disabled(editor.isBusy)
                         .help("Open another video in Tracks (⌘O)")
                 }
                 .background(ReorderDragTuning())
@@ -158,7 +159,7 @@ struct TracksPaneView: View {
                     } label: {
                         Label("Add Subtitles…", systemImage: "plus")
                     }
-                    .disabled(editor.isSaving)
+                    .disabled(editor.isBusy)
                 } header: {
                     sectionHeader("Subtitles", kept: editor.keptSubtitleCount, total: editor.subtitleTracks.count)
                 } footer: {
@@ -168,7 +169,7 @@ struct TracksPaneView: View {
                 }
             }
         }
-        .disabled(editor.isSaving)
+        .disabled(editor.isBusy)
     }
 
     private func position(of track: EditableTrack, in tracks: [EditableTrack]) -> TrackRow.Position {
@@ -189,15 +190,24 @@ struct TracksPaneView: View {
 
     private var saveBar: some View {
         HStack(spacing: 12) {
-            if editor.isSaving {
-                ProgressView(value: editor.saveProgress, total: 100)
+            if editor.isBusy {
+                let progress = editor.isSaving ? editor.saveProgress : editor.exportProgress
+                ProgressView(value: progress, total: 100)
                     .frame(maxWidth: 260)
-                Text("Saving… \(Int(editor.saveProgress))%")
+                Text("\(editor.isSaving ? "Saving" : "Exporting")… \(Int(progress))%")
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                 Spacer()
                 Button("Cancel", action: editor.cancelSave)
                     .keyboardShortcut(.cancelAction)
+            } else if let exported = editor.lastExportedPath {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text("Exported \((exported as NSString).lastPathComponent)")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Button("Show in Finder", action: editor.revealLastExported)
             } else if let saved = editor.lastSavedPath {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
@@ -209,6 +219,8 @@ struct TracksPaneView: View {
             } else {
                 Text(editor.lastSaveCancelled
                     ? "Save cancelled. The video wasn't changed."
+                    : editor.lastExportCancelled
+                    ? "Export cancelled."
                     : editor.hasChanges
                         ? "Unsaved changes. Save writes them into the video; Save As makes a new file."
                         : "Video and audio are copied without re-encoding when you save.")
@@ -220,7 +232,7 @@ struct TracksPaneView: View {
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        guard !editor.isSaving,
+        guard !editor.isBusy,
               let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) })
         else { return false }
         provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
@@ -492,7 +504,8 @@ private struct ReorderDragTuning: NSViewRepresentable {
     }
 }
 
-/// One audio or subtitle track: keep checkbox, language, title, Default (and Forced for subtitles), and moving.
+/// One audio or subtitle track: keep checkbox, language, title, Default (and Forced for subtitles), moving, and
+/// exporting it (or removing it, for an added subtitle file).
 private struct TrackRow: View {
     struct Position {
         let isFirst: Bool
@@ -572,9 +585,26 @@ private struct TrackRow: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Remove this subtitle file from the list")
+            } else {
+                Button {
+                    editor.chooseExportLocation(for: track)
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .buttonStyle(.borderless)
+                .disabled(!editor.canExport(track))
+                .help("Export this track as a .\(track.exportExtension) file")
             }
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            if !track.isAdded {
+                Button("Export as .\(track.exportExtension)…") {
+                    editor.chooseExportLocation(for: track)
+                }
+                .disabled(!editor.canExport(track))
+            }
+        }
     }
 }
 
@@ -647,7 +677,8 @@ private struct LanguagePopUp: NSViewRepresentable {
     }
 }
 
-/// File menu commands for the Tracks pane, so its toolbar actions and opening a video are also in the menu bar.
+/// File menu commands for the Tracks pane, so its toolbar actions, exporting a track and opening a video are also in
+/// the menu bar.
 /// They always show, and are disabled when they don't apply.
 struct TrackCommands: Commands {
     @ObservedObject var editor: TrackEditorModel
@@ -661,7 +692,7 @@ struct TrackCommands: Commands {
                 editor.chooseVideo()
             }
             .keyboardShortcut("o")
-            .disabled(editor.isSaving)
+            .disabled(editor.isBusy)
         }
         CommandGroup(replacing: .saveItem) {
             Button("Save", action: editor.save)
@@ -670,6 +701,14 @@ struct TrackCommands: Commands {
             Button("Save As…", action: editor.chooseSaveAsLocation)
                 .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(!isShowingTracks || !editor.canSaveAs)
+            Menu("Export Track") {
+                ForEach(editor.exportableTracks) { track in
+                    Button("\(track.exportMenuTitle)…") {
+                        editor.chooseExportLocation(for: track)
+                    }
+                }
+            }
+            .disabled(!isShowingTracks || editor.exportableTracks.isEmpty || !editor.canSaveAs)
         }
     }
 }

@@ -54,6 +54,22 @@ struct EditableTrack: Identifiable, Equatable {
         return false
     }
 
+    /// The file type this track is exported as (see `MediaTools.exportFormat`).
+    var exportExtension: String {
+        MediaTools.exportFormat(kind: kind.rawValue, codec: codec).fileExtension
+    }
+
+    /// e.g. "Audio · Track 2 · E-AC-3 · 5.1 · Italian", as the File ▸ Export Track menu lists it.
+    var exportMenuTitle: String {
+        var parts = [kind == .audio ? "Audio" : "Subtitles", sourceDescription]
+        if !language.isEmpty {
+            parts.append(Locale.current.localizedString(forLanguageCode: language)?.capitalized ?? language)
+        }
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty { parts.append(title) }
+        return parts.joined(separator: " · ")
+    }
+
     /// e.g. "Track 3 · E-AC-3 · 5.1" or "Added · Episode 3.srt"
     var sourceDescription: String {
         switch source {
@@ -137,16 +153,17 @@ enum TrackLanguage {
 /// Lists a video's audio and subtitle tracks and saves a copy with them removed, reordered, retagged, or with
 /// subtitle files added. Like a document: Save writes the changes into the video, Save As writes another file
 /// (in the same format) and goes on editing that one. Either way the file is replaced only once the new one is
-/// complete, so a failed or cancelled save leaves it as it was.
+/// complete, so a failed or cancelled save leaves it as it was. Any of the video's own tracks can also be exported
+/// as a file of its own.
 @MainActor
 final class TrackEditorModel: ObservableObject {
     @Published private(set) var videoPath: String?
     // Any change means the last save no longer matches what's shown.
     @Published var audioTracks: [EditableTrack] = [] {
-        didSet { lastSavedPath = nil }
+        didSet { lastSavedPath = nil; lastExportedPath = nil }
     }
     @Published var subtitleTracks: [EditableTrack] = [] {
-        didSet { lastSavedPath = nil }
+        didSet { lastSavedPath = nil; lastExportedPath = nil }
     }
     /// e.g. "HEVC video · 2 attachments"
     @Published private(set) var videoSummary = ""
@@ -159,6 +176,12 @@ final class TrackEditorModel: ObservableObject {
     @Published private(set) var lastSavedPath: String?
     /// True when the last save was cancelled.
     @Published private(set) var lastSaveCancelled = false
+    /// Exporting one track as a file of its own (see `export(_:to:)`).
+    @Published private(set) var isExporting = false
+    @Published private(set) var exportProgress: Double = 0
+    @Published private(set) var lastExportedPath: String?
+    /// True when the last export was cancelled.
+    @Published private(set) var lastExportCancelled = false
     /// Set while asking whether to save changes before opening this video.
     @Published var pendingOpen: PendingOpen?
 
@@ -177,6 +200,7 @@ final class TrackEditorModel: ObservableObject {
     private let backend = BackendClient()
     private var loadTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
+    private var exportTask: Task<Void, Never>?
     private var cancelRequested = false
     /// The tracks as last loaded from the file, to tell whether anything changed since.
     private var savedTracks: [EditableTrack] = []
@@ -207,7 +231,10 @@ final class TrackEditorModel: ObservableObject {
         videoPath != nil && !isLoading && audioTracks + subtitleTracks != savedTracks
     }
 
-    var canSaveAs: Bool { videoPath != nil && isEditable && !isLoading && !isSaving }
+    /// Saving or exporting; either reads the video, so only one runs at a time.
+    var isBusy: Bool { isSaving || isExporting }
+
+    var canSaveAs: Bool { videoPath != nil && isEditable && !isLoading && !isBusy }
     /// Save writes into the video, so it's only offered when there are changes.
     var canSave: Bool { canSaveAs && hasChanges }
 
@@ -220,7 +247,7 @@ final class TrackEditorModel: ObservableObject {
 
     /// Opens a video, first asking whether to save unsaved changes to the current one (see `pendingOpen`).
     func requestOpen(videoPath path: String, addingSubtitleFile subtitleFile: String? = nil, language: String = "") {
-        guard !isSaving else { return }
+        guard !isBusy else { return }
         let request = PendingOpen(videoPath: path, subtitleFile: subtitleFile, language: language)
         if hasChanges {
             pendingOpen = request
@@ -260,6 +287,8 @@ final class TrackEditorModel: ObservableObject {
         videoSummary = ""
         errorMessage = nil
         lastSavedPath = nil
+        lastExportedPath = nil
+        lastExportCancelled = false
         saveProgress = 0
         let ext = (path as NSString).pathExtension.lowercased()
         isEditable = Self.editableExtensions.contains(ext)
@@ -443,6 +472,8 @@ final class TrackEditorModel: ObservableObject {
         errorMessage = nil
         lastSavedPath = nil
         lastSaveCancelled = false
+        lastExportedPath = nil
+        lastExportCancelled = false
         cancelRequested = false
         saveTask = Task { [weak self, backend] in
             let (events, continuation) = AsyncStream.makeStream(of: BackendStreamEvent.self)
@@ -490,10 +521,105 @@ final class TrackEditorModel: ObservableObject {
         }
     }
 
+    /// Cancels the save or export in progress.
     func cancelSave() {
-        guard isSaving else { return }
+        guard isBusy else { return }
         cancelRequested = true
         backend.cancelActiveRun()
+    }
+
+    // MARK: - Exporting one track
+
+    /// The video's own tracks can be exported; an added subtitle is a file already.
+    func canExport(_ track: EditableTrack) -> Bool {
+        guard case .original = track.source else { return false }
+        return videoPath != nil && isEditable && !isLoading && !isBusy
+    }
+
+    /// The video's own tracks, as File ▸ Export Track lists them.
+    var exportableTracks: [EditableTrack] {
+        (audioTracks + subtitleTracks).filter { !$0.isAdded }
+    }
+
+    /// The name offered in the export panel: the video's name, then the track's language (or number), as players
+    /// expect of subtitles next to a video, e.g. "Episode 2.en.srt" or "Episode 2.track3.eac3".
+    func suggestedExportFileName(for track: EditableTrack) -> String {
+        guard let videoPath else { return "" }
+        let stem = URL(fileURLWithPath: videoPath).deletingPathExtension().lastPathComponent
+        var label = track.language
+        if label.isEmpty, case let .original(index) = track.source {
+            label = "track\(index + 1)"
+        }
+        return "\(stem).\(label).\(track.exportExtension)"
+    }
+
+    /// Writes one of the video's tracks to `url` as a file of its own, as it is in the video.
+    func export(_ track: EditableTrack, to url: URL) {
+        guard let videoPath, case let .original(index) = track.source, canExport(track) else { return }
+        isExporting = true
+        exportProgress = 0
+        errorMessage = nil
+        lastSavedPath = nil
+        lastSaveCancelled = false
+        lastExportedPath = nil
+        lastExportCancelled = false
+        cancelRequested = false
+        exportTask = Task { [weak self, backend] in
+            let (events, continuation) = AsyncStream.makeStream(of: BackendStreamEvent.self)
+            let consumer = Task { @MainActor [weak self] in
+                for await event in events {
+                    guard let self else { continue }
+                    switch event {
+                    case let .progress(value): self.exportProgress = min(max(value, 0), 100)
+                    case let .done(path): self.lastExportedPath = path
+                    case let .error(message): self.errorMessage = message
+                    default: break
+                    }
+                }
+            }
+            var runError: Error?
+            do {
+                try await backend.exportTrack(inputPath: videoPath, index: index, outputPath: url.path) { event in
+                    continuation.yield(event)
+                }
+            } catch {
+                runError = error
+            }
+            continuation.finish()
+            await consumer.value
+            guard let self else { return }
+            self.isExporting = false
+            self.exportTask = nil
+            if self.cancelRequested {
+                // A cancelled export ends with an error; it isn't one.
+                self.errorMessage = nil
+                self.lastExportedPath = nil
+                self.lastExportCancelled = true
+            } else if let runError, self.lastExportedPath == nil, self.errorMessage == nil, !(runError is CancellationError) {
+                self.errorMessage = runError.localizedDescription
+            }
+        }
+    }
+
+    /// Export: asks for a name and folder (next to the video), then exports the track there.
+    func chooseExportLocation(for track: EditableTrack) {
+        guard let videoPath, canExport(track) else { return }
+        let panel = NSSavePanel()
+        panel.title = "Export Track"
+        panel.message = "Exports the track as it is in the video, without your unsaved changes."
+        panel.directoryURL = URL(fileURLWithPath: videoPath).deletingLastPathComponent()
+        panel.nameFieldStringValue = suggestedExportFileName(for: track)
+        if let type = UTType(filenameExtension: track.exportExtension) {
+            panel.allowedContentTypes = [type]
+        }
+        if panel.runModal() == .OK, let url = panel.url {
+            export(track, to: url)
+        }
+    }
+
+    func revealLastExported() {
+        guard let lastExportedPath else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: lastExportedPath)])
     }
 
     private func apply(_ event: BackendStreamEvent) {

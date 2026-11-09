@@ -36,6 +36,19 @@ final class TrackEditorTests: XCTestCase {
     }
 
     @MainActor
+    func testExportNamesAndMenuTitles() {
+        let editor = loadedEditor()
+        XCTAssertEqual(editor.suggestedExportFileName(for: editor.audioTracks[0]), "Episode 2.it.eac3")
+        XCTAssertEqual(editor.suggestedExportFileName(for: editor.subtitleTracks[2]), "Episode 2.hrv.srt")
+        editor.subtitleTracks[1].language = ""
+        XCTAssertEqual(editor.suggestedExportFileName(for: editor.subtitleTracks[1]), "Episode 2.track5.srt")
+        // The language's name depends on the Mac's language, so only the rest is checked.
+        XCTAssertTrue(editor.audioTracks[0].exportMenuTitle.hasPrefix("Audio · Track 2 · E-AC-3 · 5.1 · "))
+        XCTAssertTrue(editor.subtitleTracks[2].exportMenuTitle.hasSuffix(" · SDH"))
+        XCTAssertEqual(editor.subtitleTracks[1].exportMenuTitle, "Subtitles · Track 5 · SRT")
+    }
+
+    @MainActor
     func testOnlyOneDefaultPerKind() {
         let editor = loadedEditor()
         editor.setDefault(editor.audioTracks[1].id, kind: .audio, isOn: true)

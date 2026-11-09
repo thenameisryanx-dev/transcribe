@@ -51,6 +51,9 @@ in_app 'await updateChecker.checkOnLaunch()'
 in_app '"Install and Relaunch"'
 in_app 'updateChecker.installUpdate()'
 in_app 'updateChecker.openDownload()'
+# Tracks exports one track as a file, from its row and from File ▸ Export Track.
+in_app 'editor.chooseExportLocation(for: track)'
+in_app 'Menu("Export Track")'
 # Removed on purpose; must not come back.
 not_in_app '.disabled(!viewModel.canOpenOutputFolder)'
 not_in_app 'canCreateNewTranscript'

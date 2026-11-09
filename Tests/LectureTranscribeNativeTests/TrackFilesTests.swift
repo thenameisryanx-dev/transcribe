@@ -226,13 +226,13 @@ final class TrackFilesTests: XCTestCase {
         XCTAssertEqual(leftovers, [])
     }
 
-    /// Waits for the editor to finish loading or saving.
+    /// Waits for the editor to finish loading, saving or exporting.
     @MainActor
     private func settle(_ editor: TrackEditorModel) async throws {
-        for _ in 0..<200 where editor.isLoading || editor.isSaving {
+        for _ in 0..<200 where editor.isLoading || editor.isBusy {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        XCTAssertFalse(editor.isLoading || editor.isSaving, "Still busy")
+        XCTAssertFalse(editor.isLoading || editor.isBusy, "Still busy")
     }
 
     /// The Tracks pane's model, end to end: open a video, rename and drop tracks, Save, and see the saved file.
@@ -262,6 +262,134 @@ final class TrackFilesTests: XCTestCase {
         // The editor reopens the saved file, which now has no changes to save.
         XCTAssertEqual(editor.audioTracks.map(\.title), ["Español", ""])
         XCTAssertFalse(editor.canSave)
+    }
+
+    // MARK: - Exporting one track
+
+    private func leftovers() throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.contains(".partial-") }
+    }
+
+    func testEachTrackExportsAsAFileOfItsOwn() throws {
+        for format in Self.formats {
+            let audio = directory.appendingPathComponent("spanish-\(format).m4a")
+            try tools.exportTrack(video: videos[format]!, index: 2, output: audio)
+            let exported = try tools.mediaTracks(audio)
+            XCTAssertEqual(exported.map(\.kind), ["audio"], format)
+            XCTAssertEqual(exported.map(\.codec), ["aac"], format)
+            XCTAssertEqual(exported.map(\.language), ["spa"], format)
+
+            // .mp4/.mov subtitles (mov_text) are converted to .srt; .mkv ones are .srt already.
+            let subtitles = directory.appendingPathComponent("english-\(format).srt")
+            try tools.exportTrack(video: videos[format]!, index: 3, output: subtitles)
+            let text = try String(contentsOf: subtitles, encoding: .utf8)
+            XCTAssertTrue(text.contains("00:00:00,000 --> 00:00:01,000"), "\(format): \(text)")
+            XCTAssertTrue(text.contains("Bonjour"), "\(format): \(text)")
+        }
+        XCTAssertEqual(try leftovers(), [])
+    }
+
+    func testAudioKeepsItsOwnFormatAndASSKeepsItsStyling() throws {
+        let video = directory.appendingPathComponent("formats.mkv")
+        try ffmpeg([
+            "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=1",
+            "-f", "lavfi", "-i", "sine=duration=1",
+            "-i", srt.path,
+            "-map", "0", "-map", "1", "-map", "1", "-map", "1", "-map", "1", "-map", "1", "-map", "2",
+            "-c:v", "libx264",
+            "-c:a:0", "eac3", "-c:a:1", "ac3", "-c:a:2", "flac", "-c:a:3", "libmp3lame", "-c:a:4", "libopus",
+            "-c:s", "ass",
+            video.path,
+        ])
+        let expected: [(index: Int, kind: String, codec: String, fileExtension: String)] = [
+            (1, "audio", "eac3", "eac3"), (2, "audio", "ac3", "ac3"), (3, "audio", "flac", "flac"),
+            (4, "audio", "mp3", "mp3"), (5, "audio", "opus", "opus"), (6, "subtitle", "ass", "ass"),
+        ]
+        for track in expected {
+            let format = MediaTools.exportFormat(kind: track.kind, codec: track.codec)
+            XCTAssertEqual(format, MediaTools.ExportFormat(fileExtension: track.fileExtension, convertTo: nil), track.codec)
+            let output = directory.appendingPathComponent("track\(track.index).\(format.fileExtension)")
+            try tools.exportTrack(video: video, index: track.index, output: output)
+            XCTAssertEqual(try tools.mediaTracks(output).map(\.codec), [track.codec], output.lastPathComponent)
+        }
+    }
+
+    func testTracksWithNoFileOfTheirOwnGoInMatroska() {
+        XCTAssertEqual(MediaTools.exportFormat(kind: "subtitle", codec: "mov_text"), .init(fileExtension: "srt", convertTo: "srt"))
+        XCTAssertEqual(MediaTools.exportFormat(kind: "subtitle", codec: "hdmv_pgs_subtitle"), .init(fileExtension: "sup", convertTo: nil))
+        XCTAssertEqual(MediaTools.exportFormat(kind: "subtitle", codec: "dvd_subtitle"), .init(fileExtension: "mks", convertTo: nil))
+        XCTAssertEqual(MediaTools.exportFormat(kind: "audio", codec: "alac"), .init(fileExtension: "m4a", convertTo: nil))
+        XCTAssertEqual(MediaTools.exportFormat(kind: "audio", codec: "truehd"), .init(fileExtension: "mka", convertTo: nil))
+    }
+
+    func testExportsThatCantBeMadeAreRefused() throws {
+        let video = videos["mp4"]!
+        XCTAssertThrowsError(try tools.exportTrack(video: video, index: 0, output: directory.appendingPathComponent("picture.mka"))) {
+            XCTAssertEqual($0.localizedDescription, "The video has no audio or subtitle track #1.")
+        }
+        let mp3 = directory.appendingPathComponent("english.mp3")
+        XCTAssertThrowsError(try tools.exportTrack(video: video, index: 1, output: mp3)) {
+            XCTAssertEqual($0.localizedDescription, "Export this track as a .m4a file.")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: mp3.path))
+        XCTAssertEqual(try leftovers(), [])
+    }
+
+    func testExportReportsProgressAndTheExportedFile() async throws {
+        let output = directory.appendingPathComponent("english.m4a")
+        let events = EventLog()
+        try await BackendClient().exportTrack(inputPath: videos["mkv"]!.path, index: 1, outputPath: output.path) {
+            events.append($0)
+        }
+        let progress = events.all.compactMap { if case let .progress(value) = $0 { return value } else { return nil } }
+        XCTAssertFalse(progress.isEmpty)
+        XCTAssertEqual(progress, progress.sorted(), "Progress only moves forward")
+        guard case let .done(path)? = events.all.last else { return XCTFail("No done event: \(events.all)") }
+        XCTAssertEqual(path, output.resolvingSymlinksInPath().path)
+        XCTAssertEqual(try tools.mediaTracks(output).map(\.language), ["eng"])
+    }
+
+    func testACancelledExportLeavesNothingBehind() async throws {
+        let output = directory.appendingPathComponent("english.m4a")
+        let client = BackendClient()
+        do {
+            // Cancelled while ffmpeg is writing the file: its first progress report.
+            try await client.exportTrack(inputPath: videos["mkv"]!.path, index: 1, outputPath: output.path) { event in
+                if case .progress = event { client.cancelActiveRun() }
+            }
+            XCTFail("The export should have been cancelled")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        XCTAssertEqual(try leftovers(), [])
+    }
+
+    /// The Tracks pane's model, end to end: open a video and export one of its tracks.
+    @MainActor
+    func testTheTracksPaneExportsATrack() async throws {
+        let video = videos["mov"]!
+        let editor = TrackEditorModel()
+        editor.open(videoPath: video.path)
+        try await settle(editor)
+        let spanish = editor.audioTracks[1]
+        XCTAssertEqual(editor.suggestedExportFileName(for: spanish), "source.es.m4a")
+        XCTAssertEqual(editor.suggestedExportFileName(for: editor.subtitleTracks[0]), "source.en.srt")
+        editor.addSubtitleFile(path: srt.path)
+        XCTAssertFalse(editor.canExport(editor.subtitleTracks[1]), "An added subtitle file is a file already")
+        XCTAssertEqual(editor.exportableTracks.count, 3)
+
+        let output = directory.appendingPathComponent("source.es.m4a")
+        editor.export(spanish, to: output)
+        XCTAssertTrue(editor.isBusy)
+        XCTAssertFalse(editor.canSaveAs, "Saving waits for the export")
+        try await settle(editor)
+        XCTAssertNil(editor.errorMessage)
+        XCTAssertEqual(editor.lastExportedPath, output.resolvingSymlinksInPath().path)
+        XCTAssertEqual(try tools.mediaTracks(output).map(\.language), ["spa"])
+        // Exporting reads the video; it doesn't change it or the edits.
+        XCTAssertEqual(editor.subtitleTracks.count, 2)
+        XCTAssertEqual(try tools.mediaTracks(video).count, 4)
     }
 
     func testAudioTracksAreListedForTheTranscribePane() async throws {
