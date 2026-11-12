@@ -4,10 +4,10 @@
 import Foundation
 import PackageDescription
 
-let deploymentTarget = "13.0"
+let deploymentTarget = "15.0"
 
 // SwiftPM's default build system links without telling clang which SDK it is
-// using, so the binary records the deployment target (13.0) as its SDK version.
+// using, so the binary records the deployment target (15.0) as its SDK version.
 // macOS then runs the app in legacy appearance mode instead of the current
 // system design (Liquid Glass). Record the real SDK version from SDKROOT, which
 // the `swift` shim exports via xcrun.
@@ -33,7 +33,7 @@ let sdkVersionLinkerSettings: [LinkerSetting] = {
 let package = Package(
     name: "LectureTranscribeNative",
     platforms: [
-        .macOS(.v13),
+        .macOS(.v15),
     ],
     products: [
         .executable(
@@ -41,9 +41,20 @@ let package = Package(
             targets: ["LectureTranscribeNative"]
         ),
     ],
+    dependencies: [
+        // On-device text to speech (Qwen3-TTS) and word timing (Qwen3-ForcedAligner) for the Listen pane,
+        // run on the GPU with MLX. Pinned exactly: the package is pre-1.0 and its API changes between releases.
+        // It needs macOS 15, which is why the app does.
+        .package(url: "https://github.com/soniqo/speech-swift", exact: "0.0.29"),
+    ],
     targets: [
         .executableTarget(
             name: "LectureTranscribeNative",
+            dependencies: [
+                .product(name: "Qwen3TTS", package: "speech-swift"),
+                .product(name: "Qwen3ASR", package: "speech-swift"),
+                .product(name: "AudioCommon", package: "speech-swift"),
+            ],
             linkerSettings: sdkVersionLinkerSettings
         ),
         .testTarget(

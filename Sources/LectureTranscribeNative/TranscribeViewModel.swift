@@ -154,6 +154,7 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     private let backend = BackendClient()
     /// The Tracks pane's editor; kept here so a finished subtitle run can open its video there.
     let trackEditor = TrackEditorModel()
+    let listen: ListenModel
     private let historyStore: TranscriptionHistoryStore
     private static let selectedModelDefaultsKey = "selectedTranscriptionModel"
     private static let outputFolderDefaultsKey = "outputFolderPath"
@@ -176,9 +177,11 @@ final class TranscribeViewModel: ObservableObject, @unchecked Sendable {
     @Published private(set) var historyEntries: [TranscriptionHistoryEntry] = []
     @Published var selectedHistoryEntryIDs: Set<UUID> = []
 
-    /// Tests pass a store backed by a temporary file so they never touch the real run history.
-    init(historyStore: TranscriptionHistoryStore = TranscriptionHistoryStore()) {
+    /// Tests pass a store backed by a temporary file so they never touch the real run history, and a Listen model
+    /// that never touches the real saved text or speech.
+    init(historyStore: TranscriptionHistoryStore = TranscriptionHistoryStore(), listen: ListenModel? = nil) {
         self.historyStore = historyStore
+        self.listen = listen ?? ListenModel()
         let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
         defaultOutputFolderPath = downloads?.path ?? NSHomeDirectory()
         if let storedOutputFolder = UserDefaults.standard.string(forKey: Self.outputFolderDefaultsKey),

@@ -9,6 +9,7 @@ A Mac app that turns lecture recordings (audio or video) into text transcripts o
 - **Subtitles**: write an `.srt` file, and optionally a copy of the video with the subtitles built in (for players like QuickTime).
 - **Context and keywords**: give the model the topic and tricky names or terms so it spells them right.
 - **Tracks**: view, reorder, retag or remove a video's audio and subtitle tracks, or add subtitle files to it.
+- **Listen**: paste text or open a PDF, Word document, HTML or text file and hear it read aloud on your Mac, with each word highlighted as it's spoken. Click any word to jump to it. Nine voices, ten languages, 0.75× to 4× speed without the voice changing pitch. It runs on-device (Qwen3-TTS for the voice, Qwen3-ForcedAligner for word timing), so it's free and works offline after a one-time 3.5 GB download.
 - **Runs**: a history of past transcriptions, with status, logs and output files.
 - **Updates**: the app checks for new versions on launch and offers a download.
 
@@ -22,7 +23,7 @@ A Mac app that turns lecture recordings (audio or video) into text transcripts o
    - Enter your password. After this the app opens normally.
 4. Enter an [OpenAI API key](https://platform.openai.com/api-keys) when asked. You can save it in the macOS keychain so you only enter it once.
 
-Requires macOS 13 or later. Nothing else needs to be installed: FFmpeg ships inside the app.
+Requires macOS 15 or later on an Apple Silicon Mac. Nothing else needs to be installed: FFmpeg ships inside the app, and Listen downloads its voice the first time you press Play.
 
 ## Cost
 
@@ -32,6 +33,7 @@ Transcription is billed by OpenAI to your API key, per minute of audio. The mode
 
 - Transcripts and subtitles are saved to your Downloads folder by default. You can change the folder in the app.
 - Temporary audio chunks go in `~/Library/Caches/LectureTranscribe`.
+- Listen's voice models (about 3.5 GB) go in `~/Library/Application Support/LectureTranscribe/SpeechModels`, and the speech it has already read in `~/Library/Caches/LectureTranscribe/listen_audio` (removed after a month unheard). Settings ▸ Listen shows both and can delete them.
 - If a run fails or you cancel it, the chunks that finished are saved there too. Run it again (or click **Re-run** in Runs) with the same settings and only the unfinished chunks are sent, so you aren't charged twice. Saved chunks are deleted once the run succeeds, or after 7 days.
 
 ## For developers

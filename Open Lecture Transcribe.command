@@ -13,6 +13,8 @@ if [[ ! -x "$DEV_MEDIA_SETUP" ]]; then
 fi
 
 "$DEV_MEDIA_SETUP"
+# The build compiles MLX's Metal shaders for the Listen pane, which needs Xcode's Metal Toolchain.
+"$PROJECT_DIR/scripts/ensure_metal_toolchain.sh"
 export FFMPEG_BIN="$PROJECT_DIR/vendor/ffmpeg/$(uname -m)/ffmpeg"
 export FFPROBE_BIN="$PROJECT_DIR/vendor/ffmpeg/$(uname -m)/ffprobe"
 

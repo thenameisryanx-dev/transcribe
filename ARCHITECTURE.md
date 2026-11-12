@@ -5,10 +5,11 @@ The app is a single native SwiftUI program: it does the audio work through the b
 ## Module overview
 - `Sources/LectureTranscribeNative/` (SwiftUI app)
   - App entry point and window (`LectureTranscribeNativeApp.swift`)
-  - Sidebar and pane navigation: Transcribe, Tracks, Runs, Settings (`RootView.swift`)
+  - Sidebar and pane navigation: Transcribe, Tracks, Listen, Runs, Settings (`RootView.swift`)
   - Transcribe pane (`TranscribePaneView.swift`)
   - Tracks pane and its state (`TracksPaneView.swift`, `TrackEditor.swift`); listing and saving a video's tracks (`TrackFiles.swift`)
   - Runs pane: run history list and details (`RunsPaneView.swift`)
+  - Listen pane: reads text aloud with word highlighting and click-to-jump (`ListenPaneView.swift`, `ReadingTextView.swift`, its settings in `ListenSettingsSection.swift`); reading ahead, playing, seeking, the saved place, and opening files (`ListenModel.swift`); text split into sentences and words, and the aligner's word times matched to them (`ReadingText.swift`); playback at any speed without a pitch change (`ListenAudioPlayer.swift`); the voice and aligner behind two protocols, with Qwen3-TTS and Qwen3-ForcedAligner from speech-swift as the first engines (`SpeechEngine.swift`); spoken sentences saved for reuse (`SpokenSentenceStore.swift`)
   - UI state and run orchestration (`TranscribeViewModel.swift`)
   - The Transcribe pane's option types: models and their rules, chunk lengths, languages, audio tracks, keywords (`TranscriptionOptions.swift`)
   - What a run does, worked out from the pane's options (`RunRequest.swift`)
@@ -36,9 +37,13 @@ The app is a single native SwiftUI program: it does the audio work through the b
 
 The Tracks pane works the same way: `TrackEditorModel` asks `BackendClient` to list a video's tracks and to save the edited video, which `MediaTools` does (`TrackFiles.swift`). The new file is written under a temporary name and moved into place once complete, so a failed or cancelled save leaves the video as it was.
 
+The Listen pane splits the text into sentences (`ReadingDocument`) and speaks the one being read plus the next three, in order, through `SentenceSpeaker`: the voice makes the audio, then the aligner listens to it and finds each word's time, which `WordTimingMatcher` matches to the words on screen. `ListenAudioPlayer` plays one sentence at a time and reports how far in it is; the model turns that into the word to highlight. A click finds the word under it and plays from that word's time. Each spoken sentence is saved under a hash of its text, the engine, the voice and the language, so it plays at once next time.
+
 ## Key design decisions
 - SwiftUI remains thin; most run-state logic is centralized in `TranscribeViewModel`.
 - Everything runs in the app's own process; the only programs it starts are the bundled `ffmpeg` and `ffprobe` (`MediaTools`), from `Contents/Resources/ffmpeg_bin` in the installed app or `vendor/ffmpeg` for source runs.
+- Listen runs entirely on-device with [speech-swift](https://github.com/soniqo/speech-swift) (pinned exactly, since it's pre-1.0), which needs macOS 15 and Apple Silicon. The reader only talks to the `SpeechSynthesizer` and `WordAligner` protocols, so a better model can replace either one without touching the rest. Word times come from listening to the finished audio, so they work with any voice.
+- The models run on the GPU and aren't thread-safe, so the voice and the aligner share one serial queue, off Swift's shared threads. They download once to Application Support (not Caches, which macOS may clear) and are released after 10 minutes without reading; while loaded the app uses about 6 GB of memory.
 - The installed app starts the Swift program directly (`CFBundleExecutable` is `LectureTranscribeNative`).
 - The OpenAI API key comes from the `OPENAI_API_KEY` environment variable, a key entered for this session, or the macOS keychain. The keychain is reached through `/usr/bin/security`, which created the saved keys, so reading them doesn't prompt (the ad-hoc signed app couldn't keep an "Always Allow" across updates).
 - Audio chunks are transcribed in parallel (default 4 concurrent requests, override with `TRANSCRIBE_MAX_PARALLEL`); transcripts are written only after every chunk succeeds.

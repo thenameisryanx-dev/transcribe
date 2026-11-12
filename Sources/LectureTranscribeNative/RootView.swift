@@ -3,6 +3,7 @@ import SwiftUI
 enum NavigationPane: String, CaseIterable, Identifiable {
     case transcribe = "Transcribe"
     case tracks = "Tracks"
+    case listen = "Listen"
     case runs = "Runs"
     case settings = "Settings"
 
@@ -14,6 +15,8 @@ enum NavigationPane: String, CaseIterable, Identifiable {
             return "waveform.badge.mic"
         case .tracks:
             return "list.bullet.rectangle"
+        case .listen:
+            return "speaker.wave.2"
         case .runs:
             return "clock.arrow.circlepath"
         case .settings:
@@ -48,6 +51,8 @@ struct RootView: View {
                     TranscribePaneView()
                 case .tracks:
                     TracksPaneView(editor: viewModel.trackEditor)
+                case .listen:
+                    ListenPaneView(model: viewModel.listen)
                 case .runs:
                     RunsPaneView()
                 case .settings:
@@ -231,6 +236,8 @@ private struct SettingsPaneView: View {
                     .foregroundStyle(.secondary)
             }
 
+            ListenSettingsSection(model: viewModel.listen)
+
             Section("Help") {
                 LabeledContent {
                     Button("How to Use") {
@@ -307,12 +314,7 @@ private struct SettingsPaneView: View {
 
 extension View {
     /// Greys out a picker option. `.disabled` has no effect on items in a macOS menu picker.
-    @ViewBuilder
     func unselectable(_ isUnselectable: Bool) -> some View {
-        if #available(macOS 14.0, *) {
-            selectionDisabled(isUnselectable)
-        } else {
-            disabled(isUnselectable)
-        }
+        selectionDisabled(isUnselectable)
     }
 }

@@ -1059,7 +1059,7 @@ private struct HowToGuideOverlay: View {
     }
 }
 
-/// The system empty-state layout (`ContentUnavailableView` on macOS 14 and later).
+/// The system empty-state layout (`ContentUnavailableView`).
 struct EmptyStateView<Actions: View>: View {
     let title: String
     let systemImage: String
@@ -1067,28 +1067,12 @@ struct EmptyStateView<Actions: View>: View {
     @ViewBuilder var actions: () -> Actions
 
     var body: some View {
-        if #available(macOS 14.0, *) {
-            ContentUnavailableView {
-                Label(title, systemImage: systemImage)
-            } description: {
-                Text(description)
-            } actions: {
-                actions()
-            }
-        } else {
-            VStack(spacing: 10) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 44))
-                    .foregroundStyle(.secondary)
-                Text(title)
-                    .font(.title2.weight(.semibold))
-                Text(description)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                actions()
-                    .padding(.top, 4)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ContentUnavailableView {
+            Label(title, systemImage: systemImage)
+        } description: {
+            Text(description)
+        } actions: {
+            actions()
         }
     }
 }

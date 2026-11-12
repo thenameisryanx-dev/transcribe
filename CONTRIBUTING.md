@@ -1,7 +1,7 @@
 # Contributing
 
 ## Run the project
-- Requirements: macOS 13+ and Xcode 26 or later (for the Swift 6.2 toolchain). The Xcode Command Line Tools (`xcode-select --install`) are enough if they include Swift 6.2.
+- Requirements: macOS 15+ on Apple Silicon and Xcode 26 or later (for the Swift 6.2 toolchain), with its Metal Toolchain component. The Listen pane's voice runs on the GPU with MLX, and `swift build` compiles MLX's Metal shaders, so the Command Line Tools alone are no longer enough. The launcher and `scripts/regression_check.sh` install the Metal Toolchain when it's missing (`scripts/ensure_metal_toolchain.sh`, about 840 MB).
 - Launch the native app from source:
   - `./Open\ Lecture\ Transcribe.command` (or double-click it in Finder)
 - The launcher downloads the pinned `ffmpeg` and `ffprobe` into `vendor/ffmpeg/` (checked against their checksums; not kept in git), then builds and runs the app. The first launch takes a few minutes.

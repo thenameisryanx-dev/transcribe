@@ -24,7 +24,7 @@ final class PaneRenderingTests: XCTestCase {
     private func makeViewModel(history: [TranscriptionHistoryEntry] = []) throws -> TranscribeViewModel {
         let store = TranscriptionHistoryStore(historyFileURL: tempDirectory.appendingPathComponent("history.json"))
         try store.saveEntries(history)
-        return TranscribeViewModel(historyStore: store)
+        return TranscribeViewModel(historyStore: store, listen: makeTestListenModel(directory: tempDirectory))
     }
 
     @MainActor

@@ -82,7 +82,7 @@ ${icon_plist_block}  <key>CFBundleIdentifier</key>
   <key>CFBundleVersion</key>
   <string>$APP_VERSION</string>
   <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
+  <string>15.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>
@@ -497,6 +497,20 @@ assemble_native_app_bundle() {
 
   install -m 755 "$FFMPEG_BIN_PATH" "$app_path/Contents/Resources/ffmpeg_bin/ffmpeg"
   install -m 755 "$FFPROBE_BIN_PATH" "$app_path/Contents/Resources/ffmpeg_bin/ffprobe"
+
+  # The packages' resource bundles go in Contents/Resources, where their Bundle.module lookups find them.
+  # mlx-swift_Cmlx.bundle holds MLX's compiled Metal shaders (default.metallib): without it the Listen pane's
+  # speech models can't run on the GPU.
+  local bin_dir resource_bundle
+  bin_dir="$(dirname "$native_binary_path")"
+  for resource_bundle in "$bin_dir"/*.bundle; do
+    [[ -d "$resource_bundle" ]] || continue
+    ditto --norsrc --noextattr "$resource_bundle" "$app_path/Contents/Resources/$(basename "$resource_bundle")"
+  done
+  if [[ ! -f "$app_path/Contents/Resources/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]]; then
+    echo "Build failed: MLX's Metal shaders (mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib) are missing."
+    exit 1
+  fi
 }
 
 echo "Cleaning previous artifacts..."
@@ -515,6 +529,7 @@ if [[ "$SKIP_BUILD" == "1" ]]; then
   echo "  $APP_PATH"
 else
   "$PROJECT_DIR/scripts/ensure_dev_media_tools.sh"
+  "$PROJECT_DIR/scripts/ensure_metal_toolchain.sh"
 
   NATIVE_BINARY_PATH="$(build_native_binary)"
   APP_ICON_SOURCE_PATH=""

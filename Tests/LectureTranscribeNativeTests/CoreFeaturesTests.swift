@@ -9,7 +9,7 @@ final class CoreFeaturesTests: XCTestCase {
     func testSidebarListsEveryPaneInOrder() {
         XCTAssertEqual(
             NavigationPane.allCases.map(\.rawValue),
-            ["Transcribe", "Tracks", "Runs", "Settings"]
+            ["Transcribe", "Tracks", "Listen", "Runs", "Settings"]
         )
     }
 

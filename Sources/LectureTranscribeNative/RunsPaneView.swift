@@ -295,28 +295,17 @@ struct RunsPaneView: View {
     }
 }
 
-/// Shows run details in a system inspector (macOS 14+), or a trailing column on older systems.
+/// Shows run details in the system inspector.
 private struct RunInspector<InspectorContent: View>: ViewModifier {
     @Binding var isPresented: Bool
     @ViewBuilder var inspector: () -> InspectorContent
 
     func body(content: Content) -> some View {
-        if #available(macOS 14.0, *) {
-            content
-                .inspector(isPresented: $isPresented) {
-                    inspector()
-                        .inspectorColumnWidth(min: 280, ideal: 320, max: 480)
-                }
-        } else {
-            HStack(spacing: 0) {
-                content
-                if isPresented {
-                    Divider()
-                    inspector()
-                        .frame(width: 320)
-                }
+        content
+            .inspector(isPresented: $isPresented) {
+                inspector()
+                    .inspectorColumnWidth(min: 280, ideal: 320, max: 480)
             }
-        }
     }
 }
 

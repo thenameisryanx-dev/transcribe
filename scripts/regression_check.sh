@@ -16,6 +16,8 @@ BUILD_DIR="$("$ROOT_DIR/scripts/swift_build_dir.sh" "$ROOT_DIR")"
 # The Swift tests use the pinned ffmpeg in vendor/ffmpeg (downloaded and checked against its
 # checksums by scripts/ensure_dev_media_tools.sh; it isn't kept in git).
 scripts/ensure_dev_media_tools.sh
+# The build compiles MLX's Metal shaders (the Listen pane's speech models), which needs Xcode's Metal Toolchain.
+scripts/ensure_metal_toolchain.sh
 
 echo "[1/4] Building Swift app..."
 swift build --scratch-path "$BUILD_DIR" >/dev/null
@@ -54,6 +56,10 @@ in_app 'updateChecker.openDownload()'
 # Tracks exports one track as a file, from its row and from File ▸ Export Track.
 in_app 'editor.chooseExportLocation(for: track)'
 in_app 'Menu("Export Track")'
+# Listen reads text aloud: clicking a word jumps there, and Edit Text goes back to editing.
+in_app 'onClickLocation: model.jump(toLocation:)'
+in_app 'Button("Edit Text", action: model.editText)'
+in_app 'ListenSettingsSection(model: viewModel.listen)'
 # Removed on purpose; must not come back.
 not_in_app '.disabled(!viewModel.canOpenOutputFolder)'
 not_in_app 'canCreateNewTranscript'
@@ -84,6 +90,9 @@ has_fixed 'PROJECT_DIR="${0:A:h}"' "$LAUNCHER"
 lacks '/Users/[^/]+/' "$LAUNCHER"
 has_fixed 'DEV_MEDIA_SETUP=' "$LAUNCHER"
 has_fixed '"$DEV_MEDIA_SETUP"' "$LAUNCHER"
+# The build compiles MLX's Metal shaders, so the launcher makes sure the Metal Toolchain is installed first.
+zsh -n "scripts/ensure_metal_toolchain.sh"
+has_fixed '"$PROJECT_DIR/scripts/ensure_metal_toolchain.sh"' "$LAUNCHER"
 lacks 'python|\.venv' "$LAUNCHER"
 has_fixed 'export FFMPEG_BIN="$PROJECT_DIR/vendor/ffmpeg/$(uname -m)/ffmpeg"' "$LAUNCHER"
 has_fixed 'export FFPROBE_BIN="$PROJECT_DIR/vendor/ffmpeg/$(uname -m)/ffprobe"' "$LAUNCHER"
@@ -96,6 +105,9 @@ has_fixed '<string>$NATIVE_BINARY_NAME</string>' build_macos_dmg.sh
 lacks_fixed 'Contents/MacOS/launcher' build_macos_dmg.sh
 lacks '[Pp]ython' build_macos_dmg.sh
 has_fixed '"$PROJECT_DIR/scripts/ensure_dev_media_tools.sh"' build_macos_dmg.sh
+# The app ships MLX's compiled Metal shaders, without which the Listen pane's voice can't run.
+has_fixed '"$PROJECT_DIR/scripts/ensure_metal_toolchain.sh"' build_macos_dmg.sh
+has_fixed 'mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib' build_macos_dmg.sh
 lacks 'homebrew|brew install ffmpeg|command -v ffmpeg' build_macos_dmg.sh
 lacks 'homebrew|brew install ffmpeg|command -v ffmpeg' scripts/ensure_dev_media_tools.sh
 git ls-files --error-unmatch vendor >/dev/null 2>&1 && { echo "vendor/ffmpeg must not be tracked in git"; exit 1; }
