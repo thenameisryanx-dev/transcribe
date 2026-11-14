@@ -93,6 +93,19 @@ has_fixed '"$DEV_MEDIA_SETUP"' "$LAUNCHER"
 # The build compiles MLX's Metal shaders, so the launcher makes sure the Metal Toolchain is installed first.
 zsh -n "scripts/ensure_metal_toolchain.sh"
 has_fixed '"$PROJECT_DIR/scripts/ensure_metal_toolchain.sh"' "$LAUNCHER"
+# The toolchain's mount path changes on remount (e.g. a restart); a cached build description naming the old mount
+# is dropped so the build doesn't try to run a Metal compiler that's gone, and one without a stale mount is kept.
+METAL_CHECK_DIR="$(mktemp -d)"
+mkdir -p "$METAL_CHECK_DIR/stale/out/Intermediates.noindex/XCBuildData/a.xcbuilddata" \
+  "$METAL_CHECK_DIR/current/out/Intermediates.noindex/XCBuildData/a.xcbuilddata"
+print -r -- '"/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v0.0.0.0.Gone00/Metal.xctoolchain/usr/bin/metal"' \
+  > "$METAL_CHECK_DIR/stale/out/Intermediates.noindex/XCBuildData/a.xcbuilddata/manifest.json"
+print -r -- '{}' > "$METAL_CHECK_DIR/current/out/Intermediates.noindex/XCBuildData/a.xcbuilddata/manifest.json"
+TRANSCRIBE_BUILD_DIR="$METAL_CHECK_DIR/stale" scripts/ensure_metal_toolchain.sh >/dev/null
+TRANSCRIBE_BUILD_DIR="$METAL_CHECK_DIR/current" scripts/ensure_metal_toolchain.sh >/dev/null
+[[ ! -e "$METAL_CHECK_DIR/stale/out/Intermediates.noindex/XCBuildData" ]]
+[[ -f "$METAL_CHECK_DIR/current/out/Intermediates.noindex/XCBuildData/a.xcbuilddata/manifest.json" ]]
+rm -rf -- "$METAL_CHECK_DIR"
 lacks 'python|\.venv' "$LAUNCHER"
 has_fixed 'export FFMPEG_BIN="$PROJECT_DIR/vendor/ffmpeg/$(uname -m)/ffmpeg"' "$LAUNCHER"
 has_fixed 'export FFPROBE_BIN="$PROJECT_DIR/vendor/ffmpeg/$(uname -m)/ffprobe"' "$LAUNCHER"
