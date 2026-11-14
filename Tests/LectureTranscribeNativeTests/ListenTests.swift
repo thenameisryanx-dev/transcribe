@@ -52,14 +52,32 @@ final class FakeAligner: WordAligner, @unchecked Sendable {
 
 /// A Listen model with the fake voice, and its own saved text, settings and saved speech in `directory`.
 @MainActor
-func makeTestListenModel(directory: URL, synthesizer: FakeSynthesizer = FakeSynthesizer()) -> ListenModel {
+func makeTestListenModel(
+    directory: URL,
+    synthesizer: FakeSynthesizer = FakeSynthesizer(),
+    player: ListenAudioPlayer? = nil
+) -> ListenModel {
     let suite = "ListenTests.\(UUID().uuidString)"
     return ListenModel(
         speaker: SentenceSpeaker(synthesizer: synthesizer, aligner: FakeAligner()),
         store: SpokenSentenceStore(root: directory.appendingPathComponent("listen_audio", isDirectory: true)),
         defaults: UserDefaults(suiteName: suite)!,
-        textFileURL: directory.appendingPathComponent("listen.txt")
+        textFileURL: directory.appendingPathComponent("listen.txt"),
+        player: player
     )
+}
+
+/// An audio device that takes `delay` to wake and then can't be used, so tests don't depend on this Mac's speakers.
+struct SlowDeviceError: LocalizedError {
+    var errorDescription: String? { "The device didn't start." }
+}
+
+@MainActor
+func makeSlowDevicePlayer(delay: TimeInterval) -> ListenAudioPlayer {
+    ListenAudioPlayer { _ in
+        Thread.sleep(forTimeInterval: delay)
+        throw SlowDeviceError()
+    }
 }
 
 // MARK: - Splitting text
@@ -341,6 +359,45 @@ final class ListenModelTests: XCTestCase {
         XCTAssertEqual(Array(synthesizer.spoken.prefix(ListenModel.lookahead + 1)), (1...(ListenModel.lookahead + 1)).map { "Sentence number \($0) is here." })
         try? await Task.sleep(for: .milliseconds(150))
         XCTAssertFalse(synthesizer.spoken.contains("Sentence number 8 is here."))
+        model.editText()
+    }
+
+    @MainActor
+    func testASlowAudioDeviceDoesNotHoldUpReading() async {
+        // Waking a sleeping USB or Bluetooth speaker can take seconds; that used to freeze the app on Play, so
+        // nothing past the first sentence was spoken until the device was up.
+        let synthesizer = FakeSynthesizer()
+        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer, player: makeSlowDevicePlayer(delay: 1.5))
+        model.text = (1...8).map { "Sentence number \($0) is here." }.joined(separator: " ")
+        let started = Date()
+        model.play()
+
+        await waitUntil({ synthesizer.spoken.count >= ListenModel.lookahead + 1 }, timeout: 1)
+        XCTAssertEqual(synthesizer.spoken.count, ListenModel.lookahead + 1)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
+        XCTAssertEqual(model.playback, .waiting)
+
+        // Once the device is up (here, once it fails), reading goes on from there.
+        await waitUntil { model.errorMessage != nil }
+        XCTAssertEqual(model.errorMessage, "Couldn't play the audio: The device didn't start.")
+        XCTAssertEqual(model.playback, .paused)
+        model.editText()
+    }
+
+    @MainActor
+    func testPausingWhileTheAudioDeviceStartsStaysPaused() async {
+        let synthesizer = FakeSynthesizer()
+        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer, player: makeSlowDevicePlayer(delay: 0.5))
+        model.text = "One sentence. And another."
+        model.play()
+        await waitUntil { synthesizer.spoken.count >= 1 && model.playback == .waiting }
+        model.pause()
+        XCTAssertEqual(model.playback, .paused)
+
+        // The device finishing its start doesn't play the sentence (or report on it) after the pause.
+        try? await Task.sleep(for: .milliseconds(800))
+        XCTAssertEqual(model.playback, .paused)
+        XCTAssertNil(model.errorMessage)
         model.editText()
     }
 

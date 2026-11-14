@@ -71,7 +71,7 @@ final class ListenModel: ObservableObject {
     private let store: SpokenSentenceStore
     private let defaults: UserDefaults
     private let textFileURL: URL?
-    private let player = ListenAudioPlayer()
+    private let player: ListenAudioPlayer
     private var spoken: [Int: SpokenSentence] = [:]
     /// Bumped for each new document read, so speech made for an earlier one is never played in it.
     private var documentGeneration = 0
@@ -96,8 +96,10 @@ final class ListenModel: ObservableObject {
         speaker: SentenceSpeaker = SentenceSpeaker(synthesizer: Qwen3Synthesizer(), aligner: Qwen3Aligner()),
         store: SpokenSentenceStore = SpokenSentenceStore(root: SpokenSentenceStore.defaultRoot),
         defaults: UserDefaults = .standard,
-        textFileURL: URL? = ListenModel.defaultTextFileURL
+        textFileURL: URL? = ListenModel.defaultTextFileURL,
+        player: ListenAudioPlayer? = nil
     ) {
+        self.player = player ?? ListenAudioPlayer()
         self.speaker = speaker
         self.store = store
         self.defaults = defaults
@@ -110,8 +112,8 @@ final class ListenModel: ObservableObject {
         if let textFileURL, let saved = try? String(contentsOf: textFileURL, encoding: .utf8) {
             text = saved
         }
-        player.rate = speed
-        player.onInterrupted = { [weak self] in self?.playerInterrupted() }
+        self.player.rate = speed
+        self.player.onInterrupted = { [weak self] in self?.playerInterrupted() }
         let store = store
         Task.detached(priority: .utility) { store.prune() }
     }
@@ -260,15 +262,19 @@ final class ListenModel: ObservableObject {
     private func start(_ sentence: SpokenSentence, at position: ReadingPosition) {
         let time = sentence.wordTimes.indices.contains(position.word) ? sentence.wordTimes[position.word].start : 0
         let index = position.sentence
-        do {
-            try player.play(sentence, from: time) { [weak self] in
-                self?.sentenceFinished(index)
+        // Until the audio device is ready, which can take a few seconds when it was asleep.
+        if playback != .playing { playback = .waiting }
+        player.play(sentence, from: time) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                self.fail("Couldn't play the audio: \(error.localizedDescription)")
+                return
             }
-            playback = .playing
-            cancelIdleUnload()
-            startTicker()
-        } catch {
-            fail("Couldn't play the audio: \(error.localizedDescription)")
+            self.playback = .playing
+            self.cancelIdleUnload()
+            self.startTicker()
+        } onFinish: { [weak self] in
+            self?.sentenceFinished(index)
         }
     }
 
