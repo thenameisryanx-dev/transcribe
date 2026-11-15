@@ -144,8 +144,61 @@ private func onMLXQueue<T>(_ work: @escaping @Sendable () throws -> T) async thr
     try Task.checkCancellation()
     return try await withCheckedThrowingContinuation { continuation in
         mlxQueue.async {
-            continuation.resume(with: Result { try work() })
+            continuation.resume(with: Result { try MLXWorkGate.shared.run(work) })
         }
+    }
+}
+
+/// Counts the MLX work running (a model loading, a sentence being spoken) so the app can wait for it before it
+/// quits. `exit()` destroys MLX's C++ statics, its compile cache among them, so quitting while a sentence was being
+/// spoken crashed the thread still using that cache.
+final class MLXWorkGate: @unchecked Sendable {
+    static let shared = MLXWorkGate()
+
+    private let lock = NSLock()
+    private var running = 0
+    private var closed = false
+    private var whenIdle: [@Sendable () -> Void] = []
+
+    /// Runs `work`, or throws `CancellationError` without running it once the gate is closed.
+    func run<T>(_ work: () throws -> T) throws -> T {
+        try enter()
+        defer { leave() }
+        return try work()
+    }
+
+    func run<T>(_ work: () async throws -> T) async throws -> T {
+        try enter()
+        defer { leave() }
+        return try await work()
+    }
+
+    /// Lets no more work start. Returns true when nothing is running; otherwise `whenIdle` is called, on the thread
+    /// that finishes it, once the work already running is done.
+    func close(whenIdle: @escaping @Sendable () -> Void) -> Bool {
+        lock.withLock {
+            closed = true
+            guard running > 0 else { return true }
+            self.whenIdle.append(whenIdle)
+            return false
+        }
+    }
+
+    private func enter() throws {
+        try lock.withLock {
+            if closed { throw CancellationError() }
+            running += 1
+        }
+    }
+
+    private func leave() {
+        let callbacks = lock.withLock { () -> [@Sendable () -> Void] in
+            running -= 1
+            guard running == 0 else { return [] }
+            defer { whenIdle = [] }
+            return whenIdle
+        }
+        callbacks.forEach { $0() }
     }
 }
 
@@ -158,6 +211,20 @@ private final class ModelBox<Model>: @unchecked Sendable {
     var value: Model? {
         get { lock.withLock { model } }
         set { lock.withLock { model = newValue } }
+    }
+
+    /// Frees the model on `mlxQueue`. Freeing it removes its compiled graphs from MLX's compile cache, which must
+    /// not happen while the other model is using that cache there.
+    func release() {
+        let old = ModelBox()
+        lock.withLock {
+            old.model = model
+            model = nil
+        }
+        mlxQueue.async {
+            // Once the app is quitting the model stays until the process ends.
+            try? MLXWorkGate.shared.run { old.value = nil }
+        }
     }
 }
 
@@ -182,13 +249,15 @@ final class Qwen3Synthesizer: SpeechSynthesizer, @unchecked Sendable {
 
     func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {
         guard box.value == nil else { return }
-        let model = try await Qwen3TTSModel.fromPretrained(
+        // Waits for a model being freed on the MLX queue, since loading compiles graphs into the same cache.
+        try await onMLXQueue {}
+        let model = try await MLXWorkGate.shared.run { try await Qwen3TTSModel.fromPretrained(
             modelId: SpeechModelFiles.ttsModelID,
             tokenizerModelId: SpeechModelFiles.ttsTokenizerID,
             cacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.ttsModelID),
             tokenizerCacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.ttsTokenizerID),
             progressHandler: { fraction, message in progress(fraction, message) }
-        )
+        ) }
         box.value = model
     }
 
@@ -203,7 +272,7 @@ final class Qwen3Synthesizer: SpeechSynthesizer, @unchecked Sendable {
     }
 
     func unload() {
-        box.value = nil
+        box.release()
     }
 }
 
@@ -216,11 +285,12 @@ final class Qwen3Aligner: WordAligner, @unchecked Sendable {
 
     func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {
         guard box.value == nil else { return }
-        let aligner = try await Qwen3ForcedAligner.fromPretrained(
+        try await onMLXQueue {}
+        let aligner = try await MLXWorkGate.shared.run { try await Qwen3ForcedAligner.fromPretrained(
             modelId: SpeechModelFiles.alignerModelID,
             cacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.alignerModelID),
             progressHandler: { fraction, message in progress(fraction, message) }
-        )
+        ) }
         box.value = aligner
     }
 
@@ -234,7 +304,7 @@ final class Qwen3Aligner: WordAligner, @unchecked Sendable {
     }
 
     func unload() {
-        box.value = nil
+        box.release()
     }
 }
 

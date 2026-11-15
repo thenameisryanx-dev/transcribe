@@ -1,9 +1,15 @@
 import AppKit
 import SwiftUI
 
+@MainActor
 final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     var shouldTerminateAfterLastWindowClosed: (() -> Bool)?
     var bringPrimaryWindowToFront: (() -> Void)?
+    /// Asked before the app quits: returns true when it can quit now, or calls `whenReady` once it can.
+    var prepareToTerminate: ((_ whenReady: @escaping @Sendable () -> Void) -> Bool)?
+    /// The longest a quit waits for `prepareToTerminate`.
+    static let terminationWaitLimit: TimeInterval = 30
+    private var isWaitingToTerminate = false
 
     override init() {
         super.init()
@@ -27,6 +33,25 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         shouldTerminateAfterLastWindowClosed?() ?? true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let prepareToTerminate, !isWaitingToTerminate else { return .terminateNow }
+        let ready = prepareToTerminate { [weak self] in
+            Task { @MainActor in self?.finishTerminating() }
+        }
+        if ready { return .terminateNow }
+        isWaitingToTerminate = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.terminationWaitLimit) { [weak self] in
+            self?.finishTerminating()
+        }
+        return .terminateLater
+    }
+
+    private func finishTerminating() {
+        guard isWaitingToTerminate else { return }
+        isWaitingToTerminate = false
+        NSApplication.shared.reply(toApplicationShouldTerminate: true)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -70,6 +95,10 @@ struct LectureTranscribeNativeApp: App {
             !viewModel.isRunning
         }
         appDelegate.bringPrimaryWindowToFront = activateAndBringPrimaryWindowToFront
+        // Quitting waits for the Listen voice to finish the sentence it's speaking (see `MLXWorkGate`).
+        appDelegate.prepareToTerminate = { [viewModel] whenReady in
+            viewModel.listen.stopForQuit(whenIdle: whenReady)
+        }
     }
 
     private func activateAndBringPrimaryWindowToFront() {

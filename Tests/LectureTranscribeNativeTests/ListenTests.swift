@@ -55,7 +55,8 @@ final class FakeAligner: WordAligner, @unchecked Sendable {
 func makeTestListenModel(
     directory: URL,
     synthesizer: FakeSynthesizer = FakeSynthesizer(),
-    player: ListenAudioPlayer? = nil
+    player: ListenAudioPlayer? = nil,
+    mlxWork: MLXWorkGate = MLXWorkGate()
 ) -> ListenModel {
     let suite = "ListenTests.\(UUID().uuidString)"
     return ListenModel(
@@ -63,7 +64,8 @@ func makeTestListenModel(
         store: SpokenSentenceStore(root: directory.appendingPathComponent("listen_audio", isDirectory: true)),
         defaults: UserDefaults(suiteName: suite)!,
         textFileURL: directory.appendingPathComponent("listen.txt"),
-        player: player
+        player: player,
+        mlxWork: mlxWork
     )
 }
 
@@ -329,6 +331,87 @@ private func waitUntil(_ condition: () -> Bool, timeout: TimeInterval = 5) async
     let deadline = Date().addingTimeInterval(timeout)
     while !condition(), Date() < deadline {
         try? await Task.sleep(for: .milliseconds(20))
+    }
+}
+
+// MARK: - Quitting while speaking
+
+/// Quitting used to crash when a sentence was being spoken: `exit()` destroyed MLX's compile cache while the MLX
+/// queue was still using it. The app now waits for that work before it quits.
+final class MLXWorkGateTests: XCTestCase {
+    func testClosingWhenIdleIsReadyAtOnceAndRefusesNewWork() {
+        let gate = MLXWorkGate()
+        XCTAssertEqual(try gate.run { 1 }, 1)
+        XCTAssertTrue(gate.close { XCTFail("Nothing was running") })
+        XCTAssertThrowsError(try gate.run { XCTFail("Ran after the gate closed") }) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
+    func testClosingWaitsForTheWorkRunning() {
+        let gate = MLXWorkGate()
+        let started = DispatchSemaphore(value: 0)
+        let finish = DispatchSemaphore(value: 0)
+        let finished = Locked(false)
+        DispatchQueue.global().async {
+            try? gate.run {
+                started.signal()
+                finish.wait()
+                finished.value = true
+            }
+        }
+        started.wait()
+
+        let idle = expectation(description: "idle")
+        XCTAssertFalse(gate.close {
+            XCTAssertTrue(finished.value, "Called before the work finished")
+            idle.fulfill()
+        })
+        finish.signal()
+        wait(for: [idle], timeout: 5)
+    }
+}
+
+final class Locked<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+    init(_ value: Value) { stored = value }
+    var value: Value {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
+    }
+}
+
+final class QuitTests: XCTestCase {
+    @MainActor
+    func testQuitIsImmediateWhenNothingIsSpeaking() {
+        let delegate = AppLifecycleDelegate()
+        // So a window another test closes can't make it quit the test run.
+        delegate.shouldTerminateAfterLastWindowClosed = { false }
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateNow)
+        delegate.prepareToTerminate = { _ in true }
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateNow)
+    }
+
+    @MainActor
+    func testStoppingForQuitStopsReadingAndClosesTheGate() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let synthesizer = FakeSynthesizer()
+        let gate = MLXWorkGate()
+        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer, mlxWork: gate)
+        model.text = (1...20).map { "Sentence number \($0) is here." }.joined(separator: " ")
+        model.play()
+        await waitUntil { !synthesizer.spoken.isEmpty }
+        XCTAssertFalse(synthesizer.spoken.isEmpty)
+
+        XCTAssertTrue(model.stopForQuit { XCTFail("Nothing was running in the gate") })
+        let spokenAtQuit = synthesizer.spoken.count
+        try? await Task.sleep(for: .milliseconds(200))
+        // Speaking ahead stopped, and no more MLX work can start.
+        XCTAssertLessThanOrEqual(synthesizer.spoken.count, spokenAtQuit + 1)
+        XCTAssertThrowsError(try gate.run {})
     }
 }
 

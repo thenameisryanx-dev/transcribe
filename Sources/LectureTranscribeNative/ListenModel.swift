@@ -72,6 +72,7 @@ final class ListenModel: ObservableObject {
     private let defaults: UserDefaults
     private let textFileURL: URL?
     private let player: ListenAudioPlayer
+    private let mlxWork: MLXWorkGate
     private var spoken: [Int: SpokenSentence] = [:]
     /// Bumped for each new document read, so speech made for an earlier one is never played in it.
     private var documentGeneration = 0
@@ -97,9 +98,11 @@ final class ListenModel: ObservableObject {
         store: SpokenSentenceStore = SpokenSentenceStore(root: SpokenSentenceStore.defaultRoot),
         defaults: UserDefaults = .standard,
         textFileURL: URL? = ListenModel.defaultTextFileURL,
-        player: ListenAudioPlayer? = nil
+        player: ListenAudioPlayer? = nil,
+        mlxWork: MLXWorkGate = .shared
     ) {
         self.player = player ?? ListenAudioPlayer()
+        self.mlxWork = mlxWork
         self.speaker = speaker
         self.store = store
         self.defaults = defaults
@@ -487,6 +490,18 @@ final class ListenModel: ObservableObject {
     func savedSpeechSize() async -> Int64 {
         let store = store
         return await Task.detached { store.size() }.value
+    }
+
+    /// Stops reading for the app to quit. Returns true when the voice models aren't in use; otherwise `whenIdle` is
+    /// called once the sentence being spoken, or the model being loaded, is done.
+    func stopForQuit(whenIdle: @escaping @Sendable () -> Void) -> Bool {
+        producer?.cancel()
+        producer = nil
+        loadTask?.cancel()
+        cancelIdleUnload()
+        stopTicker()
+        player.stop()
+        return mlxWork.close(whenIdle: whenIdle)
     }
 
     private func unloadVoice() {
