@@ -59,6 +59,8 @@ in_app 'Menu("Export Track")'
 # Listen reads text aloud: clicking a word jumps there, and Edit Text goes back to editing.
 in_app 'onClickLocation: model.jump(toLocation:)'
 in_app 'Button("Edit Text", action: model.editText)'
+# A voice slower than the reading gets a head start, which Start Now skips.
+in_app 'Button("Start Now", action: model.startNow)'
 in_app 'ListenSettingsSection(model: viewModel.listen)'
 # Removed on purpose; must not come back.
 not_in_app '.disabled(!viewModel.canOpenOutputFolder)'

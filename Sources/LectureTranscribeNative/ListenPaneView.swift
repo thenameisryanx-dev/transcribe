@@ -207,10 +207,17 @@ struct ListenPaneView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ProgressView(value: model.progress)
                         .frame(maxWidth: 320)
-                    Text(readingSummary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+                    HStack(spacing: 8) {
+                        Text(readingSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                        if model.headStartWait != nil {
+                            Button("Start Now", action: model.startNow)
+                                .controlSize(.small)
+                                .help("Start reading now. The voice is slower than the reading, so it will stop now and then to catch up.")
+                        }
+                    }
                 }
             } else if !model.modelsDownloaded {
                 Text("The first time, Play downloads the voice (about \(downloadSize)). After that it works offline.")
@@ -234,7 +241,10 @@ struct ListenPaneView: View {
         if let minutes = model.minutesLeft {
             parts.append(minutes < 1 ? "under a minute left" : "about \(Int(minutes.rounded())) min left")
         }
-        if model.playback == .waiting {
+        if let wait = model.headStartWait {
+            // The voice is slower than the reading, so it makes a head start first.
+            parts.append(wait < 60 ? "getting a head start, under a minute" : "getting a head start, about \(Int((wait / 60).rounded())) min")
+        } else if model.playback == .waiting {
             parts.append("preparing speech…")
         }
         return parts.joined(separator: " · ")

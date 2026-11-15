@@ -5,7 +5,9 @@ import UniformTypeIdentifiers
 
 /// The Listen pane: reads text aloud on this Mac, highlights each word as it's spoken, and jumps to any word
 /// clicked. Sentences are spoken a few ahead of the one playing, so a long document starts within seconds, and
-/// each one is saved once spoken, so it plays at once the next time.
+/// each one is saved once spoken, so it plays at once the next time. A voice that makes speech more slowly than it
+/// plays (Qwen3-TTS on most Macs, or any voice at a high speed) gets a head start instead: it makes the rest of the
+/// document ahead, and reading starts once it can't catch up with the voice.
 @MainActor
 final class ListenModel: ObservableObject {
     enum Playback: Equatable {
@@ -45,6 +47,8 @@ final class ListenModel: ObservableObject {
     /// Whether the chosen engine's models are on disk.
     @Published private(set) var modelsDownloaded: Bool
     @Published var errorMessage: String?
+    /// While a voice slower than playback gets a head start: about how many seconds until reading starts.
+    @Published private(set) var headStartWait: TimeInterval?
 
     /// The voice model reading. Each keeps its own chosen voice.
     @Published var engine: ListenEngine {
@@ -95,6 +99,15 @@ final class ListenModel: ObservableObject {
     private let player: ListenAudioPlayer
     private let mlxWork: MLXWorkGate
     private var spoken: [Int: SpokenSentence] = [:]
+    /// How long each sentence made for this reading lasts (at 1×), whether it's in memory or only saved on disk.
+    private var prepared: [Int: Double] = [:]
+    /// Seconds of speech per word, from the sentences prepared, for guessing how long the rest will take.
+    private var preparedSeconds = 0.0
+    private var preparedWords = 0
+    /// The sentence being started (while the audio device wakes), so it isn't started twice.
+    private var startingSentence: Int?
+    /// Set by Start Now: the next start doesn't wait for a head start.
+    private var skipHeadStart = false
     /// Bumped for each new document read, so speech made for an earlier one is never played in it.
     private var documentGeneration = 0
     /// The language the document is being read in (`language`, or the one picked from the text).
@@ -117,6 +130,7 @@ final class ListenModel: ObservableObject {
         static let speed = "listen.speed"
         static let documentName = "listen.documentName"
         static let positions = "listen.positions"
+        static func makingRate(for engine: ListenEngine) -> String { "listen.makingRate.\(engine.rawValue)" }
     }
 
     init(
@@ -187,7 +201,7 @@ final class ListenModel: ObservableObject {
             self.document = document
             documentGeneration += 1
             readingLanguage = language.resolved(for: text)
-            spoken = [:]
+            forgetSpeech()
             position = savedPosition(in: document) ?? ReadingPosition(sentence: 0, word: 0)
         }
         if playback == .paused, player.canResume {
@@ -202,6 +216,8 @@ final class ListenModel: ObservableObject {
     func pause() {
         guard playback == .playing || playback == .waiting else { return }
         player.pause()
+        startingSentence = nil
+        headStartWait = nil
         playback = .paused
         stopTicker()
         savePosition()
@@ -217,7 +233,7 @@ final class ListenModel: ObservableObject {
         stopTicker()
         document = nil
         position = nil
-        spoken = [:]
+        forgetSpeech()
         playback = .stopped
         scheduleIdleUnload()
     }
@@ -294,22 +310,46 @@ final class ListenModel: ObservableObject {
     private func playCurrent() {
         guard let position else { return }
         startProducer()
-        if let sentence = spoken[position.sentence] {
+        // Reading carries straight on from one sentence to the next; only a fresh start waits for a head start.
+        if let sentence = spoken[position.sentence], playback == .playing || headStartShortfall() == 0 {
             start(sentence, at: position)
         } else {
             player.stop()
+            startingSentence = nil
             playback = .waiting
             stopTicker()
+            updateHeadStartWait()
         }
+    }
+
+    /// Starts reading now, without waiting for the rest of the head start.
+    func startNow() {
+        guard playback == .waiting else { return }
+        skipHeadStart = true
+        startIfReady()
+    }
+
+    /// Starts the sentence being waited for once it's made and, for a voice slower than playback, once enough is
+    /// made ahead that reading won't catch up with it.
+    private func startIfReady() {
+        updateHeadStartWait()
+        guard playback == .waiting, let position, startingSentence != position.sentence,
+              let sentence = spoken[position.sentence], headStartShortfall() == 0
+        else { return }
+        start(sentence, at: position)
     }
 
     private func start(_ sentence: SpokenSentence, at position: ReadingPosition) {
         let time = sentence.wordTimes.indices.contains(position.word) ? sentence.wordTimes[position.word].start : 0
         let index = position.sentence
+        skipHeadStart = false
+        headStartWait = nil
+        startingSentence = index
         // Until the audio device is ready, which can take a few seconds when it was asleep.
         if playback != .playing { playback = .waiting }
         player.play(sentence, from: time) { [weak self] error in
             guard let self else { return }
+            if self.startingSentence == index { self.startingSentence = nil }
             if let error {
                 self.fail("Couldn't play the audio: \(error.localizedDescription)")
                 return
@@ -361,7 +401,7 @@ final class ListenModel: ObservableObject {
     private func voiceOrLanguageChanged() {
         guard document != nil else { return }
         readingLanguage = language.resolved(for: text)
-        spoken = [:]
+        forgetSpeech()
         producer?.cancel()
         producer = nil
         if playback == .playing || playback == .waiting {
@@ -398,8 +438,9 @@ final class ListenModel: ObservableObject {
 
     // MARK: - Speaking ahead
 
-    /// Speaks the sentence being read and the few after it, one at a time, in reading order. It follows `position`,
-    /// so after a jump it moves on to the new place by itself.
+    /// Speaks the sentence being read and the few after it, one at a time, in reading order, and for a voice slower
+    /// than playback the rest of the document after them. It follows `position`, so after a jump it moves on to the
+    /// new place by itself.
     private func startProducer() {
         guard producer == nil else { return }
         producerToken += 1
@@ -427,51 +468,145 @@ final class ListenModel: ObservableObject {
 
         while !Task.isCancelled {
             guard let document, let position else { return }
-            let window = position.sentence..<min(position.sentence + Self.lookahead + 1, document.sentences.count)
-            guard let index = window.first(where: { spoken[$0] == nil }) else {
-                // Everything near is ready; check again once reading moves on.
-                try? await Task.sleep(for: .milliseconds(250))
+            let near = position.sentence..<min(position.sentence + Self.lookahead + 1, document.sentences.count)
+            if let index = near.first(where: { spoken[$0] == nil }) {
+                guard await prepare(index, keep: true) else { return }
                 continue
             }
-            let sentence = document.sentences[index]
-            let generation = documentGeneration
-            let engine = engine
-            let voice = voiceID
-            let language = readingLanguage
-            let key = SpokenSentenceStore.key(text: sentence.spokenText, engine: speaker.identifier, voice: voice, language: language.rawValue)
-            let store = store
-            let speaker = speaker
-            let result: SpokenSentence
-            do {
-                if let saved = await Task.detached(operation: { store.load(key) }).value,
-                   saved.wordTimes.count == sentence.words.count {
-                    result = saved
-                } else {
-                    result = try await speaker.speak(sentence, voice: voice, language: language)
-                    Task.detached(priority: .utility) { store.save(result, key: key) }
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                fail("Couldn't read “\(sentence.spokenText.prefix(60))”: \(error.localizedDescription)")
-                return
+            // A voice slower than playback keeps making the rest of the document, saving it to disk, so reading
+            // never catches up with it.
+            if makingRate * speed > 1,
+               let index = (near.upperBound..<document.sentences.count).first(where: { prepared[$0] == nil }) {
+                guard await prepare(index, keep: false) else { return }
+                continue
             }
-            // The text, voice or language may have changed while it was being spoken.
-            guard !Task.isCancelled, generation == documentGeneration, engine == self.engine, voice == voiceID,
-                  language == readingLanguage
-            else { continue }
-            spoken[index] = result
-            if playback == .waiting, self.position?.sentence == index, let position = self.position {
-                start(result, at: position)
-            }
+            // Everything needed is ready; check again once reading moves on.
+            try? await Task.sleep(for: .milliseconds(250))
         }
     }
 
+    /// Loads a sentence's saved speech, or makes it, for this reading. Keeps it in memory when `keep` (or when it's
+    /// near the one playing). Returns false when reading should stop (cancelled, or the voice failed).
+    private func prepare(_ index: Int, keep: Bool) async -> Bool {
+        guard let document else { return false }
+        let sentence = document.sentences[index]
+        let generation = documentGeneration
+        let engine = engine
+        let voice = voiceID
+        let language = readingLanguage
+        let key = SpokenSentenceStore.key(text: sentence.spokenText, engine: speaker.identifier, voice: voice, language: language.rawValue)
+        let store = store
+        let speaker = speaker
+        let result: SpokenSentence
+        do {
+            if let saved = await Task.detached(operation: { store.load(key) }).value,
+               saved.wordTimes.count == sentence.words.count {
+                result = saved
+            } else {
+                let started = ContinuousClock.now
+                result = try await speaker.speak(sentence, voice: voice, language: language)
+                let took = ContinuousClock.now - started
+                Task.detached(priority: .utility) { store.save(result, key: key) }
+                if engine == self.engine {
+                    measured(seconds: Double(took.components.seconds) + Double(took.components.attoseconds) / 1e18, toMake: result.duration)
+                }
+            }
+        } catch is CancellationError {
+            return false
+        } catch {
+            fail("Couldn't read “\(sentence.spokenText.prefix(60))”: \(error.localizedDescription)")
+            return false
+        }
+        // The text, voice or language may have changed while it was being spoken.
+        guard !Task.isCancelled else { return false }
+        guard generation == documentGeneration, engine == self.engine, voice == voiceID, language == readingLanguage
+        else { return true }
+        if prepared[index] == nil {
+            preparedSeconds += result.duration
+            preparedWords += sentence.words.count
+        }
+        prepared[index] = result.duration
+        if keep || keepsInMemory(index) {
+            spoken[index] = result
+        }
+        startIfReady()
+        return true
+    }
+
+    private func forgetSpeech() {
+        spoken = [:]
+        prepared = [:]
+        preparedSeconds = 0
+        preparedWords = 0
+        startingSentence = nil
+        skipHeadStart = false
+        headStartWait = nil
+    }
+
+    // MARK: - Head start
+
+    /// Seconds the chosen voice takes to make a second of speech (and time its words), measured as it reads and kept
+    /// between launches.
+    private var makingRate: Double {
+        let saved = defaults.double(forKey: Keys.makingRate(for: engine))
+        return saved > 0 ? saved : engine.expectedMakingRate
+    }
+
+    private func measured(seconds: Double, toMake duration: Double) {
+        // Very short sentences are mostly fixed overhead; they'd make the voice look slower than it is.
+        guard duration >= 1, seconds > 0 else { return }
+        let rate = makingRate * 0.7 + (seconds / duration) * 0.3
+        defaults.set(rate, forKey: Keys.makingRate(for: engine))
+    }
+
+    /// How many seconds of making are still needed before reading can start from `position` without catching up
+    /// with the voice (0 when it can start now).
+    ///
+    /// Reading plays `speed` seconds of speech a second while the voice makes 1 ÷ `makingRate`. Starting with `B`
+    /// seconds made ahead out of `T` left, the voice falls further behind until the end, where it must have made the
+    /// rest (`T − B`) in the time the reading took (`T ÷ speed`): so `B ≥ T × (k − 1) ÷ k`, with `k` = `makingRate` ×
+    /// `speed`, kept a little high for safety.
+    private func headStartShortfall() -> TimeInterval {
+        guard !skipHeadStart, let document, let position else { return 0 }
+        let k = makingRate * Self.headStartSafety * speed
+        guard k > 1 else { return 0 }
+        let perWord = preparedWords > 0 ? preparedSeconds / Double(preparedWords) : 60 / Self.wordsPerMinute
+        var ahead = 0.0
+        var aheadIsContiguous = true
+        var left = 0.0
+        for index in position.sentence..<document.sentences.count {
+            if let duration = prepared[index] {
+                left += duration
+                if aheadIsContiguous { ahead += duration }
+            } else {
+                left += Double(document.sentences[index].words.count) * perWord
+                aheadIsContiguous = false
+            }
+        }
+        let needed = left * (k - 1) / k
+        return max(needed - ahead, 0) * makingRate
+    }
+
+    private func updateHeadStartWait() {
+        guard playback == .waiting, startingSentence == nil else {
+            headStartWait = nil
+            return
+        }
+        let wait = headStartShortfall()
+        headStartWait = wait > 0 ? wait : nil
+    }
+
+    /// Guesses err on the side of a little more head start, since running out means stopping mid-document.
+    static let headStartSafety = 1.1
+
     /// Keeps only sentences near the one playing in memory (an hour of speech is about 350 MB); the rest are on disk.
     private func dropFarSentences() {
-        guard let position else { return }
-        let keep = (position.sentence - 2)...(position.sentence + Self.lookahead + 1)
-        spoken = spoken.filter { keep.contains($0.key) }
+        spoken = spoken.filter { keepsInMemory($0.key) }
+    }
+
+    private func keepsInMemory(_ index: Int) -> Bool {
+        guard let position else { return false }
+        return ((position.sentence - 2)...(position.sentence + Self.lookahead + 1)).contains(index)
     }
 
     // MARK: - Voice models

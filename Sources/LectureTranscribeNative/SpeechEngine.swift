@@ -119,6 +119,15 @@ enum ListenEngine: String, CaseIterable, Identifiable, Sendable {
         voices.first { $0.id == id }
     }
 
+    /// About how many seconds it takes to make a second of speech and time its words, until the reader has measured
+    /// it on this Mac. Qwen3-TTS takes about 1.35 on a base M4 (`ListenBenchmarkTests`).
+    var expectedMakingRate: Double {
+        switch self {
+        case .kokoro: return 0.3
+        case .qwen: return 1.35
+        }
+    }
+
     /// The models it downloads, the word aligner included.
     var modelIDs: [String] {
         switch self {

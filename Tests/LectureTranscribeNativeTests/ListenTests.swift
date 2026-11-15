@@ -6,16 +6,21 @@ import XCTest
 // MARK: - Fakes
 
 /// A voice that "speaks" a sentence as a short burst of silence and records what it was asked to say, so the
-/// reader can be tested without downloading or running the real models.
+/// reader can be tested without downloading or running the real models. Each word lasts `secondsPerWord`, and each
+/// sentence takes `secondsToMake`.
 final class FakeSynthesizer: SpeechSynthesizer, @unchecked Sendable {
     let identifier: String
+    let secondsPerWord: Double
+    let secondsToMake: Double
     static let sampleRate = 1_000
     private let lock = NSLock()
     private var said: [String] = []
     private var loaded = false
 
-    init(identifier: String = "fake-voice") {
+    init(identifier: String = "fake-voice", secondsPerWord: Double = 0.1, secondsToMake: Double = 0) {
         self.identifier = identifier
+        self.secondsPerWord = secondsPerWord
+        self.secondsToMake = secondsToMake
     }
 
     var spoken: [String] { lock.withLock { said } }
@@ -27,10 +32,10 @@ final class FakeSynthesizer: SpeechSynthesizer, @unchecked Sendable {
     }
 
     func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> (samples: [Float], sampleRate: Int) {
+        if secondsToMake > 0 { try await Task.sleep(for: .seconds(secondsToMake)) }
         lock.withLock { said.append(text) }
-        // A tenth of a second per word.
         let words = text.split(separator: " ").count
-        return ([Float](repeating: 0, count: max(words, 1) * Self.sampleRate / 10), Self.sampleRate)
+        return ([Float](repeating: 0, count: Int(Double(max(words, 1) * Self.sampleRate) * secondsPerWord)), Self.sampleRate)
     }
 
     func unload() {
@@ -548,6 +553,106 @@ final class ListenModelTests: XCTestCase {
         let file = directory.appendingPathComponent("listen.txt")
         await waitUntil { (try? String(contentsOf: file, encoding: .utf8)) == "Remember me." }
         XCTAssertEqual(try? String(contentsOf: file, encoding: .utf8), "Remember me.")
+    }
+
+    /// A defaults suite where the voices have already been measured making speech this many times slower than it
+    /// plays.
+    private func defaults(makingRate rate: Double, for engine: ListenEngine) -> UserDefaults {
+        let defaults = UserDefaults(suiteName: "ListenTests.\(UUID().uuidString)")!
+        defaults.set(rate, forKey: "listen.makingRate.\(engine.rawValue)")
+        return defaults
+    }
+
+    /// A device that fails at once, recording how many sentences the voice had made when reading started.
+    @MainActor
+    private func recordingStartPlayer(_ voice: FakeSynthesizer, into madeAtStart: Locked<Int?>) -> ListenAudioPlayer {
+        ListenAudioPlayer { _ in
+            if madeAtStart.value == nil { madeAtStart.value = voice.spoken.count }
+            throw SlowDeviceError()
+        }
+    }
+
+    @MainActor
+    func testAVoiceSlowerThanTheReadingGetsAHeadStart() async {
+        // Speech that takes twice as long to make as to play: starting with 10 sentences left, reading must wait
+        // for over half of them (with the safety margin, 6) or it would catch up with the voice.
+        let qwen = FakeSynthesizer(identifier: "fake-qwen", secondsPerWord: 0.01, secondsToMake: 0.02)
+        let madeAtStart = Locked<Int?>(nil)
+        let model = makeTestListenModel(directory: directory, qwen: qwen, player: recordingStartPlayer(qwen, into: madeAtStart),
+                                        defaults: defaults(makingRate: 2, for: .qwen))
+        model.engine = .qwen
+        model.text = (1...10).map { "Sentence number \($0) is here." }.joined(separator: " ")
+        model.play()
+        await waitUntil { qwen.spoken.count >= 1 }
+        XCTAssertEqual(model.playback, .waiting)
+        XCTAssertNotNil(model.headStartWait)
+
+        await waitUntil { madeAtStart.value != nil }
+        XCTAssertGreaterThanOrEqual(madeAtStart.value ?? 0, 6)
+        // It makes the rest of the document too, well past the few sentences ahead a fast voice makes.
+        await waitUntil { qwen.spoken.count == 10 }
+        XCTAssertEqual(qwen.spoken.count, 10)
+        model.editText()
+    }
+
+    @MainActor
+    func testStartNowSkipsTheHeadStart() async {
+        let qwen = FakeSynthesizer(identifier: "fake-qwen", secondsPerWord: 0.01, secondsToMake: 0.05)
+        let madeAtStart = Locked<Int?>(nil)
+        let model = makeTestListenModel(directory: directory, qwen: qwen, player: recordingStartPlayer(qwen, into: madeAtStart),
+                                        defaults: defaults(makingRate: 3, for: .qwen))
+        model.engine = .qwen
+        model.text = (1...20).map { "Sentence number \($0) is here." }.joined(separator: " ")
+        model.play()
+        await waitUntil { qwen.spoken.count >= 1 }
+        XCTAssertNotNil(model.headStartWait)
+        model.startNow()
+        await waitUntil { madeAtStart.value != nil }
+        XCTAssertLessThan(madeAtStart.value ?? 99, 5)
+        model.editText()
+    }
+
+    @MainActor
+    func testAFastVoiceStartsAtOnceAndOnlyMakesAFewAhead() async {
+        let kokoro = FakeSynthesizer(secondsPerWord: 0.01)
+        let madeAtStart = Locked<Int?>(nil)
+        let model = makeTestListenModel(directory: directory, synthesizer: kokoro, player: recordingStartPlayer(kokoro, into: madeAtStart),
+                                        defaults: defaults(makingRate: 0.5, for: .kokoro))
+        model.text = (1...10).map { "Sentence number \($0) is here." }.joined(separator: " ")
+        model.play()
+        await waitUntil { madeAtStart.value != nil }
+        XCTAssertNil(model.headStartWait)
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(kokoro.spoken.count, ListenModel.lookahead + 1)
+        model.editText()
+    }
+
+    @MainActor
+    func testFasterReadingNeedsAHeadStartEvenFromAFastVoice() async {
+        // Half as long to make as to play is fine at 1×, but not at 4×.
+        let kokoro = FakeSynthesizer(secondsPerWord: 0.01)
+        let defaults = defaults(makingRate: 0.5, for: .kokoro)
+        defaults.set(4.0, forKey: "listen.speed")
+        let model = makeTestListenModel(directory: directory, synthesizer: kokoro, player: makeSlowDevicePlayer(delay: 0), defaults: defaults)
+        model.text = (1...10).map { "Sentence number \($0) is here." }.joined(separator: " ")
+        model.play()
+        await waitUntil { kokoro.spoken.count == 10 }
+        XCTAssertEqual(kokoro.spoken.count, 10)
+        model.editText()
+    }
+
+    @MainActor
+    func testTheVoicesSpeedIsMeasuredAndRemembered() async {
+        // Sentences of a little over a second, made in a fraction of that.
+        let qwen = FakeSynthesizer(identifier: "fake-qwen", secondsPerWord: 0.25)
+        let defaults = defaults(makingRate: 2, for: .qwen)
+        let model = makeTestListenModel(directory: directory, qwen: qwen, player: makeSlowDevicePlayer(delay: 0), defaults: defaults)
+        model.engine = .qwen
+        model.text = (1...3).map { "Sentence number \($0) is here." }.joined(separator: " ")
+        model.play()
+        await waitUntil { qwen.spoken.count == 3 }
+        XCTAssertLessThan(defaults.double(forKey: "listen.makingRate.qwen"), 2)
+        model.editText()
     }
 
     @MainActor
