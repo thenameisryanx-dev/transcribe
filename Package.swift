@@ -42,8 +42,9 @@ let package = Package(
         ),
     ],
     dependencies: [
-        // On-device text to speech (Qwen3-TTS) and word timing (Qwen3-ForcedAligner) for the Listen pane,
-        // run on the GPU with MLX. Pinned exactly: the package is pre-1.0 and its API changes between releases.
+        // On-device text to speech for the Listen pane (Kokoro on the Neural Engine with Core ML, or Qwen3-TTS on
+        // the GPU with MLX) and word timing (Qwen3-ForcedAligner, MLX). Pinned exactly: the package is pre-1.0 and
+        // its API changes between releases.
         // It needs macOS 15, which is why the app does.
         .package(url: "https://github.com/soniqo/speech-swift", exact: "0.0.29"),
     ],
@@ -51,6 +52,7 @@ let package = Package(
         .executableTarget(
             name: "LectureTranscribeNative",
             dependencies: [
+                .product(name: "KokoroTTS", package: "speech-swift"),
                 .product(name: "Qwen3TTS", package: "speech-swift"),
                 .product(name: "Qwen3ASR", package: "speech-swift"),
                 .product(name: "AudioCommon", package: "speech-swift"),

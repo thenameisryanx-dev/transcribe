@@ -8,11 +8,15 @@ import XCTest
 /// A voice that "speaks" a sentence as a short burst of silence and records what it was asked to say, so the
 /// reader can be tested without downloading or running the real models.
 final class FakeSynthesizer: SpeechSynthesizer, @unchecked Sendable {
-    let identifier = "fake-voice"
+    let identifier: String
     static let sampleRate = 1_000
     private let lock = NSLock()
     private var said: [String] = []
     private var loaded = false
+
+    init(identifier: String = "fake-voice") {
+        self.identifier = identifier
+    }
 
     var spoken: [String] { lock.withLock { said } }
     var isLoaded: Bool { lock.withLock { loaded } }
@@ -50,19 +54,22 @@ final class FakeAligner: WordAligner, @unchecked Sendable {
     func unload() {}
 }
 
-/// A Listen model with the fake voice, and its own saved text, settings and saved speech in `directory`.
+/// A Listen model with fake voices (`synthesizer` for Kokoro, the default engine, and `qwen` for Qwen3-TTS), and its
+/// own saved text, settings and saved speech in `directory`.
 @MainActor
 func makeTestListenModel(
     directory: URL,
     synthesizer: FakeSynthesizer = FakeSynthesizer(),
+    qwen: FakeSynthesizer = FakeSynthesizer(identifier: "fake-qwen"),
     player: ListenAudioPlayer? = nil,
-    mlxWork: MLXWorkGate = MLXWorkGate()
+    mlxWork: MLXWorkGate = MLXWorkGate(),
+    defaults: UserDefaults = UserDefaults(suiteName: "ListenTests.\(UUID().uuidString)")!
 ) -> ListenModel {
-    let suite = "ListenTests.\(UUID().uuidString)"
-    return ListenModel(
-        speaker: SentenceSpeaker(synthesizer: synthesizer, aligner: FakeAligner()),
+    ListenModel(
+        synthesizers: [.kokoro: synthesizer, .qwen: qwen],
+        aligner: FakeAligner(),
         store: SpokenSentenceStore(root: directory.appendingPathComponent("listen_audio", isDirectory: true)),
-        defaults: UserDefaults(suiteName: suite)!,
+        defaults: defaults,
         textFileURL: directory.appendingPathComponent("listen.txt"),
         player: player,
         mlxWork: mlxWork
@@ -541,6 +548,86 @@ final class ListenModelTests: XCTestCase {
         let file = directory.appendingPathComponent("listen.txt")
         await waitUntil { (try? String(contentsOf: file, encoding: .utf8)) == "Remember me." }
         XCTAssertEqual(try? String(contentsOf: file, encoding: .utf8), "Remember me.")
+    }
+
+    @MainActor
+    func testKokoroIsTheDefaultVoiceModel() {
+        let model = makeTestListenModel(directory: directory)
+        XCTAssertEqual(model.engine, .kokoro)
+        XCTAssertEqual(model.voiceID, "af_heart")
+        XCTAssertEqual(model.voice.name, "Heart")
+    }
+
+    @MainActor
+    func testEachVoiceModelKeepsItsOwnVoice() {
+        // A voice chosen before there was a choice of model was a Qwen3-TTS voice; it's still there for Qwen3-TTS.
+        let defaults = UserDefaults(suiteName: "ListenTests.\(UUID().uuidString)")!
+        defaults.set("aiden", forKey: "listen.voice")
+        let model = makeTestListenModel(directory: directory, defaults: defaults)
+        XCTAssertEqual(model.voiceID, "af_heart")
+
+        model.voiceID = "bm_george"
+        model.engine = .qwen
+        XCTAssertEqual(model.voiceID, "aiden")
+        model.engine = .kokoro
+        XCTAssertEqual(model.voiceID, "bm_george")
+
+        // And they're remembered between launches.
+        let relaunched = makeTestListenModel(directory: directory, defaults: defaults)
+        XCTAssertEqual(relaunched.engine, .kokoro)
+        XCTAssertEqual(relaunched.voiceID, "bm_george")
+    }
+
+    @MainActor
+    func testSwitchingVoiceModelReadsWithTheNewOne() async {
+        let kokoro = FakeSynthesizer()
+        let qwen = FakeSynthesizer(identifier: "fake-qwen")
+        // A device that fails at once, so the test doesn't wait on this Mac's speakers.
+        let model = makeTestListenModel(directory: directory, synthesizer: kokoro, qwen: qwen, player: makeSlowDevicePlayer(delay: 0))
+        model.text = (1...8).map { "Sentence number \($0) is here." }.joined(separator: " ")
+        model.play()
+        await waitUntil { kokoro.spoken.count >= 1 }
+        XCTAssertTrue(qwen.spoken.isEmpty)
+
+        model.engine = .qwen
+        model.play()
+        await waitUntil { qwen.spoken.count >= 1 }
+        XCTAssertEqual(qwen.spoken.first, "Sentence number 1 is here.")
+        // Only one voice is kept in memory.
+        XCTAssertFalse(kokoro.isLoaded)
+        XCTAssertTrue(qwen.isLoaded)
+        model.editText()
+    }
+
+    @MainActor
+    func testALanguageTheVoiceModelCantReadSaysSoInsteadOfReading() async {
+        let kokoro = FakeSynthesizer()
+        let model = makeTestListenModel(directory: directory, synthesizer: kokoro)
+        model.text = "Привет, как у тебя сегодня дела? Это очень длинное предложение на русском языке."
+        model.play()
+        await waitUntil { model.errorMessage != nil }
+        XCTAssertEqual(model.errorMessage, "Kokoro can't read Russian. Choose another voice model from the voice menu to hear this text.")
+        XCTAssertTrue(kokoro.spoken.isEmpty)
+        XCTAssertFalse(model.engine.languages.contains(.russian))
+
+        // Qwen3-TTS reads it.
+        model.engine = .qwen
+        XCTAssertNil(model.errorMessage)
+        model.play()
+        XCTAssertNil(model.errorMessage)
+        model.editText()
+    }
+
+    func testKokoroVoicesAreNamedFromTheirFiles() {
+        XCTAssertEqual(ListenVoice.kokoro.count, 50)
+        XCTAssertEqual(ListenVoice.kokoroVoice("bf_emma"), ListenVoice(id: "bf_emma", name: "Emma", summary: "Female, British", nativeLanguage: .english))
+        XCTAssertEqual(ListenVoice.kokoroVoice("zm_yunxi")?.nativeLanguage, .chinese)
+        XCTAssertEqual(ListenVoice.kokoroVoice("zm_yunxi")?.summary, "Male")
+        // Every voice speaks a language Kokoro reads, and the default is one of them.
+        XCTAssertTrue(ListenVoice.kokoro.allSatisfy { ListenEngine.kokoro.reads($0.nativeLanguage) })
+        for engine in ListenEngine.allCases {
+            XCTAssertNotNil(engine.voice(engine.defaultVoiceID))
+        }
     }
 
     @MainActor

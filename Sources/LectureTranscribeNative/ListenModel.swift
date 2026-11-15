@@ -42,19 +42,35 @@ final class ListenModel: ObservableObject {
     @Published private(set) var position: ReadingPosition?
     @Published private(set) var playback: Playback = .stopped
     @Published private(set) var voiceState: VoiceState = .notLoaded
-    @Published private(set) var modelsDownloaded = SpeechModelFiles.isDownloaded
+    /// Whether the chosen engine's models are on disk.
+    @Published private(set) var modelsDownloaded: Bool
     @Published var errorMessage: String?
 
+    /// The voice model reading. Each keeps its own chosen voice.
+    @Published var engine: ListenEngine {
+        didSet {
+            defaults.set(engine.rawValue, forKey: Keys.engine)
+            guard engine != oldValue else { return }
+            errorMessage = nil
+            modelsDownloaded = SpeechModelFiles.isDownloaded(for: engine)
+            voiceState = isVoiceLoaded ? .ready : .notLoaded
+            switchingEngine = true
+            voiceID = Self.savedVoiceID(for: engine, in: defaults)
+            if !engine.reads(language) { language = .automatic }
+            switchingEngine = false
+            voiceOrLanguageChanged()
+        }
+    }
     @Published var voiceID: String {
         didSet {
-            defaults.set(voiceID, forKey: Keys.voice)
-            if voiceID != oldValue { voiceOrLanguageChanged() }
+            defaults.set(voiceID, forKey: Keys.voice(for: engine))
+            if voiceID != oldValue, !switchingEngine { voiceOrLanguageChanged() }
         }
     }
     @Published var language: ListenLanguage {
         didSet {
             defaults.set(language.rawValue, forKey: Keys.language)
-            if language != oldValue { voiceOrLanguageChanged() }
+            if language != oldValue, !switchingEngine { voiceOrLanguageChanged() }
         }
     }
     @Published var speed: Double {
@@ -65,9 +81,14 @@ final class ListenModel: ObservableObject {
     }
 
     var isReading: Bool { document != nil }
-    var voice: ListenVoice { ListenVoice.named(voiceID) }
+    var voice: ListenVoice { engine.voice(voiceID) ?? engine.voices[0] }
 
-    private let speaker: SentenceSpeaker
+    private let synthesizers: [ListenEngine: any SpeechSynthesizer]
+    private let aligner: any WordAligner
+    /// The chosen engine's voice with the shared aligner.
+    private var speaker: SentenceSpeaker { speaker(for: engine) }
+    private var isVoiceLoaded: Bool { speaker.synthesizer.isLoaded && speaker.aligner.isLoaded }
+    private var switchingEngine = false
     private let store: SpokenSentenceStore
     private let defaults: UserDefaults
     private let textFileURL: URL?
@@ -80,13 +101,18 @@ final class ListenModel: ObservableObject {
     private var readingLanguage: ListenLanguage = .english
     private var producer: Task<Void, Never>?
     private var producerToken = 0
-    private var loadTask: Task<Void, Error>?
+    private var loadTask: (engine: ListenEngine, task: Task<Void, Error>)?
     private var ticker: Task<Void, Never>?
     private var idleUnload: Task<Void, Never>?
     private var textSave: Task<Void, Never>?
 
     private enum Keys {
+        static let engine = "listen.engine"
+        /// Qwen3-TTS keeps the key from before there was a choice of engine, so its voice is still remembered.
         static let voice = "listen.voice"
+        static func voice(for engine: ListenEngine) -> String {
+            engine == .qwen ? voice : "\(voice).\(engine.rawValue)"
+        }
         static let language = "listen.language"
         static let speed = "listen.speed"
         static let documentName = "listen.documentName"
@@ -94,7 +120,8 @@ final class ListenModel: ObservableObject {
     }
 
     init(
-        speaker: SentenceSpeaker = SentenceSpeaker(synthesizer: Qwen3Synthesizer(), aligner: Qwen3Aligner()),
+        synthesizers: [ListenEngine: any SpeechSynthesizer] = [.kokoro: KokoroSynthesizer(), .qwen: Qwen3Synthesizer()],
+        aligner: any WordAligner = Qwen3Aligner(),
         store: SpokenSentenceStore = SpokenSentenceStore(root: SpokenSentenceStore.defaultRoot),
         defaults: UserDefaults = .standard,
         textFileURL: URL? = ListenModel.defaultTextFileURL,
@@ -103,12 +130,18 @@ final class ListenModel: ObservableObject {
     ) {
         self.player = player ?? ListenAudioPlayer()
         self.mlxWork = mlxWork
-        self.speaker = speaker
+        precondition(ListenEngine.allCases.allSatisfy { synthesizers[$0] != nil }, "Every engine needs a synthesizer")
+        self.synthesizers = synthesizers
+        self.aligner = aligner
         self.store = store
         self.defaults = defaults
         self.textFileURL = textFileURL
-        voiceID = defaults.string(forKey: Keys.voice).flatMap { id in ListenVoice.all.first { $0.id == id }?.id } ?? ListenVoice.defaultID
-        language = defaults.string(forKey: Keys.language).flatMap(ListenLanguage.init(rawValue:)) ?? .automatic
+        let engine = defaults.string(forKey: Keys.engine).flatMap(ListenEngine.init(rawValue:)) ?? .defaultEngine
+        self.engine = engine
+        modelsDownloaded = SpeechModelFiles.isDownloaded(for: engine)
+        voiceID = Self.savedVoiceID(for: engine, in: defaults)
+        let savedLanguage = defaults.string(forKey: Keys.language).flatMap(ListenLanguage.init(rawValue:)) ?? .automatic
+        language = engine.reads(savedLanguage) ? savedLanguage : .automatic
         let savedSpeed = defaults.double(forKey: Keys.speed)
         speed = Self.speeds.contains(savedSpeed) ? savedSpeed : 1
         documentName = defaults.string(forKey: Keys.documentName)
@@ -119,6 +152,14 @@ final class ListenModel: ObservableObject {
         self.player.onInterrupted = { [weak self] in self?.playerInterrupted() }
         let store = store
         Task.detached(priority: .utility) { store.prune() }
+    }
+
+    private func speaker(for engine: ListenEngine) -> SentenceSpeaker {
+        SentenceSpeaker(synthesizer: synthesizers[engine]!, aligner: aligner)
+    }
+
+    private static func savedVoiceID(for engine: ListenEngine, in defaults: UserDefaults) -> String {
+        defaults.string(forKey: Keys.voice(for: engine)).flatMap { engine.voice($0)?.id } ?? engine.defaultVoiceID
     }
 
     /// The editor's text is kept between launches in `~/Library/Application Support/LectureTranscribe/listen.txt`.
@@ -371,6 +412,10 @@ final class ListenModel: ObservableObject {
     }
 
     private func produce() async {
+        guard engine.reads(readingLanguage) else {
+            fail("\(engine.displayName) can't read \(readingLanguage.displayName). Choose another voice model from the voice menu to hear this text.")
+            return
+        }
         do {
             try await loadVoice()
         } catch is CancellationError {
@@ -390,6 +435,7 @@ final class ListenModel: ObservableObject {
             }
             let sentence = document.sentences[index]
             let generation = documentGeneration
+            let engine = engine
             let voice = voiceID
             let language = readingLanguage
             let key = SpokenSentenceStore.key(text: sentence.spokenText, engine: speaker.identifier, voice: voice, language: language.rawValue)
@@ -411,7 +457,9 @@ final class ListenModel: ObservableObject {
                 return
             }
             // The text, voice or language may have changed while it was being spoken.
-            guard !Task.isCancelled, generation == documentGeneration, voice == voiceID, language == readingLanguage else { continue }
+            guard !Task.isCancelled, generation == documentGeneration, engine == self.engine, voice == voiceID,
+                  language == readingLanguage
+            else { continue }
             spoken[index] = result
             if playback == .waiting, self.position?.sentence == index, let position = self.position {
                 start(result, at: position)
@@ -428,37 +476,53 @@ final class ListenModel: ObservableObject {
 
     // MARK: - Voice models
 
-    /// Downloads (the first time) and loads the voice and the aligner.
+    /// Downloads (the first time) and loads the chosen engine's voice and the aligner, freeing the other engine's
+    /// voice first.
     func loadVoice() async throws {
-        if speaker.synthesizer.isLoaded, speaker.aligner.isLoaded {
+        let engine = engine
+        if isVoiceLoaded {
             voiceState = .ready
             return
         }
-        if let loadTask {
-            try await loadTask.value
-            return
+        if let loading = loadTask {
+            if loading.engine == engine {
+                try await loading.task.value
+                return
+            }
+            // Another engine's voice is loading (the engine changed meanwhile); let it finish rather than run two
+            // loads at once, then load this one.
+            _ = try? await loading.task.value
+            if loadTask?.task == loading.task { loadTask = nil }
+            guard self.engine == engine else { throw CancellationError() }
+            return try await loadVoice()
         }
         let speaker = speaker
+        let others = synthesizers.filter { $0.key != engine }.map(\.value)
         let task = Task { [weak self] in
             let report: @Sendable (Double, String) -> Void = { fraction, message in
                 Task { @MainActor in
-                    guard let self, case .loading = self.voiceState else { return }
+                    guard let self, self.engine == engine, case .loading = self.voiceState else { return }
                     self.voiceState = .loading(progress: min(max(fraction, 0), 1), message: message)
                 }
             }
-            // The voice is about 2.5 GB of the 3.5 GB, so it takes most of the bar.
+            // Only one voice is kept in memory (Qwen3-TTS alone takes several gigabytes).
+            others.forEach { $0.unload() }
+            // The voice is most of the download, so it takes most of the bar.
             try await speaker.synthesizer.load { fraction, message in report(fraction * 0.7, message) }
             try await speaker.aligner.load { fraction, message in report(0.7 + fraction * 0.3, message) }
         }
-        loadTask = task
+        loadTask = (engine, task)
         voiceState = .loading(progress: 0, message: modelsDownloaded ? "Loading the voice…" : "Downloading the voice…")
-        defer { loadTask = nil }
+        defer { if loadTask?.task == task { loadTask = nil } }
         do {
             try await task.value
+            guard self.engine == engine else { return }
             voiceState = .ready
             modelsDownloaded = true
         } catch {
-            voiceState = error is CancellationError ? .notLoaded : .failed(Self.describe(error))
+            if self.engine == engine {
+                voiceState = error is CancellationError ? .notLoaded : .failed(Self.describe(error))
+            }
             throw error
         }
     }
@@ -479,7 +543,7 @@ final class ListenModel: ObservableObject {
         } catch {
             errorMessage = "Couldn't delete the voice models: \(error.localizedDescription)"
         }
-        modelsDownloaded = SpeechModelFiles.isDownloaded
+        modelsDownloaded = SpeechModelFiles.isDownloaded(for: engine)
     }
 
     func clearSavedSpeech() {
@@ -497,7 +561,7 @@ final class ListenModel: ObservableObject {
     func stopForQuit(whenIdle: @escaping @Sendable () -> Void) -> Bool {
         producer?.cancel()
         producer = nil
-        loadTask?.cancel()
+        loadTask?.task.cancel()
         cancelIdleUnload()
         stopTicker()
         player.stop()
@@ -505,8 +569,8 @@ final class ListenModel: ObservableObject {
     }
 
     private func unloadVoice() {
-        speaker.synthesizer.unload()
-        speaker.aligner.unload()
+        synthesizers.values.forEach { $0.unload() }
+        aligner.unload()
         voiceState = .notLoaded
     }
 

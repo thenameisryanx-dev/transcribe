@@ -9,6 +9,11 @@ struct ListenSettingsSection: View {
 
     var body: some View {
         Section {
+            Picker("Voice Model", selection: $model.engine) {
+                ForEach(ListenEngine.allCases) { engine in
+                    Text("\(engine.displayName) — \(engine.summary)").tag(engine)
+                }
+            }
             LabeledContent("Voice Models") {
                 HStack(spacing: 10) {
                     Text(modelStatus)
@@ -37,9 +42,11 @@ struct ListenSettingsSection: View {
         } header: {
             Text("Listen")
         } footer: {
-            Text("Listen reads text aloud on this Mac with Qwen3-TTS, and times each word with Qwen3-ForcedAligner. "
-                + "The models download once (about 3.5 GB) and then work offline. Sentences already read are saved "
-                + "so they play at once next time; ones not heard for a month are removed.")
+            Text("Listen reads text aloud on this Mac with Kokoro (fast, on the Neural Engine) or Qwen3-TTS (more "
+                + "expressive, but slower than the speech plays on most Macs), and times each word with "
+                + "Qwen3-ForcedAligner. Each voice model downloads once (Kokoro about 1.3 GB with the aligner, Qwen3-TTS "
+                + "about 3.5 GB) and then works offline. Sentences already read are saved so they play at once next "
+                + "time; ones not heard for a month are removed.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -50,7 +57,7 @@ struct ListenSettingsSection: View {
                 Task { await refreshSizes() }
             }
         } message: {
-            Text("This frees \(Self.format(modelsSize)). Listen downloads them again the next time you press Play.")
+            Text("This deletes both voice models and frees \(Self.format(modelsSize)). Listen downloads the one it needs again the next time you press Play.")
         }
     }
 
