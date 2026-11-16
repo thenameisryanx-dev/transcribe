@@ -51,23 +51,39 @@ struct ListenPaneView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Picker("Voice", selection: $model.voiceID) {
-                        ForEach(ListenVoice.all) { voice in
-                            Text("\(voice.name) — \(voice.summary), \(voice.nativeLanguage.displayName)").tag(voice.id)
+                    Picker("Voice Model", selection: $model.engine) {
+                        ForEach(ListenEngine.allCases) { engine in
+                            Text("\(engine.displayName) — \(engine.summary)").tag(engine)
                         }
                     }
                     .pickerStyle(.inline)
+                    Picker("Voice", selection: $model.voiceID) {
+                        // Grouped by the language each voice sounds most natural in.
+                        ForEach(voiceLanguages, id: \.self) { language in
+                            Section(language.displayName) {
+                                ForEach(model.engine.voices.filter { $0.nativeLanguage == language }) { voice in
+                                    Text("\(voice.name) — \(voice.summary)").tag(voice.id)
+                                }
+                            }
+                        }
+                    }
                     Picker("Language", selection: $model.language) {
-                        ForEach(ListenLanguage.allCases) { language in
+                        ForEach(model.engine.languages) { language in
                             Text(language.displayName).tag(language)
                         }
                     }
                 } label: {
                     Label(model.voice.name, systemImage: "person.wave.2")
                 }
-                .help("Voice and language. Every voice reads every language; each sounds most natural in its own.")
+                .help("Voice model, voice and language. Every voice reads every language its model knows; each sounds most natural in its own.")
             }
         }
+    }
+
+    /// The languages the chosen engine's voices are native to, in menu order.
+    private var voiceLanguages: [ListenLanguage] {
+        let native = Set(model.engine.voices.map(\.nativeLanguage))
+        return ListenLanguage.allCases.filter(native.contains)
     }
 
     private var placeholder: some View {
@@ -176,7 +192,7 @@ struct ListenPaneView: View {
             HStack(spacing: 8) {
                 ProgressView(value: progress)
                     .frame(maxWidth: 160)
-                Text(model.modelsDownloaded ? message : "\(message) (about 3.5 GB, once)")
+                Text(model.modelsDownloaded ? message : "\(message) (about \(downloadSize), once)")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -191,13 +207,20 @@ struct ListenPaneView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ProgressView(value: model.progress)
                         .frame(maxWidth: 320)
-                    Text(readingSummary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+                    HStack(spacing: 8) {
+                        Text(readingSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                        if model.headStartWait != nil {
+                            Button("Start Now", action: model.startNow)
+                                .controlSize(.small)
+                                .help("Start reading now. The voice is slower than the reading, so it will stop now and then to catch up.")
+                        }
+                    }
                 }
             } else if !model.modelsDownloaded {
-                Text("The first time, Play downloads the voice (about 3.5 GB). After that it works offline.")
+                Text("The first time, Play downloads the voice (about \(downloadSize)). After that it works offline.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -208,13 +231,20 @@ struct ListenPaneView: View {
         }
     }
 
+    private var downloadSize: String {
+        ListenSettingsSection.format(model.engine.approximateDownloadSize)
+    }
+
     private var readingSummary: String {
         guard let document = model.document, let position = model.position else { return "" }
         var parts = ["Sentence \(position.sentence + 1) of \(document.sentences.count)"]
         if let minutes = model.minutesLeft {
             parts.append(minutes < 1 ? "under a minute left" : "about \(Int(minutes.rounded())) min left")
         }
-        if model.playback == .waiting {
+        if let wait = model.headStartWait {
+            // The voice is slower than the reading, so it makes a head start first.
+            parts.append(wait < 60 ? "getting a head start, under a minute" : "getting a head start, about \(Int((wait / 60).rounded())) min")
+        } else if model.playback == .waiting {
             parts.append("preparing speech…")
         }
         return parts.joined(separator: " · ")

@@ -1,5 +1,6 @@
 import AudioCommon
 import Foundation
+import KokoroTTS
 import NaturalLanguage
 import Qwen3ASR
 import Qwen3TTS
@@ -58,7 +59,93 @@ enum ListenLanguage: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// The voices built into Qwen3-TTS CustomVoice. Any voice can read any language; each sounds most natural in its
+/// The voice models Listen reads with. Each has its own voices and languages; the word timing, playback and
+/// highlighting are the same for both.
+enum ListenEngine: String, CaseIterable, Identifiable, Sendable {
+    /// Kokoro-82M on the Neural Engine (Core ML): makes speech several times faster than it plays on any Apple
+    /// silicon Mac.
+    case kokoro
+    /// Qwen3-TTS 0.6B on the GPU (MLX): more expressive, but it makes speech one step at a time, so on a Mac without
+    /// a lot of GPU memory bandwidth (a base M-series chip) it's slower than the speech plays.
+    case qwen
+
+    static let defaultEngine = ListenEngine.kokoro
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .kokoro: return "Kokoro"
+        case .qwen: return "Qwen3-TTS"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .kokoro: return "Fast"
+        case .qwen: return "More expressive, slow on most Macs"
+        }
+    }
+
+    var voices: [ListenVoice] {
+        switch self {
+        case .kokoro: return ListenVoice.kokoro
+        case .qwen: return ListenVoice.qwen
+        }
+    }
+
+    var defaultVoiceID: String {
+        switch self {
+        case .kokoro: return "af_heart"
+        case .qwen: return "ryan"
+        }
+    }
+
+    /// The languages it can read, in menu order, `automatic` first.
+    var languages: [ListenLanguage] {
+        switch self {
+        // Kokoro also has Hindi voices, but the word aligner doesn't know Hindi; it reads German, Korean and
+        // Russian only with English sounds.
+        case .kokoro: return [.automatic, .english, .chinese, .japanese, .french, .spanish, .italian, .portuguese]
+        case .qwen: return ListenLanguage.allCases
+        }
+    }
+
+    func reads(_ language: ListenLanguage) -> Bool {
+        languages.contains(language)
+    }
+
+    func voice(_ id: String) -> ListenVoice? {
+        voices.first { $0.id == id }
+    }
+
+    /// About how many seconds it takes to make a second of speech and time its words, until the reader has measured
+    /// it on this Mac. Qwen3-TTS takes about 1.35 on a base M4 (`ListenBenchmarkTests`).
+    var expectedMakingRate: Double {
+        switch self {
+        case .kokoro: return 0.3
+        case .qwen: return 1.35
+        }
+    }
+
+    /// The models it downloads, the word aligner included.
+    var modelIDs: [String] {
+        switch self {
+        case .kokoro: return [SpeechModelFiles.kokoroModelID, SpeechModelFiles.alignerModelID]
+        case .qwen: return [SpeechModelFiles.ttsModelID, SpeechModelFiles.ttsTokenizerID, SpeechModelFiles.alignerModelID]
+        }
+    }
+
+    /// What its downloads add up to (the aligner included), for telling people before they start.
+    var approximateDownloadSize: Int64 {
+        switch self {
+        case .kokoro: return 1_320_000_000
+        case .qwen: return 3_480_000_000
+        }
+    }
+}
+
+/// A voice of one of the engines. Any voice can read any of its engine's languages; each sounds most natural in its
 /// own.
 struct ListenVoice: Identifiable, Hashable, Sendable {
     let id: String
@@ -66,7 +153,8 @@ struct ListenVoice: Identifiable, Hashable, Sendable {
     let summary: String
     let nativeLanguage: ListenLanguage
 
-    static let all: [ListenVoice] = [
+    /// The voices built into Qwen3-TTS CustomVoice.
+    static let qwen: [ListenVoice] = [
         ListenVoice(id: "ryan", name: "Ryan", summary: "Male, energetic", nativeLanguage: .english),
         ListenVoice(id: "aiden", name: "Aiden", summary: "Male, bright American", nativeLanguage: .english),
         ListenVoice(id: "vivian", name: "Vivian", summary: "Female, bright", nativeLanguage: .chinese),
@@ -78,23 +166,45 @@ struct ListenVoice: Identifiable, Hashable, Sendable {
         ListenVoice(id: "sohee", name: "Sohee", summary: "Female, warm", nativeLanguage: .korean),
     ]
 
-    static let defaultID = "ryan"
+    /// Kokoro's voices, named as in its download: the first letter is the language (and for English the accent),
+    /// the second whether the voice is female or male. Its Hindi voices are left out (see `ListenEngine.languages`).
+    static let kokoro: [ListenVoice] = [
+        "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river",
+        "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx",
+        "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george",
+        "bm_lewis", "ef_dora", "em_alex", "em_santa", "ff_siwis", "if_sara", "im_nicola", "jf_alpha",
+        "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo", "pf_dora", "pm_alex", "pm_santa", "zf_xiaobei",
+        "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang",
+    ].compactMap(kokoroVoice)
 
-    static func named(_ id: String) -> ListenVoice {
-        all.first { $0.id == id } ?? all[0]
+    static func kokoroVoice(_ id: String) -> ListenVoice? {
+        let parts = id.split(separator: "_", maxSplits: 1)
+        guard parts.count == 2, parts[0].count == 2 else { return nil }
+        let codes = Array(parts[0])
+        let languages: [Character: (ListenLanguage, String?)] = [
+            "a": (.english, "American"), "b": (.english, "British"), "e": (.spanish, nil), "f": (.french, nil),
+            "i": (.italian, nil), "j": (.japanese, nil), "p": (.portuguese, nil), "z": (.chinese, nil),
+        ]
+        guard let (language, accent) = languages[codes[0]], codes[1] == "f" || codes[1] == "m" else { return nil }
+        let gender = codes[1] == "f" ? "Female" : "Male"
+        return ListenVoice(
+            id: id,
+            name: parts[1].prefix(1).uppercased() + parts[1].dropFirst(),
+            summary: [gender, accent].compactMap { $0 }.joined(separator: ", "),
+            nativeLanguage: language
+        )
     }
 }
 
 // MARK: - Model files
 
 /// Where the downloaded speech models live: `~/Library/Application Support/LectureTranscribe/SpeechModels`. Not in
-/// Caches, so macOS never clears a 3.5 GB download on its own.
+/// Caches, so macOS never clears a multi-gigabyte download on its own.
 enum SpeechModelFiles {
+    static let kokoroModelID = KokoroTTSModel.defaultModelId
     static let ttsModelID = "aufklarer/Qwen3-TTS-12Hz-0.6B-CustomVoice-MLX-bf16"
     static let ttsTokenizerID = "Qwen/Qwen3-TTS-Tokenizer-12Hz"
     static let alignerModelID = "aufklarer/Qwen3-ForcedAligner-0.6B-4bit"
-    /// What the three downloads add up to, for telling people before they start.
-    static let approximateDownloadSize: Int64 = 3_480_000_000
 
     static var root: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -108,10 +218,16 @@ enum SpeechModelFiles {
         try HuggingFaceDownloader.getCacheDirectory(for: modelID, basePath: root)
     }
 
-    /// Whether all three models are on disk (they may still need loading).
-    static var isDownloaded: Bool {
-        [ttsModelID, ttsTokenizerID, alignerModelID].allSatisfy { id in
-            (try? directory(for: id)).map(HuggingFaceDownloader.weightsExist(in:)) ?? false
+    /// Whether all of an engine's models are on disk (they may still need loading).
+    static func isDownloaded(for engine: ListenEngine) -> Bool {
+        engine.modelIDs.allSatisfy { id in
+            guard let directory = try? directory(for: id) else { return false }
+            // Kokoro is a compiled Core ML model rather than a weights file.
+            if id == kokoroModelID {
+                return FileManager.default.fileExists(atPath: directory.appendingPathComponent("kokoro_5s.mlmodelc").path)
+                    && FileManager.default.fileExists(atPath: directory.appendingPathComponent("vocab_index.json").path)
+            }
+            return HuggingFaceDownloader.weightsExist(in: directory)
         }
     }
 
@@ -144,8 +260,61 @@ private func onMLXQueue<T>(_ work: @escaping @Sendable () throws -> T) async thr
     try Task.checkCancellation()
     return try await withCheckedThrowingContinuation { continuation in
         mlxQueue.async {
-            continuation.resume(with: Result { try work() })
+            continuation.resume(with: Result { try MLXWorkGate.shared.run(work) })
         }
+    }
+}
+
+/// Counts the MLX work running (a model loading, a sentence being spoken) so the app can wait for it before it
+/// quits. `exit()` destroys MLX's C++ statics, its compile cache among them, so quitting while a sentence was being
+/// spoken crashed the thread still using that cache.
+final class MLXWorkGate: @unchecked Sendable {
+    static let shared = MLXWorkGate()
+
+    private let lock = NSLock()
+    private var running = 0
+    private var closed = false
+    private var whenIdle: [@Sendable () -> Void] = []
+
+    /// Runs `work`, or throws `CancellationError` without running it once the gate is closed.
+    func run<T>(_ work: () throws -> T) throws -> T {
+        try enter()
+        defer { leave() }
+        return try work()
+    }
+
+    func run<T>(_ work: () async throws -> T) async throws -> T {
+        try enter()
+        defer { leave() }
+        return try await work()
+    }
+
+    /// Lets no more work start. Returns true when nothing is running; otherwise `whenIdle` is called, on the thread
+    /// that finishes it, once the work already running is done.
+    func close(whenIdle: @escaping @Sendable () -> Void) -> Bool {
+        lock.withLock {
+            closed = true
+            guard running > 0 else { return true }
+            self.whenIdle.append(whenIdle)
+            return false
+        }
+    }
+
+    private func enter() throws {
+        try lock.withLock {
+            if closed { throw CancellationError() }
+            running += 1
+        }
+    }
+
+    private func leave() {
+        let callbacks = lock.withLock { () -> [@Sendable () -> Void] in
+            running -= 1
+            guard running == 0 else { return [] }
+            defer { whenIdle = [] }
+            return whenIdle
+        }
+        callbacks.forEach { $0() }
     }
 }
 
@@ -158,6 +327,20 @@ private final class ModelBox<Model>: @unchecked Sendable {
     var value: Model? {
         get { lock.withLock { model } }
         set { lock.withLock { model = newValue } }
+    }
+
+    /// Frees the model on `mlxQueue`. Freeing it removes its compiled graphs from MLX's compile cache, which must
+    /// not happen while the other model is using that cache there.
+    func release() {
+        let old = ModelBox()
+        lock.withLock {
+            old.model = model
+            model = nil
+        }
+        mlxQueue.async {
+            // Once the app is quitting the model stays until the process ends.
+            try? MLXWorkGate.shared.run { old.value = nil }
+        }
     }
 }
 
@@ -182,13 +365,15 @@ final class Qwen3Synthesizer: SpeechSynthesizer, @unchecked Sendable {
 
     func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {
         guard box.value == nil else { return }
-        let model = try await Qwen3TTSModel.fromPretrained(
+        // Waits for a model being freed on the MLX queue, since loading compiles graphs into the same cache.
+        try await onMLXQueue {}
+        let model = try await MLXWorkGate.shared.run { try await Qwen3TTSModel.fromPretrained(
             modelId: SpeechModelFiles.ttsModelID,
             tokenizerModelId: SpeechModelFiles.ttsTokenizerID,
             cacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.ttsModelID),
             tokenizerCacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.ttsTokenizerID),
             progressHandler: { fraction, message in progress(fraction, message) }
-        )
+        ) }
         box.value = model
     }
 
@@ -203,7 +388,51 @@ final class Qwen3Synthesizer: SpeechSynthesizer, @unchecked Sendable {
     }
 
     func unload() {
-        box.value = nil
+        box.release()
+    }
+}
+
+/// Kokoro uses Core ML, not MLX, so it has its own queue and can make the next sentence while the aligner times the
+/// last one on the GPU.
+private let kokoroQueue = DispatchQueue(label: "LectureTranscribe.Listen.Kokoro", qos: .userInitiated)
+
+/// Kokoro-82M: 50 voices in seven languages, 24 kHz audio, on the Neural Engine. It makes a whole sentence in one
+/// pass instead of one step at a time, so it stays well ahead of the reading.
+final class KokoroSynthesizer: SpeechSynthesizer, @unchecked Sendable {
+    let identifier = "kokoro|\(SpeechModelFiles.kokoroModelID)"
+    private let lock = NSLock()
+    private var model: KokoroTTSModel?
+
+    var isLoaded: Bool { lock.withLock { model != nil } }
+
+    func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {
+        guard !isLoaded else { return }
+        // The first load compiles the model for this Mac's Neural Engine (about 20 seconds); later loads take a second.
+        let loaded = try await KokoroTTSModel.fromPretrained(
+            cacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.kokoroModelID),
+            progressHandler: { fraction, message in progress(fraction, message) }
+        )
+        lock.withLock { model = loaded }
+    }
+
+    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> (samples: [Float], sampleRate: Int) {
+        try Task.checkCancellation()
+        let samples: [Float] = try await withCheckedThrowingContinuation { continuation in
+            kokoroQueue.async { [self] in
+                continuation.resume(with: Result {
+                    guard let model = lock.withLock({ model }) else { throw SpeechEngineError.notLoaded }
+                    // Kokoro takes the same language names ("english", "french", …) as the menu.
+                    return try model.synthesize(text: text, voice: voice, language: language.rawValue)
+                })
+            }
+        }
+        guard !samples.isEmpty else { throw SpeechEngineError.noAudio }
+        return (samples, KokoroTTSModel.outputSampleRate)
+    }
+
+    /// A sentence being made holds its own reference, so the model is freed once that sentence is done.
+    func unload() {
+        lock.withLock { model = nil }
     }
 }
 
@@ -216,11 +445,12 @@ final class Qwen3Aligner: WordAligner, @unchecked Sendable {
 
     func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {
         guard box.value == nil else { return }
-        let aligner = try await Qwen3ForcedAligner.fromPretrained(
+        try await onMLXQueue {}
+        let aligner = try await MLXWorkGate.shared.run { try await Qwen3ForcedAligner.fromPretrained(
             modelId: SpeechModelFiles.alignerModelID,
             cacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.alignerModelID),
             progressHandler: { fraction, message in progress(fraction, message) }
-        )
+        ) }
         box.value = aligner
     }
 
@@ -234,7 +464,7 @@ final class Qwen3Aligner: WordAligner, @unchecked Sendable {
     }
 
     func unload() {
-        box.value = nil
+        box.release()
     }
 }
 
