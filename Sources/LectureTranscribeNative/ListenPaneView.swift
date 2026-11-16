@@ -2,31 +2,39 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Reads text aloud with an on-device voice, highlighting each word as it's spoken. Click any word to jump to it.
+/// Play first makes the speech for the whole text, showing how far along it is (Cancel goes back to the text), and
+/// the reader opens once it's all made.
 struct ListenPaneView: View {
     @ObservedObject var model: ListenModel
     @State private var isDropTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                ReadingTextView(
-                    text: $model.text,
-                    readingText: model.document?.text,
-                    sentenceRange: model.currentSentenceRange,
-                    wordRange: model.currentWordRange,
-                    onClickLocation: model.jump(toLocation:)
-                )
-                if model.text.isEmpty && !model.isReading {
-                    placeholder
+            if model.isPreparing {
+                preparingView
+            } else {
+                ZStack(alignment: .topLeading) {
+                    ReadingTextView(
+                        text: $model.text,
+                        readingText: model.isReading ? model.document?.text : nil,
+                        sentenceRange: model.currentSentenceRange,
+                        wordRange: model.currentWordRange,
+                        onClickLocation: model.jump(toLocation:)
+                    )
+                    if model.text.isEmpty && !model.isReading {
+                        placeholder
+                    }
                 }
             }
             if let message = model.errorMessage {
                 errorBanner(message)
             }
-            Divider()
-            transportBar
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+            if !model.isPreparing {
+                Divider()
+                transportBar
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+            }
         }
         .overlay {
             if isDropTargeted {
@@ -51,38 +59,33 @@ struct ListenPaneView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Picker("Voice Model", selection: $model.engine) {
-                        ForEach(ListenEngine.allCases) { engine in
-                            Text("\(engine.displayName) — \(engine.summary)").tag(engine)
-                        }
-                    }
-                    .pickerStyle(.inline)
                     Picker("Voice", selection: $model.voiceID) {
                         // Grouped by the language each voice sounds most natural in.
                         ForEach(voiceLanguages, id: \.self) { language in
                             Section(language.displayName) {
-                                ForEach(model.engine.voices.filter { $0.nativeLanguage == language }) { voice in
+                                ForEach(ListenVoiceModel.voices.filter { $0.nativeLanguage == language }) { voice in
                                     Text("\(voice.name) — \(voice.summary)").tag(voice.id)
                                 }
                             }
                         }
                     }
+                    .pickerStyle(.inline)
                     Picker("Language", selection: $model.language) {
-                        ForEach(model.engine.languages) { language in
+                        ForEach(ListenVoiceModel.languages) { language in
                             Text(language.displayName).tag(language)
                         }
                     }
                 } label: {
                     Label(model.voice.name, systemImage: "person.wave.2")
                 }
-                .help("Voice model, voice and language. Every voice reads every language its model knows; each sounds most natural in its own.")
+                .help("Voice and language. Every voice reads every language; each sounds most natural in its own. Changing either while reading makes the speech again in the new one.")
             }
         }
     }
 
-    /// The languages the chosen engine's voices are native to, in menu order.
+    /// The languages the voices are native to, in menu order.
     private var voiceLanguages: [ListenLanguage] {
-        let native = Set(model.engine.voices.map(\.nativeLanguage))
+        let native = Set(ListenVoiceModel.voices.map(\.nativeLanguage))
         return ListenLanguage.allCases.filter(native.contains)
     }
 
@@ -93,8 +96,8 @@ struct ListenPaneView: View {
                 Text("Type or paste text here, or open a file.")
                     .font(.system(size: 18))
                 Text("PDFs, Word documents, web pages saved as HTML, and text or Markdown files all work. "
-                    + "You can also drop a file here. Press Play to hear it read aloud on this Mac, with each word "
-                    + "highlighted as it's spoken; click any word to jump to it.")
+                    + "You can also drop a file here. Press Play to make the speech on this Mac; then it's read "
+                    + "aloud with each word highlighted as it's spoken. Click any word to jump to it.")
                     .font(.callout)
             }
             .allowsHitTesting(false)
@@ -122,6 +125,57 @@ struct ListenPaneView: View {
         .background(.bar)
     }
 
+    // MARK: - Preparing
+
+    private var preparingView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "waveform")
+                .font(.system(size: 34))
+                .foregroundStyle(.secondary)
+            Text(model.documentName.map { "Making the speech for “\($0)”" } ?? "Making the speech")
+                .font(.title3.weight(.semibold))
+                .multilineTextAlignment(.center)
+            ProgressView(value: preparingFraction)
+                .frame(width: 360)
+            Text(preparingStatus)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .multilineTextAlignment(.center)
+            Text("The reader opens when it's done. Speech already made is kept, so cancelling loses nothing.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+            Button("Cancel", action: model.cancelPreparing)
+                .keyboardShortcut(.cancelAction)
+                .padding(.top, 4)
+                .help("Stop making the speech and go back to the text")
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var preparingFraction: Double {
+        if case .loading(let progress, _) = model.voiceState { return progress }
+        return model.preparation?.fraction ?? 0
+    }
+
+    private var preparingStatus: String {
+        if case .loading(_, let message) = model.voiceState {
+            return model.modelsDownloaded ? message : "\(message) (about \(downloadSize), once)"
+        }
+        guard let preparation = model.preparation else { return "" }
+        guard preparation.wordsToMake > 0 else { return "Checking what's already made…" }
+        var parts = ["\(preparation.done) of \(preparation.total) sentences"]
+        if let seconds = preparation.secondsLeft {
+            parts.append(seconds < 60 ? "under a minute left" : "about \(Int((seconds / 60).rounded())) min left")
+        } else {
+            parts.append("working out how long it will take…")
+        }
+        parts.append("\(model.sentencesAtOnce) at once")
+        return parts.joined(separator: " · ")
+    }
+
     // MARK: - Transport
 
     private var transportBar: some View {
@@ -141,7 +195,7 @@ struct ListenPaneView: View {
             }
             .buttonStyle(.borderless)
             .disabled(!model.isReading && model.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .help(isPlayingOrWaiting ? "Pause (Space)" : "Read aloud (Space)")
+            .help(isPlayingOrWaiting ? "Pause (Space)" : (model.isReading ? "Read aloud (Space)" : "Make the speech, then read it aloud"))
             .readerShortcut(.space, enabled: model.isReading)
 
             Button(action: model.nextSentence) {
@@ -187,52 +241,33 @@ struct ListenPaneView: View {
 
     @ViewBuilder
     private var status: some View {
-        switch model.voiceState {
-        case .loading(let progress, let message):
-            HStack(spacing: 8) {
-                ProgressView(value: progress)
-                    .frame(maxWidth: 160)
-                Text(model.modelsDownloaded ? message : "\(message) (about \(downloadSize), once)")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        case .failed(let message):
+        if case .failed(let message) = model.voiceState, !model.isReading {
             Text(message)
                 .font(.callout)
                 .foregroundStyle(.red)
                 .lineLimit(2)
-        default:
-            if model.isReading {
-                VStack(alignment: .leading, spacing: 4) {
-                    ProgressView(value: model.progress)
-                        .frame(maxWidth: 320)
-                    HStack(spacing: 8) {
-                        Text(readingSummary)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                        if model.headStartWait != nil {
-                            Button("Start Now", action: model.startNow)
-                                .controlSize(.small)
-                                .help("Start reading now. The voice is slower than the reading, so it will stop now and then to catch up.")
-                        }
-                    }
-                }
-            } else if !model.modelsDownloaded {
-                Text("The first time, Play downloads the voice (about \(downloadSize)). After that it works offline.")
-                    .font(.callout)
+        } else if model.isReading {
+            VStack(alignment: .leading, spacing: 4) {
+                ProgressView(value: model.progress)
+                    .frame(maxWidth: 320)
+                Text(readingSummary)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            } else {
-                // Holds the space, so the controls stay at the leading edge instead of drifting to the middle.
-                Color.clear.frame(height: 1)
+                    .monospacedDigit()
             }
+        } else if !model.modelsDownloaded {
+            Text("The first time, Play downloads the voice (about \(downloadSize)). After that it works offline.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        } else {
+            // Holds the space, so the controls stay at the leading edge instead of drifting to the middle.
+            Color.clear.frame(height: 1)
         }
     }
 
     private var downloadSize: String {
-        ListenSettingsSection.format(model.engine.approximateDownloadSize)
+        ListenSettingsSection.format(ListenVoiceModel.approximateDownloadSize)
     }
 
     private var readingSummary: String {
@@ -240,12 +275,6 @@ struct ListenPaneView: View {
         var parts = ["Sentence \(position.sentence + 1) of \(document.sentences.count)"]
         if let minutes = model.minutesLeft {
             parts.append(minutes < 1 ? "under a minute left" : "about \(Int(minutes.rounded())) min left")
-        }
-        if let wait = model.headStartWait {
-            // The voice is slower than the reading, so it makes a head start first.
-            parts.append(wait < 60 ? "getting a head start, under a minute" : "getting a head start, about \(Int((wait / 60).rounded())) min")
-        } else if model.playback == .waiting {
-            parts.append("preparing speech…")
         }
         return parts.joined(separator: " · ")
     }
@@ -256,7 +285,9 @@ struct ListenPaneView: View {
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
+        guard !model.isPreparing,
+              let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) })
+        else {
             return false
         }
         _ = provider.loadObject(ofClass: URL.self) { url, _ in

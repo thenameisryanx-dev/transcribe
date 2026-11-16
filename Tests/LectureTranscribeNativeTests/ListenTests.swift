@@ -5,16 +5,18 @@ import XCTest
 
 // MARK: - Fakes
 
-/// A voice that "speaks" a sentence as a short burst of silence and records what it was asked to say, so the
-/// reader can be tested without downloading or running the real models. Each word lasts `secondsPerWord`, and each
-/// sentence takes `secondsToMake`.
+/// A voice that "speaks" each sentence as a short burst of silence and records what it was asked to say and how
+/// many at a time, so the reader can be tested without downloading or running the real models. Each word lasts
+/// `secondsPerWord`, and each batch takes `secondsToMake` (cut short when the task is cancelled).
 final class FakeSynthesizer: SpeechSynthesizer, @unchecked Sendable {
     let identifier: String
     let secondsPerWord: Double
     let secondsToMake: Double
+    var failure: Error?
     static let sampleRate = 1_000
     private let lock = NSLock()
     private var said: [String] = []
+    private var batches: [Int] = []
     private var loaded = false
 
     init(identifier: String = "fake-voice", secondsPerWord: Double = 0.1, secondsToMake: Double = 0) {
@@ -24,6 +26,7 @@ final class FakeSynthesizer: SpeechSynthesizer, @unchecked Sendable {
     }
 
     var spoken: [String] { lock.withLock { said } }
+    var batchSizes: [Int] { lock.withLock { batches } }
     var isLoaded: Bool { lock.withLock { loaded } }
 
     func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {
@@ -31,15 +34,20 @@ final class FakeSynthesizer: SpeechSynthesizer, @unchecked Sendable {
         lock.withLock { loaded = true }
     }
 
-    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> SynthesizedSpeech {
+    func synthesize(_ texts: [String], voice: String, language: ListenLanguage) async throws -> [SynthesizedSpeech] {
         if secondsToMake > 0 { try await Task.sleep(for: .seconds(secondsToMake)) }
-        lock.withLock { said.append(text) }
-        let words = text.split(separator: " ").count
-        return SynthesizedSpeech(
-            samples: [Float](repeating: 0, count: Int(Double(max(words, 1) * Self.sampleRate) * secondsPerWord)),
-            sampleRate: Self.sampleRate,
-            wordTimes: nil
-        )
+        if let failure { throw failure }
+        lock.withLock {
+            said.append(contentsOf: texts)
+            batches.append(texts.count)
+        }
+        return texts.map { text in
+            let words = text.split(separator: " ").count
+            return SynthesizedSpeech(
+                samples: [Float](repeating: 0, count: Int(Double(max(words, 1) * Self.sampleRate) * secondsPerWord)),
+                sampleRate: Self.sampleRate
+            )
+        }
     }
 
     func unload() {
@@ -63,26 +71,28 @@ final class FakeAligner: WordAligner, @unchecked Sendable {
     func unload() {}
 }
 
-/// A Listen model with fake voices (`synthesizer` for Kokoro, the default engine, and `qwen` for Qwen3-TTS), and its
-/// own saved text, settings and saved speech in `directory`.
+/// A Listen model with a fake voice, making `sentencesAtOnce` sentences at a time, with its own saved text, settings
+/// and saved speech in `directory`. By default its audio device fails at once, so tests don't use this Mac's speakers.
 @MainActor
 func makeTestListenModel(
     directory: URL,
     synthesizer: FakeSynthesizer = FakeSynthesizer(),
-    qwen: FakeSynthesizer = FakeSynthesizer(identifier: "fake-qwen"),
+    sentencesAtOnce: Int = 2,
     player: ListenAudioPlayer? = nil,
     mlxWork: MLXWorkGate = MLXWorkGate(),
     defaults: UserDefaults = UserDefaults(suiteName: "ListenTests.\(UUID().uuidString)")!
 ) -> ListenModel {
-    ListenModel(
-        synthesizers: [.kokoro: synthesizer, .qwen: qwen],
+    let model = ListenModel(
+        synthesizer: synthesizer,
         aligner: FakeAligner(),
         store: SpokenSentenceStore(root: directory.appendingPathComponent("listen_audio", isDirectory: true)),
         defaults: defaults,
         textFileURL: directory.appendingPathComponent("listen.txt"),
-        player: player,
+        player: player ?? makeSlowDevicePlayer(delay: 0),
         mlxWork: mlxWork
     )
+    model.sentencesAtOnce = sentencesAtOnce
+    return model
 }
 
 /// An audio device that takes `delay` to wake and then can't be used, so tests don't depend on this Mac's speakers.
@@ -425,8 +435,8 @@ final class QuitTests: XCTestCase {
         XCTAssertTrue(model.stopForQuit { XCTFail("Nothing was running in the gate") })
         let spokenAtQuit = synthesizer.spoken.count
         try? await Task.sleep(for: .milliseconds(200))
-        // Speaking ahead stopped, and no more MLX work can start.
-        XCTAssertLessThanOrEqual(synthesizer.spoken.count, spokenAtQuit + 1)
+        // Making the speech stopped (a batch already being made may finish), and no more MLX work can start.
+        XCTAssertLessThanOrEqual(synthesizer.spoken.count, spokenAtQuit + model.sentencesAtOnce)
         XCTAssertThrowsError(try gate.run {})
     }
 }
@@ -444,40 +454,86 @@ final class ListenModelTests: XCTestCase {
     }
 
 
-    @MainActor
-    func testPlaySpeaksTheSentencesAheadInOrder() async {
-        let synthesizer = FakeSynthesizer()
-        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer)
-        model.text = (1...8).map { "Sentence number \($0) is here." }.joined(separator: " ")
-        model.play()
-        XCTAssertTrue(model.isReading)
-        XCTAssertEqual(model.position, ReadingPosition(sentence: 0, word: 0))
+    private func sentences(_ count: Int) -> String {
+        (1...count).map { "Sentence number \($0) is here." }.joined(separator: " ")
+    }
 
-        await waitUntil { synthesizer.spoken.count >= ListenModel.lookahead + 1 }
-        // The one being read and the few after it, in order, and no further.
-        XCTAssertEqual(Array(synthesizer.spoken.prefix(ListenModel.lookahead + 1)), (1...(ListenModel.lookahead + 1)).map { "Sentence number \($0) is here." })
-        try? await Task.sleep(for: .milliseconds(150))
-        XCTAssertFalse(synthesizer.spoken.contains("Sentence number 8 is here."))
+    @MainActor
+    func testPlayMakesEverySentenceInBatchesThenOpensTheReader() async {
+        let synthesizer = FakeSynthesizer()
+        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer, sentencesAtOnce: 3)
+        model.text = sentences(7)
+        model.play()
+        XCTAssertEqual(model.stage, .preparing)
+        XCTAssertFalse(model.isReading)
+        XCTAssertNil(model.currentWordRange, "Nothing is highlighted before the reader opens")
+
+        await waitUntil { model.isReading }
+        XCTAssertEqual(model.stage, .reading)
+        // What the voice is given, numbers written out.
+        XCTAssertEqual(Set(synthesizer.spoken), Set(ReadingDocument(text: sentences(7)).sentences.map { $0.voiceText(in: .english) }))
+        XCTAssertTrue(synthesizer.spoken.contains("Sentence number seven is here."))
+        XCTAssertEqual(synthesizer.batchSizes, [3, 3, 1])
+        // After a wait the reader opens ready, at the top, without starting to talk by itself.
+        XCTAssertEqual(model.position, ReadingPosition(sentence: 0, word: 0))
+        XCTAssertEqual(model.playback, .paused)
+        XCTAssertNil(model.preparation)
         model.editText()
     }
 
     @MainActor
-    func testASlowAudioDeviceDoesNotHoldUpReading() async {
-        // Waking a sleeping USB or Bluetooth speaker can take seconds; that used to freeze the app on Play, so
-        // nothing past the first sentence was spoken until the device was up.
-        let synthesizer = FakeSynthesizer()
-        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer, player: makeSlowDevicePlayer(delay: 1.5))
-        model.text = (1...8).map { "Sentence number \($0) is here." }.joined(separator: " ")
-        let started = Date()
+    func testProgressCountsTheSentencesMade() async {
+        let synthesizer = FakeSynthesizer(secondsToMake: 0.3)
+        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer, sentencesAtOnce: 2)
+        model.text = sentences(6)
         model.play()
+        await waitUntil { (model.preparation?.done ?? 0) >= 2 }
+        XCTAssertEqual(model.preparation?.done, 2)
+        XCTAssertEqual(model.preparation?.total, 6)
+        XCTAssertEqual(model.preparation?.fraction ?? 0, 1.0 / 3, accuracy: 0.001)
+        XCTAssertNotNil(model.preparation?.secondsLeft)
+        XCTAssertTrue(model.isPreparing)
+        model.cancelPreparing()
+    }
 
-        await waitUntil({ synthesizer.spoken.count >= ListenModel.lookahead + 1 }, timeout: 1)
-        XCTAssertEqual(synthesizer.spoken.count, ListenModel.lookahead + 1)
-        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
+    @MainActor
+    func testCancelGoesBackToTheTextAndKeepsWhatWasMade() async {
+        let synthesizer = FakeSynthesizer(secondsToMake: 0.3)
+        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer, sentencesAtOnce: 2)
+        model.text = sentences(6)
+        model.play()
+        await waitUntil { (model.preparation?.done ?? 0) == 2 }
+        model.cancelPreparing()
+        XCTAssertEqual(model.stage, .editing)
+        XCTAssertNil(model.document)
+        XCTAssertNil(model.preparation)
+        try? await Task.sleep(for: .milliseconds(450))
+        XCTAssertEqual(synthesizer.spoken.count, 2, "The batch being made stops")
+
+        // Playing again makes only what's left.
+        model.play()
+        await waitUntil({ model.isReading }, timeout: 10)
+        XCTAssertEqual(synthesizer.spoken.count, 6)
+        XCTAssertEqual(Set(synthesizer.spoken).count, 6)
+        model.editText()
+    }
+
+    @MainActor
+    func testADocumentAlreadyMadeIsReadAtOnce() async {
+        let synthesizer = FakeSynthesizer()
+        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer, player: makeSlowDevicePlayer(delay: 1))
+        model.text = sentences(3)
+        model.play()
+        await waitUntil { model.isReading }
+        model.editText()
+
+        model.play()
+        await waitUntil { model.isReading }
+        XCTAssertEqual(synthesizer.spoken.count, 3, "Nothing is made twice")
+        // Nothing had to be made, so reading starts by itself, waiting for the audio device.
+        await waitUntil { model.playback == .waiting }
         XCTAssertEqual(model.playback, .waiting)
-
-        // Once the device is up (here, once it fails), reading goes on from there.
-        await waitUntil { model.errorMessage != nil }
+        await waitUntil({ model.errorMessage != nil }, timeout: 3)
         XCTAssertEqual(model.errorMessage, "Couldn't play the audio: The device didn't start.")
         XCTAssertEqual(model.playback, .paused)
         model.editText()
@@ -485,11 +541,12 @@ final class ListenModelTests: XCTestCase {
 
     @MainActor
     func testPausingWhileTheAudioDeviceStartsStaysPaused() async {
-        let synthesizer = FakeSynthesizer()
-        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer, player: makeSlowDevicePlayer(delay: 0.5))
+        let model = makeTestListenModel(directory: directory, player: makeSlowDevicePlayer(delay: 0.5))
         model.text = "One sentence. And another."
         model.play()
-        await waitUntil { synthesizer.spoken.count >= 1 && model.playback == .waiting }
+        await waitUntil { model.isReading }
+        model.play()
+        await waitUntil { model.playback == .waiting }
         model.pause()
         XCTAssertEqual(model.playback, .paused)
 
@@ -501,19 +558,16 @@ final class ListenModelTests: XCTestCase {
     }
 
     @MainActor
-    func testJumpingToAWordReadsFromThere() async {
-        let synthesizer = FakeSynthesizer()
-        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer)
+    func testJumpingToAWordMovesThere() async {
+        let model = makeTestListenModel(directory: directory)
         model.text = (1...10).map { "Line \($0) goes here." }.joined(separator: " ")
         model.play()
-        model.pause()
+        await waitUntil { model.isReading }
 
         let target = (model.text as NSString).range(of: "Line 9")
         model.jump(toLocation: target.location + 5)
         XCTAssertEqual(model.position, ReadingPosition(sentence: 8, word: 1))
         XCTAssertEqual(model.currentWordRange.map { (model.text as NSString).substring(with: $0) }, "9")
-        await waitUntil { synthesizer.spoken.contains("Line 9 goes here.") }
-        XCTAssertTrue(synthesizer.spoken.contains("Line 9 goes here."))
         model.editText()
     }
 
@@ -522,31 +576,14 @@ final class ListenModelTests: XCTestCase {
         let model = makeTestListenModel(directory: directory)
         model.text = "First. Second. Third. Fourth."
         model.play()
-        model.pause()
+        await waitUntil { model.isReading }
         model.jump(to: ReadingPosition(sentence: 2, word: 0))
         model.editText()
         XCTAssertFalse(model.isReading)
 
         model.play()
+        await waitUntil { model.isReading }
         XCTAssertEqual(model.position?.sentence, 2)
-        model.editText()
-    }
-
-    @MainActor
-    func testSpeechIsSavedSoItIsNotMadeTwice() async {
-        let synthesizer = FakeSynthesizer()
-        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer)
-        model.text = "Only one sentence here."
-        model.play()
-        await waitUntil { synthesizer.spoken.count == 1 }
-        // Saving happens in the background.
-        let store = SpokenSentenceStore(root: directory.appendingPathComponent("listen_audio", isDirectory: true))
-        await waitUntil { store.size() > 0 }
-        model.editText()
-
-        model.play()
-        try? await Task.sleep(for: .milliseconds(300))
-        XCTAssertEqual(synthesizer.spoken.count, 1)
         model.editText()
     }
 
@@ -559,184 +596,54 @@ final class ListenModelTests: XCTestCase {
         XCTAssertEqual(try? String(contentsOf: file, encoding: .utf8), "Remember me.")
     }
 
-    /// A defaults suite where the voices have already been measured making speech this many times slower than it
-    /// plays.
-    private func defaults(makingRate rate: Double, for engine: ListenEngine) -> UserDefaults {
-        let defaults = UserDefaults(suiteName: "ListenTests.\(UUID().uuidString)")!
-        defaults.set(rate, forKey: "listen.makingRate.\(engine.rawValue)")
-        return defaults
-    }
-
-    /// A device that fails at once, recording how many sentences the voice had made when reading started.
     @MainActor
-    private func recordingStartPlayer(_ voice: FakeSynthesizer, into madeAtStart: Locked<Int?>) -> ListenAudioPlayer {
-        ListenAudioPlayer { _ in
-            if madeAtStart.value == nil { madeAtStart.value = voice.spoken.count }
-            throw SlowDeviceError()
-        }
-    }
-
-    @MainActor
-    func testAVoiceSlowerThanTheReadingGetsAHeadStart() async {
-        // Speech that takes twice as long to make as to play: starting with 10 sentences left, reading must wait
-        // for over half of them (with the safety margin, 6) or it would catch up with the voice.
-        let qwen = FakeSynthesizer(identifier: "fake-qwen", secondsPerWord: 0.01, secondsToMake: 0.02)
-        let madeAtStart = Locked<Int?>(nil)
-        let model = makeTestListenModel(directory: directory, qwen: qwen, player: recordingStartPlayer(qwen, into: madeAtStart),
-                                        defaults: defaults(makingRate: 2, for: .qwen))
-        model.engine = .qwen
-        model.text = (1...10).map { "Sentence number \($0) is here." }.joined(separator: " ")
+    func testChangingTheVoiceWhileReadingMakesTheSpeechAgainAndKeepsThePlace() async {
+        let synthesizer = FakeSynthesizer()
+        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer)
+        model.text = sentences(4)
         model.play()
-        await waitUntil { qwen.spoken.count >= 1 }
-        XCTAssertEqual(model.playback, .waiting)
-        XCTAssertNotNil(model.headStartWait)
+        await waitUntil { model.isReading }
+        model.jump(to: ReadingPosition(sentence: 2, word: 0))
 
-        await waitUntil { madeAtStart.value != nil }
-        XCTAssertGreaterThanOrEqual(madeAtStart.value ?? 0, 6)
-        // It makes the rest of the document too, well past the few sentences ahead a fast voice makes.
-        await waitUntil { qwen.spoken.count == 10 }
-        XCTAssertEqual(qwen.spoken.count, 10)
+        model.voiceID = "aiden"
+        XCTAssertEqual(model.stage, .preparing)
+        await waitUntil { model.isReading }
+        XCTAssertEqual(synthesizer.spoken.count, 8, "Every sentence is made again in the new voice")
+        XCTAssertEqual(model.position, ReadingPosition(sentence: 2, word: 0))
         model.editText()
     }
 
     @MainActor
-    func testStartNowSkipsTheHeadStart() async {
-        let qwen = FakeSynthesizer(identifier: "fake-qwen", secondsPerWord: 0.01, secondsToMake: 0.05)
-        let madeAtStart = Locked<Int?>(nil)
-        let model = makeTestListenModel(directory: directory, qwen: qwen, player: recordingStartPlayer(qwen, into: madeAtStart),
-                                        defaults: defaults(makingRate: 3, for: .qwen))
-        model.engine = .qwen
-        model.text = (1...20).map { "Sentence number \($0) is here." }.joined(separator: " ")
+    func testNumbersAreWrittenOutForTheVoice() async {
+        let synthesizer = FakeSynthesizer()
+        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer)
+        model.language = .english
+        model.text = "In 1990 a ticket cost $5."
         model.play()
-        await waitUntil { qwen.spoken.count >= 1 }
-        XCTAssertNotNil(model.headStartWait)
-        model.startNow()
-        await waitUntil { madeAtStart.value != nil }
-        XCTAssertLessThan(madeAtStart.value ?? 99, 5)
+        await waitUntil { model.isReading }
+        XCTAssertEqual(synthesizer.spoken, ["In nineteen ninety a ticket cost five dollars."])
         model.editText()
     }
 
     @MainActor
-    func testAFastVoiceStartsAtOnceAndOnlyMakesAFewAhead() async {
-        let kokoro = FakeSynthesizer(secondsPerWord: 0.01)
-        let madeAtStart = Locked<Int?>(nil)
-        let model = makeTestListenModel(directory: directory, synthesizer: kokoro, player: recordingStartPlayer(kokoro, into: madeAtStart),
-                                        defaults: defaults(makingRate: 0.5, for: .kokoro))
-        model.text = (1...10).map { "Sentence number \($0) is here." }.joined(separator: " ")
-        model.play()
-        await waitUntil { madeAtStart.value != nil }
-        XCTAssertNil(model.headStartWait)
-        try? await Task.sleep(for: .milliseconds(200))
-        XCTAssertEqual(kokoro.spoken.count, ListenModel.lookahead + 1)
-        model.editText()
-    }
-
-    @MainActor
-    func testFasterReadingNeedsAHeadStartEvenFromAFastVoice() async {
-        // Half as long to make as to play is fine at 1×, but not at 4×.
-        let kokoro = FakeSynthesizer(secondsPerWord: 0.01)
-        let defaults = defaults(makingRate: 0.5, for: .kokoro)
-        defaults.set(4.0, forKey: "listen.speed")
-        let model = makeTestListenModel(directory: directory, synthesizer: kokoro, player: makeSlowDevicePlayer(delay: 0), defaults: defaults)
-        model.text = (1...10).map { "Sentence number \($0) is here." }.joined(separator: " ")
-        model.play()
-        await waitUntil { kokoro.spoken.count == 10 }
-        XCTAssertEqual(kokoro.spoken.count, 10)
-        model.editText()
-    }
-
-    @MainActor
-    func testTheVoicesSpeedIsMeasuredAndRemembered() async {
-        // Sentences of a little over a second, made in a fraction of that.
-        let qwen = FakeSynthesizer(identifier: "fake-qwen", secondsPerWord: 0.25)
-        let defaults = defaults(makingRate: 2, for: .qwen)
-        let model = makeTestListenModel(directory: directory, qwen: qwen, player: makeSlowDevicePlayer(delay: 0), defaults: defaults)
-        model.engine = .qwen
-        model.text = (1...3).map { "Sentence number \($0) is here." }.joined(separator: " ")
-        model.play()
-        await waitUntil { qwen.spoken.count == 3 }
-        XCTAssertLessThan(defaults.double(forKey: "listen.makingRate.qwen"), 2)
-        model.editText()
-    }
-
-    @MainActor
-    func testKokoroIsTheDefaultVoiceModel() {
-        let model = makeTestListenModel(directory: directory)
-        XCTAssertEqual(model.engine, .kokoro)
-        XCTAssertEqual(model.voiceID, "af_heart")
-        XCTAssertEqual(model.voice.name, "Heart")
-    }
-
-    @MainActor
-    func testEachVoiceModelKeepsItsOwnVoice() {
-        // A voice chosen before there was a choice of model was a Qwen3-TTS voice; it's still there for Qwen3-TTS.
-        let defaults = UserDefaults(suiteName: "ListenTests.\(UUID().uuidString)")!
-        defaults.set("aiden", forKey: "listen.voice")
-        let model = makeTestListenModel(directory: directory, defaults: defaults)
-        XCTAssertEqual(model.voiceID, "af_heart")
-
-        model.voiceID = "bm_george"
-        model.engine = .qwen
-        XCTAssertEqual(model.voiceID, "aiden")
-        model.engine = .kokoro
-        XCTAssertEqual(model.voiceID, "bm_george")
-
-        // And they're remembered between launches.
-        let relaunched = makeTestListenModel(directory: directory, defaults: defaults)
-        XCTAssertEqual(relaunched.engine, .kokoro)
-        XCTAssertEqual(relaunched.voiceID, "bm_george")
-    }
-
-    @MainActor
-    func testSwitchingVoiceModelReadsWithTheNewOne() async {
-        let kokoro = FakeSynthesizer()
-        let qwen = FakeSynthesizer(identifier: "fake-qwen")
-        // A device that fails at once, so the test doesn't wait on this Mac's speakers.
-        let model = makeTestListenModel(directory: directory, synthesizer: kokoro, qwen: qwen, player: makeSlowDevicePlayer(delay: 0))
-        model.text = (1...8).map { "Sentence number \($0) is here." }.joined(separator: " ")
-        model.play()
-        await waitUntil { kokoro.spoken.count >= 1 }
-        XCTAssertTrue(qwen.spoken.isEmpty)
-
-        model.engine = .qwen
-        model.play()
-        await waitUntil { qwen.spoken.count >= 1 }
-        XCTAssertEqual(qwen.spoken.first, "Sentence number 1 is here.")
-        // Only one voice is kept in memory.
-        XCTAssertFalse(kokoro.isLoaded)
-        XCTAssertTrue(qwen.isLoaded)
-        model.editText()
-    }
-
-    @MainActor
-    func testALanguageTheVoiceModelCantReadSaysSoInsteadOfReading() async {
-        let kokoro = FakeSynthesizer()
-        let model = makeTestListenModel(directory: directory, synthesizer: kokoro)
-        model.text = "Привет, как у тебя сегодня дела? Это очень длинное предложение на русском языке."
+    func testAVoiceThatFailsSaysSoAndGoesBackToTheText() async {
+        let synthesizer = FakeSynthesizer()
+        synthesizer.failure = SlowDeviceError()
+        let model = makeTestListenModel(directory: directory, synthesizer: synthesizer)
+        model.text = sentences(2)
         model.play()
         await waitUntil { model.errorMessage != nil }
-        XCTAssertEqual(model.errorMessage, "Kokoro can't read Russian. Choose another voice model from the voice menu to hear this text.")
-        XCTAssertTrue(kokoro.spoken.isEmpty)
-        XCTAssertFalse(model.engine.languages.contains(.russian))
-
-        // Qwen3-TTS reads it.
-        model.engine = .qwen
-        XCTAssertNil(model.errorMessage)
-        model.play()
-        XCTAssertNil(model.errorMessage)
-        model.editText()
+        XCTAssertEqual(model.errorMessage, "Couldn't make the speech: The device didn't start.")
+        XCTAssertEqual(model.stage, .editing)
     }
 
-    func testKokoroVoicesAreNamedFromTheirFiles() {
-        XCTAssertEqual(ListenVoice.kokoro.count, 50)
-        XCTAssertEqual(ListenVoice.kokoroVoice("bf_emma"), ListenVoice(id: "bf_emma", name: "Emma", summary: "Female, British", nativeLanguage: .english))
-        XCTAssertEqual(ListenVoice.kokoroVoice("zm_yunxi")?.nativeLanguage, .chinese)
-        XCTAssertEqual(ListenVoice.kokoroVoice("zm_yunxi")?.summary, "Male")
-        // Every voice speaks a language Kokoro reads, and the default is one of them.
-        XCTAssertTrue(ListenVoice.kokoro.allSatisfy { ListenEngine.kokoro.reads($0.nativeLanguage) })
-        for engine in ListenEngine.allCases {
-            XCTAssertNotNil(engine.voice(engine.defaultVoiceID))
-        }
+    func testSentencesAtOnceDependsOnTheMacsMemory() {
+        let gigabyte: UInt64 = 1_073_741_824
+        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 16 * gigabyte), 8)
+        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 8 * gigabyte), 4)
+        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 4 * gigabyte), 2)
+        XCTAssertTrue(ListenVoiceModel.sentencesAtOnceChoices.contains(ListenVoiceModel.defaultSentencesAtOnce()))
+        XCTAssertNotNil(ListenVoiceModel.voice(ListenVoiceModel.defaultVoiceID))
     }
 
     @MainActor
@@ -747,91 +654,7 @@ final class ListenModelTests: XCTestCase {
     }
 }
 
-// MARK: - Kokoro pieces
-
-final class KokoroPiecesTests: XCTestCase {
-    /// Units of `size` tokens each (not punctuation).
-    private func tokens(_ sizes: [Int]) -> [[Int]] {
-        sizes.map { [Int](repeating: 50, count: $0) }
-    }
-
-    func testAShortSentenceIsOnePiece() {
-        let units = ["It", "lets", "some", "molecules", "pass."]
-        XCTAssertEqual(KokoroPieces.plan(units: units, tokens: tokens([2, 4, 3, 9, 5])), [0..<5])
-    }
-
-    func testALongSentenceIsCutAfterItsCommaAndEveryPieceFits() {
-        let units = ["Water", "crosses", "by", "osmosis,", "moving", "toward", "the", "side", "with", "more", "dissolved", "particles."]
-        let sizes = [5, 6, 3, 8, 6, 5, 2, 4, 4, 4, 9, 10]
-        let pieces = KokoroPieces.plan(units: units, tokens: tokens(sizes))
-        XCTAssertEqual(pieces, [0..<4, 4..<12])
-        for piece in pieces {
-            XCTAssertLessThanOrEqual(KokoroPieces.ids(for: piece, tokens: tokens(sizes)).count, KokoroPieces.tokenBudget)
-        }
-    }
-
-    func testWithoutAPauseItCutsBeforeAJoiningWordAndLeavesNoStub() {
-        // 14 units of 5 tokens: too long for one piece, and greedy packing would strand the last word or two.
-        var units = (0..<14).map { "word\($0)" }
-        units[7] = "and"
-        let pieces = KokoroPieces.plan(units: units, tokens: tokens([Int](repeating: 5, count: 14)))
-        XCTAssertEqual(pieces, [0..<7, 7..<14])
-    }
-
-    func testIdsPutSpacesBetweenUnitsAndPaddingAround() {
-        XCTAssertEqual(KokoroPieces.ids(for: 0..<2, tokens: [[50, 51], [52]]), [0, 50, 51, 16, 52, 0])
-    }
-
-    func testLayoutFindsWhereEachUnitsSpeechEnds() {
-        let layout = KokoroPieces.layout(of: [[50, 51], [52, 3]])
-        XCTAssertEqual(layout.map(\.first), [1, 4])
-        XCTAssertEqual(layout.map(\.end), [3, 6])
-        // The comma (token 3) isn't speech.
-        XCTAssertEqual(layout.map(\.speechEnd), [3, 5])
-    }
-
-    func testJoiningTrimsSilenceAndTimesEachWordFromTheVoicesDurations() {
-        // "ab cd," then "ef.": padding, sounds, a space, sounds, a comma, padding; durations in 25 ms frames.
-        let first = KokoroPieces.Piece(units: 0..<2, tokens: [[50, 51], [52, 3]], audio: [Float](repeating: 0.5, count: 31 * 600), durations: [10, 2, 2, 1, 2, 8, 6])
-        let second = KokoroPieces.Piece(units: 2..<3, tokens: [[53, 4]], audio: [Float](repeating: 0.5, count: 30 * 600), durations: [12, 4, 10, 4])
-        let (samples, words) = KokoroPieces.join([first, second], units: ["ab", "cd,", "ef."])
-
-        // First piece: 0.12 s before its first sound, its 0.175 s of sounds, and the comma's pause cut to 0.16 s.
-        let firstLength = 2_880 + 4_200 + 3_840
-        // Second piece: 0.02 s before its first sound, then its sound and the full stop's 0.25 s pause.
-        let secondLength = 480 + 2_400 + 6_000
-        XCTAssertEqual(samples.count, firstLength + secondLength)
-        XCTAssertEqual(words.map(\.text), ["ab", "cd,", "ef."])
-        XCTAssertEqual(words[0].start, 0.12, accuracy: 0.001)
-        XCTAssertEqual(words[1].start, 0.12 + 0.125, accuracy: 0.001)
-        XCTAssertEqual(words[2].start, Double(firstLength) / 24_000 + 0.02, accuracy: 0.001)
-        // The joins fade, so nothing clicks.
-        XCTAssertEqual(samples[0], 0.5)
-        XCTAssertEqual(samples[firstLength], 0)
-        XCTAssertEqual(samples.last, 0)
-    }
-
-    func testUnitTokensComeFromTheWholeSentenceWhenTheSpacesLineUp() {
-        let tokenize: (String) -> [Int] = { text in
-            [1] + text.split(separator: " ").map { [Int](repeating: 50 + $0.count, count: $0.count) }.joined(separator: [16]) + [2]
-        }
-        XCTAssertEqual(KokoroSynthesizer.unitTokens(["ab", "cde"], text: "ab cde", tokenize: tokenize), [[52, 52], [53, 53, 53]])
-    }
-
-    func testUnitTokensFallBackToEachUnitWhenAUnitIsSpokenAsTwoWords() {
-        // "can't" is spoken as "can not": one more space than there are units.
-        let tokenize: (String) -> [Int] = { text in
-            let spoken = text.replacingOccurrences(of: "can't", with: "can not")
-            return [1] + spoken.split(separator: " ").map { [Int](repeating: 50 + $0.count, count: $0.count) }.joined(separator: [16]) + [2]
-        }
-        XCTAssertEqual(
-            KokoroSynthesizer.unitTokens(["I", "can't"], text: "I can't", tokenize: tokenize),
-            [[51], [53, 53, 53, 16, 53, 53, 53]]
-        )
-    }
-}
-
-// MARK: - Pauses and what's heard
+// MARK: - Pauses
 
 final class SpeechPausesTests: XCTestCase {
     /// Half a second of sound, `gap` seconds of silence, then half a second of sound, at 1 kHz.
@@ -873,75 +696,72 @@ final class SpeechPausesTests: XCTestCase {
     }
 }
 
-// MARK: - Voices that time their own words
-
-/// A voice that says when it spoke each word, as Kokoro does.
-final class TimedSynthesizer: SpeechSynthesizer, @unchecked Sendable {
-    let identifier = "timed-voice"
-    var isLoaded = true
-    func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {}
-    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> SynthesizedSpeech {
-        let units = text.split(separator: " ").map(String.init)
-        return SynthesizedSpeech(
-            samples: [Float](repeating: 0, count: units.count * 500),
-            sampleRate: 1_000,
-            wordTimes: units.enumerated().map { AlignedWordTime(text: $1, start: Double($0) * 0.5 + 0.2, end: Double($0) * 0.5 + 0.4) }
-        )
-    }
-    func unload() {}
-}
-
-final class CountingAligner: WordAligner, @unchecked Sendable {
-    let identifier = "counting-aligner"
-    var isLoaded = true
-    private(set) var calls = 0
-    func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {}
-    func align(samples: [Float], sampleRate: Int, text: String, language: ListenLanguage) async throws -> [AlignedWordTime] {
-        calls += 1
-        return []
-    }
-    func unload() {}
-}
+// MARK: - Speaking sentences
 
 final class SentenceSpeakerTests: XCTestCase {
-    func testAVoicesOwnWordTimesAreUsedWithoutTheAligner() async throws {
-        let aligner = CountingAligner()
-        let speaker = SentenceSpeaker(synthesizer: TimedSynthesizer(), aligner: aligner)
-        let sentence = ReadingDocument(text: "Cells need energy, mostly.").sentences[0]
-        let spoken = try await speaker.speak(sentence, voice: "any", language: .english)
-        XCTAssertEqual(aligner.calls, 0)
-        XCTAssertEqual(spoken.wordTimes.map(\.start), [0.2, 0.7, 1.2, 1.7])
+    func testSentencesAreMadeTogetherAndEachIsTimed() async throws {
+        let synthesizer = FakeSynthesizer()
+        let speaker = SentenceSpeaker(synthesizer: synthesizer, aligner: FakeAligner())
+        let sentences = ReadingDocument(text: "Cells need energy. They get it from food.").sentences
+        let spoken = try await speaker.speak(sentences, voice: "ryan", language: .english)
+        XCTAssertEqual(synthesizer.batchSizes, [2])
+        XCTAssertEqual(spoken.map(\.wordTimes.count), [3, 5])
+        for (time, expected) in zip(spoken[1].wordTimes.map(\.start), [0, 0.1, 0.2, 0.3, 0.4]) {
+            XCTAssertEqual(time, expected, accuracy: 1e-9)
+        }
     }
 
-    func testAVoiceWithoutWordTimesIsTimedByTheAligner() async throws {
-        let aligner = CountingAligner()
-        let speaker = SentenceSpeaker(synthesizer: FakeSynthesizer(), aligner: aligner)
-        let sentence = ReadingDocument(text: "Cells need energy.").sentences[0]
-        _ = try await speaker.speak(sentence, voice: "any", language: .english)
-        XCTAssertEqual(aligner.calls, 1)
+    func testANumberIsHighlightedForAllTheWordsItsReadAs() {
+        // "1990" is said as "nineteen ninety": the aligner times those two words, and the number on screen spans
+        // both, so the word after it starts when it's heard.
+        let sentence = ReadingDocument(text: "In 1990 we left.").sentences[0]
+        let aligned = ["in", "nineteen", "ninety", "we", "left"].enumerated().map { index, word in
+            AlignedWordTime(text: word, start: Double(index) * 0.4, end: Double(index) * 0.4 + 0.3)
+        }
+        let times = SentenceSpeaker.wordTimes(for: sentence, aligned: aligned, samples: [Float](repeating: 0.3, count: 2_000), sampleRate: 1_000, language: .english)
+        for (time, expected) in zip(times.map(\.start), [0, 0.4, 1.2, 1.6]) {
+            XCTAssertEqual(time, expected, accuracy: 1e-9)
+        }
+        XCTAssertEqual(times[1].end, 1.1, accuracy: 1e-9)
     }
 }
 
-final class PauseShorteningTests: XCTestCase {
-    func testALongPauseInsideTheSentenceIsShortenedAndLaterWordsMoveBack() {
-        let tone = (0..<500).map { Float(sin(Double($0) * 0.5)) * 0.5 }
-        // 0.1 s of silence first, a word, 0.8 s of silence, a word, 0.1 s of silence.
-        let audio = [Float](repeating: 0, count: 100) + tone + [Float](repeating: 0, count: 800) + tone + [Float](repeating: 0, count: 100)
-        let words = [AlignedWordTime(text: "one", start: 0.1, end: 0.6), AlignedWordTime(text: "two", start: 1.4, end: 1.9)]
-        let (samples, moved) = SpeechPauses.shortening(audio, sampleRate: 1_000, words: words, longest: 0.3)
-        XCTAssertEqual(samples.count, audio.count - 500, accuracy: 20)
-        XCTAssertEqual(moved[0], words[0])
-        XCTAssertEqual(moved[1].start, 0.9, accuracy: 0.02)
-        // The silence before the first word and after the last stays.
-        XCTAssertEqual(Array(samples.prefix(100)), [Float](repeating: 0, count: 100))
+// MARK: - Numbers
+
+final class SpokenNumbersTests: XCTestCase {
+    private func spoken(_ text: String, _ language: ListenLanguage = .english) -> String {
+        SpokenNumbers.spoken(text, language: language)
     }
 
-    func testShortPausesAreLeftAlone() {
-        let tone = (0..<500).map { Float(sin(Double($0) * 0.5)) * 0.5 }
-        let audio = tone + [Float](repeating: 0, count: 250) + tone
-        let words = [AlignedWordTime(text: "one", start: 0, end: 0.5), AlignedWordTime(text: "two", start: 0.75, end: 1.25)]
-        let (samples, moved) = SpeechPauses.shortening(audio, sampleRate: 1_000, words: words, longest: 0.3)
-        XCTAssertEqual(samples, audio)
-        XCTAssertEqual(moved, words)
+    func testYearsAreReadAsYears() {
+        XCTAssertEqual(spoken("In 1990 and 1905, then 2005 and 2024."), "In nineteen ninety and nineteen oh five, then two thousand five and twenty twenty-four.")
+        XCTAssertEqual(spoken("By 1900."), "By nineteen hundred.")
+    }
+
+    func testCountsDecimalsAndPercentages() {
+        XCTAssertEqual(spoken("About 1,250 cells, 3.5 mm and 40% of them."), "About one thousand two hundred fifty cells, three point five mm and forty percent of them.")
+        XCTAssertEqual(spoken("It has 7 parts."), "It has seven parts.")
+    }
+
+    func testOrdinalsDecadesMoneyAndRanges() {
+        XCTAssertEqual(spoken("The 21st and 3rd, in the 1990s."), "The twenty-first and third, in the nineteen nineties.")
+        XCTAssertEqual(spoken("It cost $5.50, or $12."), "It cost five dollars fifty cents, or twelve dollars.")
+        XCTAssertEqual(spoken("Pages 10-20."), "Pages ten to twenty.")
+    }
+
+    func testTextWithoutNumbersAndUnspacedLanguagesAreLeftAlone() {
+        XCTAssertEqual(spoken("No numbers here."), "No numbers here.")
+        XCTAssertEqual(spoken("2024年", .chinese), "2024年")
+        XCTAssertEqual(spoken("COVID19 and B12"), "COVID19 and B12")
+    }
+
+    func testOtherLanguagesSpellOutWholeNumbers() {
+        XCTAssertEqual(spoken("Es gibt 21 Zellen.", .german), "Es gibt einundzwanzig Zellen.")
+    }
+
+    func testEachWordKnowsTheWordsItsSpokenAs() {
+        let sentence = ReadingDocument(text: "From 1990 to 2000.").sentences[0]
+        XCTAssertEqual(sentence.spokenWords(in: .english), [["From"], ["nineteen", "ninety"], ["to"], ["two", "thousand"]])
+        XCTAssertEqual(sentence.voiceText(in: .english), "From nineteen ninety to two thousand.")
     }
 }

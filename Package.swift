@@ -42,22 +42,36 @@ let package = Package(
         ),
     ],
     dependencies: [
-        // On-device text to speech for the Listen pane (Kokoro on the Neural Engine with Core ML, or Qwen3-TTS on
-        // the GPU with MLX) and word timing (Qwen3-ForcedAligner, MLX). Pinned exactly: the package is pre-1.0 and
-        // its API changes between releases.
+        // On-device word timing for the Listen pane (Qwen3-ForcedAligner, MLX) and what Qwen3TTSLocal (its speech)
+        // builds on. Pinned exactly: the package is pre-1.0 and its API changes between releases.
         // It needs macOS 15, which is why the app does.
         .package(url: "https://github.com/soniqo/speech-swift", exact: "0.0.29"),
+        // The version speech-swift 0.0.29 resolves to, named here for Qwen3TTSLocal.
+        .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.31.6"),
     ],
     targets: [
         .executableTarget(
             name: "LectureTranscribeNative",
             dependencies: [
-                .product(name: "KokoroTTS", package: "speech-swift"),
-                .product(name: "Qwen3TTS", package: "speech-swift"),
+                "Qwen3TTSLocal",
                 .product(name: "Qwen3ASR", package: "speech-swift"),
                 .product(name: "AudioCommon", package: "speech-swift"),
             ],
             linkerSettings: sdkVersionLinkerSettings
+        ),
+        // Qwen3-TTS from speech-swift 0.0.29 (Apache-2.0), kept here so its batched synthesis can be fixed: the
+        // library's makes every sentence in a batch alike and leaves out the voice. See Sources/Qwen3TTSLocal/README.md.
+        .target(
+            name: "Qwen3TTSLocal",
+            dependencies: [
+                .product(name: "AudioCommon", package: "speech-swift"),
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXFast", package: "mlx-swift"),
+            ],
+            exclude: ["LICENSE", "README.md"],
+            // Upstream builds it in the Swift 5 language mode.
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
             name: "LectureTranscribeNativeTests",

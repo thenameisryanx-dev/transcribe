@@ -1,13 +1,13 @@
 import Foundation
-import Qwen3TTS
+import Qwen3TTSLocal
 import XCTest
 
 @testable import LectureTranscribeNative
 
 /// Measures how fast the real Qwen3-TTS voice makes speech on this Mac, as a real-time factor (seconds to make ÷
-/// seconds of audio; below 1 keeps ahead of playback at 1×), the way the reader makes it: one sentence, then its word
-/// timing. On a base M4 it's about 1.3, so the reader falls behind. Needs the Qwen3-TTS models downloaded, so it runs
-/// only when asked:
+/// seconds of audio), one sentence at a time and several at once, and checks that sentences made together end on
+/// their own like ones made alone. On a base M4 one at a time is about 0.9–1.3 and eight at once about 0.25. Needs
+/// the Qwen3-TTS models downloaded, so it runs only when asked:
 ///
 ///     LISTEN_BENCHMARK=1 swift test --filter ListenBenchmarkTests
 final class ListenBenchmarkTests: XCTestCase {
@@ -24,7 +24,7 @@ final class ListenBenchmarkTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["LISTEN_BENCHMARK"] == "1" else {
             throw XCTSkip("Set LISTEN_BENCHMARK=1 to measure the real voice.")
         }
-        try XCTSkipUnless(SpeechModelFiles.isDownloaded(for: .qwen), "The Qwen3-TTS models aren't downloaded.")
+        try XCTSkipUnless(SpeechModelFiles.isDownloaded(), "The Qwen3-TTS models aren't downloaded.")
         let sentences = ReadingDocument(text: Self.text).sentences.map(\.spokenText)
 
         let model = try await Qwen3TTSModel.fromPretrained(
@@ -37,7 +37,7 @@ final class ListenBenchmarkTests: XCTestCase {
         try await aligner.load { _, _ in }
         _ = model.synthesize(text: "Warming up.", language: "english", speaker: "ryan", languageExplicit: true)
 
-        // One at a time, as the reader does today: make a sentence, then time its words.
+        // One at a time with the library's own path: make a sentence, then time its words.
         var makeTime = 0.0, alignTime = 0.0, audio = 0.0
         for sentence in sentences {
             let start = Date()
@@ -62,14 +62,52 @@ final class ListenBenchmarkTests: XCTestCase {
     others calm it down. By the end of the week, you should be able to sketch this whole path from memory.
     """
 
-    /// Reads a document with the real Qwen3-TTS voice through the real (muted) player, from a fresh start, and
-    /// counts how often reading stopped to wait for the voice after its head start. Takes a few minutes.
-    @MainActor
-    func testQwenReadsWithoutStoppingAfterItsHeadStart() async throws {
+    /// Makes the same sentences one at a time and then several at once, and checks the batch: every sentence ends
+    /// by itself (none runs to its length cap, as when the batch's rows were mixed up) and speaks at a normal pace.
+    func testMakingSeveralAtOnceIsFasterAndSoundsTheSame() async throws {
         guard ProcessInfo.processInfo.environment["LISTEN_BENCHMARK"] == "1" else {
             throw XCTSkip("Set LISTEN_BENCHMARK=1 to measure the real voice.")
         }
-        try XCTSkipUnless(SpeechModelFiles.isDownloaded(for: .qwen), "The Qwen3-TTS models aren't downloaded.")
+        try XCTSkipUnless(SpeechModelFiles.isDownloaded(), "The Qwen3-TTS models aren't downloaded.")
+        let sentences = Array(ReadingDocument(text: Self.longerText).sentences.prefix(8)).map(\.spokenText)
+        let model = try await Qwen3TTSModel.fromPretrained(
+            modelId: SpeechModelFiles.ttsModelID,
+            tokenizerModelId: SpeechModelFiles.ttsTokenizerID,
+            cacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.ttsModelID),
+            tokenizerCacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.ttsTokenizerID)
+        )
+        _ = try model.synthesizeVoiceBatch(texts: ["Warming up."], language: "english", speaker: "ryan")
+        _ = try model.synthesizeVoiceBatch(texts: Array(repeating: "Warming up.", count: 8), language: "english", speaker: "ryan")
+
+        var start = Date()
+        let alone = try sentences.flatMap { try model.synthesizeVoiceBatch(texts: [$0], language: "english", speaker: "ryan") }
+        let aloneTime = Date().timeIntervalSince(start)
+        start = Date()
+        let together = try model.synthesizeVoiceBatch(texts: sentences, language: "english", speaker: "ryan")
+        let togetherTime = Date().timeIntervalSince(start)
+
+        func seconds(_ audio: [[Float]]) -> [Double] { audio.map { Double($0.count) / 24_000 } }
+        let aloneAudio = seconds(alone).reduce(0, +)
+        let togetherAudio = seconds(together).reduce(0, +)
+        print(String(format: "BENCH one at a time: RTF %.2f (%.1fs for %.1fs); 8 at once: RTF %.2f (%.1fs for %.1fs)",
+                     aloneTime / aloneAudio, aloneTime, aloneAudio, togetherTime / togetherAudio, togetherTime, togetherAudio))
+        XCTAssertLessThan(togetherTime / togetherAudio, aloneTime / aloneAudio * 0.6, "Making 8 at once isn't much faster")
+        for (text, length) in zip(sentences, seconds(together)) {
+            let pace = Double(text.split(separator: " ").count) / length
+            // People speak about 2.5 words a second; a sentence run to its cap is well under 1.5.
+            XCTAssertGreaterThan(pace, 1.4, "“\(text)” ran on (\(length)s)")
+            XCTAssertLessThan(pace, 5, "“\(text)” was cut short (\(length)s)")
+        }
+    }
+
+    /// Prepares a document with the real voice and aligner, as Play does, then reads it through the real (muted)
+    /// player to the end without stopping. Takes a minute or two.
+    @MainActor
+    func testQwenPreparesThenReadsWithoutStopping() async throws {
+        guard ProcessInfo.processInfo.environment["LISTEN_BENCHMARK"] == "1" else {
+            throw XCTSkip("Set LISTEN_BENCHMARK=1 to measure the real voice.")
+        }
+        try XCTSkipUnless(SpeechModelFiles.isDownloaded(), "The Qwen3-TTS models aren't downloaded.")
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -79,64 +117,35 @@ final class ListenBenchmarkTests: XCTestCase {
             try engine.start()
         }
         let model = ListenModel(
-            synthesizers: [.kokoro: KokoroSynthesizer(), .qwen: Qwen3Synthesizer()],
-            aligner: Qwen3Aligner(),
             store: SpokenSentenceStore(root: directory.appendingPathComponent("listen_audio", isDirectory: true)),
             defaults: UserDefaults(suiteName: "ListenBenchmark.\(UUID().uuidString)")!,
             textFileURL: directory.appendingPathComponent("listen.txt"),
             player: player,
             mlxWork: MLXWorkGate()
         )
-        model.engine = .qwen
         model.text = Self.longerText
+        model.speed = 4
         let sentences = ReadingDocument(text: Self.longerText).sentences.count
-        try await model.loadVoice()
 
         let pressedPlay = ContinuousClock.now
         model.play()
-        var firstEstimate: TimeInterval?
-        var started: ContinuousClock.Instant?
-        var stops = 0
-        var last = model.playback
-        while model.playback != .stopped, ContinuousClock.now - pressedPlay < .seconds(600) {
-            if firstEstimate == nil, let wait = model.headStartWait { firstEstimate = wait }
-            if model.playback == .playing, started == nil { started = .now }
-            if started != nil, last == .playing, model.playback == .waiting { stops += 1 }
-            if model.errorMessage != nil { break }
-            last = model.playback
-            try await Task.sleep(for: .milliseconds(50))
+        while !model.isReading, model.errorMessage == nil, ContinuousClock.now - pressedPlay < .seconds(600) {
+            try await Task.sleep(for: .milliseconds(100))
         }
         XCTAssertNil(model.errorMessage)
-        let waited = started.map { ($0 - pressedPlay).components.seconds } ?? -1
-        let total = (ContinuousClock.now - pressedPlay).components.seconds
-        print("BENCH head start: \(sentences) sentences, first estimate \(Int(firstEstimate ?? 0))s, waited \(waited)s, stopped \(stops) times after starting, done in \(total)s")
+        let prepared = (ContinuousClock.now - pressedPlay).components.seconds
+        model.play()
+        var stops = 0
+        var last = model.playback
+        let started = ContinuousClock.now
+        while model.playback != .stopped, model.errorMessage == nil, ContinuousClock.now - started < .seconds(300) {
+            if last == .playing, model.playback == .waiting { stops += 1 }
+            last = model.playback
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        print("BENCH prepare then read: \(sentences) sentences made in \(prepared)s (\(model.sentencesAtOnce) at once), read at 4x with \(stops) stops")
+        XCTAssertNil(model.errorMessage)
         XCTAssertEqual(model.playback, .stopped, "Didn't finish reading")
         XCTAssertEqual(stops, 0)
-    }
-
-    /// Reads the benchmark text with the real Kokoro voice and checks what was wrong with it before: sentences made
-    /// in pieces stopped for most of a second where the pieces met, and the aligner's word times were a quarter of a
-    /// second off on average. Kokoro now times its own words, so no word starts in a pause.
-    func testKokoroReadsWithoutLongPausesAndTimesItsOwnWords() async throws {
-        guard ProcessInfo.processInfo.environment["LISTEN_BENCHMARK"] == "1" else {
-            throw XCTSkip("Set LISTEN_BENCHMARK=1 to check the real voice.")
-        }
-        try XCTSkipUnless(SpeechModelFiles.isDownloaded(for: .kokoro), "The Kokoro model isn't downloaded.")
-        let voice = KokoroSynthesizer()
-        try await voice.load { _, _ in }
-        for sentence in ReadingDocument(text: Self.text).sentences {
-            let speech = try await voice.synthesize(sentence.spokenText, voice: ListenEngine.kokoro.defaultVoiceID, language: .english)
-            let times = try XCTUnwrap(speech.wordTimes, "Kokoro didn't time its words")
-            XCTAssertEqual(times.count, sentence.spokenText.split(separator: " ").count)
-            let duration = Double(speech.samples.count) / Double(speech.sampleRate)
-            let pauses = SpeechPauses.find(in: speech.samples, sampleRate: speech.sampleRate)
-            for pause in pauses where pause.lowerBound > 0.05 && pause.upperBound < duration - 0.05 {
-                XCTAssertLessThanOrEqual(pause.upperBound - pause.lowerBound, KokoroPieces.longestPause + 0.05, "A long pause in “\(sentence.spokenText)”")
-            }
-            for word in times {
-                XCTAssertFalse(pauses.contains { $0.lowerBound + 0.03 < word.start && word.start < $0.upperBound - 0.03 }, "“\(word.text)” starts in a pause")
-            }
-            print(String(format: "BENCH kokoro: %.2fs, %d words, %d pauses", duration, times.count, pauses.count))
-        }
     }
 }

@@ -1,30 +1,30 @@
 import AudioCommon
 import Foundation
-import KokoroTTS
 import NaturalLanguage
 import Qwen3ASR
-import Qwen3TTS
+import Qwen3TTSLocal
 
 // The Listen pane talks to a voice and an aligner only through these two protocols, so either can be swapped for
 // another model (another speech-swift engine, the system voices, a cloud voice) without touching the reader.
 
-/// Turns text into speech.
+/// Turns text into speech, several texts at once.
 protocol SpeechSynthesizer: AnyObject, Sendable {
     /// Names the model and its settings; part of the key sentences are saved under, so a new model never reuses
     /// another's audio.
     var identifier: String { get }
     var isLoaded: Bool { get }
     func load(progress: @escaping @Sendable (Double, String) -> Void) async throws
-    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> SynthesizedSpeech
+    /// Speaks each of `texts` in one voice, returning them in order. Making several at once is much faster than one
+    /// after another (see `Qwen3TTSModel.synthesizeVoiceBatch`). Throws `CancellationError` soon after the task is
+    /// cancelled.
+    func synthesize(_ texts: [String], voice: String, language: ListenLanguage) async throws -> [SynthesizedSpeech]
     func unload()
 }
 
-/// A voice's speech for a text. A voice that knows when it spoke each word (as Kokoro does) gives `wordTimes`, one
-/// per run of the text between spaces; otherwise the aligner listens for them.
+/// A voice's speech for a text.
 struct SynthesizedSpeech: Sendable {
     var samples: [Float]
     var sampleRate: Int
-    var wordTimes: [AlignedWordTime]?
 }
 
 /// Finds when each word of a text is spoken in a recording of it.
@@ -67,94 +67,38 @@ enum ListenLanguage: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// The voice models Listen reads with. Each has its own voices and languages; the word timing, playback and
-/// highlighting are the same for both.
-enum ListenEngine: String, CaseIterable, Identifiable, Sendable {
-    /// Kokoro-82M on the Neural Engine (Core ML): makes speech several times faster than it plays on any Apple
-    /// silicon Mac.
-    case kokoro
-    /// Qwen3-TTS 0.6B on the GPU (MLX): more expressive, but it makes speech one step at a time, so on a Mac without
-    /// a lot of GPU memory bandwidth (a base M-series chip) it's slower than the speech plays.
-    case qwen
+/// The voice model Listen reads with: Qwen3-TTS 0.6B CustomVoice on the GPU (MLX), timed by Qwen3-ForcedAligner.
+enum ListenVoiceModel {
+    static let displayName = "Qwen3-TTS"
+    static let defaultVoiceID = "ryan"
+    static var voices: [ListenVoice] { ListenVoice.qwen }
+    /// The languages it reads, in menu order, `automatic` first.
+    static let languages = ListenLanguage.allCases
 
-    static let defaultEngine = ListenEngine.kokoro
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .kokoro: return "Kokoro"
-        case .qwen: return "Qwen3-TTS"
-        }
-    }
-
-    var summary: String {
-        switch self {
-        case .kokoro: return "Fast"
-        case .qwen: return "More expressive, slow on most Macs"
-        }
-    }
-
-    var voices: [ListenVoice] {
-        switch self {
-        case .kokoro: return ListenVoice.kokoro
-        case .qwen: return ListenVoice.qwen
-        }
-    }
-
-    var defaultVoiceID: String {
-        switch self {
-        case .kokoro: return "af_heart"
-        case .qwen: return "ryan"
-        }
-    }
-
-    /// The languages it can read, in menu order, `automatic` first.
-    var languages: [ListenLanguage] {
-        switch self {
-        // Kokoro also has Hindi voices, but the word aligner doesn't know Hindi; it reads German, Korean and
-        // Russian only with English sounds.
-        case .kokoro: return [.automatic, .english, .chinese, .japanese, .french, .spanish, .italian, .portuguese]
-        case .qwen: return ListenLanguage.allCases
-        }
-    }
-
-    func reads(_ language: ListenLanguage) -> Bool {
-        languages.contains(language)
-    }
-
-    func voice(_ id: String) -> ListenVoice? {
+    static func voice(_ id: String) -> ListenVoice? {
         voices.first { $0.id == id }
     }
 
-    /// About how many seconds it takes to make a second of speech and time its words, until the reader has measured
-    /// it on this Mac. Qwen3-TTS takes about 1.35 on a base M4 (`ListenBenchmarkTests`).
-    var expectedMakingRate: Double {
-        switch self {
-        case .kokoro: return 0.3
-        case .qwen: return 1.35
-        }
-    }
-
     /// The models it downloads, the word aligner included.
-    var modelIDs: [String] {
-        switch self {
-        case .kokoro: return [SpeechModelFiles.kokoroModelID, SpeechModelFiles.alignerModelID]
-        case .qwen: return [SpeechModelFiles.ttsModelID, SpeechModelFiles.ttsTokenizerID, SpeechModelFiles.alignerModelID]
-        }
+    static let modelIDs = [SpeechModelFiles.ttsModelID, SpeechModelFiles.ttsTokenizerID, SpeechModelFiles.alignerModelID]
+
+    /// What its downloads add up to, for telling people before they start.
+    static let approximateDownloadSize: Int64 = 3_480_000_000
+
+    /// How many sentences it makes at once on a Mac with this much memory. Each extra sentence needs little memory
+    /// (about 25 MB); the limit is the GPU, which gets busier for everything else. On a base M4 with 16 GB, 8 at
+    /// once make speech about 3.5 times as fast as one at a time (`ListenBenchmarkTests`).
+    static func defaultSentencesAtOnce(physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        let gigabytes = physicalMemory / 1_073_741_824
+        if gigabytes >= 15 { return 8 }
+        if gigabytes >= 8 { return 4 }
+        return 2
     }
 
-    /// What its downloads add up to (the aligner included), for telling people before they start.
-    var approximateDownloadSize: Int64 {
-        switch self {
-        case .kokoro: return 1_320_000_000
-        case .qwen: return 3_480_000_000
-        }
-    }
+    static let sentencesAtOnceChoices = [1, 2, 4, 6, 8]
 }
 
-/// A voice of one of the engines. Any voice can read any of its engine's languages; each sounds most natural in its
-/// own.
+/// A voice of the voice model. Any voice can read any language; each sounds most natural in its own.
 struct ListenVoice: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
@@ -173,35 +117,6 @@ struct ListenVoice: Identifiable, Hashable, Sendable {
         ListenVoice(id: "ono_anna", name: "Ono Anna", summary: "Female, playful", nativeLanguage: .japanese),
         ListenVoice(id: "sohee", name: "Sohee", summary: "Female, warm", nativeLanguage: .korean),
     ]
-
-    /// Kokoro's voices, named as in its download: the first letter is the language (and for English the accent),
-    /// the second whether the voice is female or male. Its Hindi voices are left out (see `ListenEngine.languages`).
-    static let kokoro: [ListenVoice] = [
-        "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river",
-        "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx",
-        "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george",
-        "bm_lewis", "ef_dora", "em_alex", "em_santa", "ff_siwis", "if_sara", "im_nicola", "jf_alpha",
-        "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo", "pf_dora", "pm_alex", "pm_santa", "zf_xiaobei",
-        "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang",
-    ].compactMap(kokoroVoice)
-
-    static func kokoroVoice(_ id: String) -> ListenVoice? {
-        let parts = id.split(separator: "_", maxSplits: 1)
-        guard parts.count == 2, parts[0].count == 2 else { return nil }
-        let codes = Array(parts[0])
-        let languages: [Character: (ListenLanguage, String?)] = [
-            "a": (.english, "American"), "b": (.english, "British"), "e": (.spanish, nil), "f": (.french, nil),
-            "i": (.italian, nil), "j": (.japanese, nil), "p": (.portuguese, nil), "z": (.chinese, nil),
-        ]
-        guard let (language, accent) = languages[codes[0]], codes[1] == "f" || codes[1] == "m" else { return nil }
-        let gender = codes[1] == "f" ? "Female" : "Male"
-        return ListenVoice(
-            id: id,
-            name: parts[1].prefix(1).uppercased() + parts[1].dropFirst(),
-            summary: [gender, accent].compactMap { $0 }.joined(separator: ", "),
-            nativeLanguage: language
-        )
-    }
 }
 
 // MARK: - Model files
@@ -209,7 +124,6 @@ struct ListenVoice: Identifiable, Hashable, Sendable {
 /// Where the downloaded speech models live: `~/Library/Application Support/LectureTranscribe/SpeechModels`. Not in
 /// Caches, so macOS never clears a multi-gigabyte download on its own.
 enum SpeechModelFiles {
-    static let kokoroModelID = KokoroTTSModel.defaultModelId
     static let ttsModelID = "aufklarer/Qwen3-TTS-12Hz-0.6B-CustomVoice-MLX-bf16"
     static let ttsTokenizerID = "Qwen/Qwen3-TTS-Tokenizer-12Hz"
     static let alignerModelID = "aufklarer/Qwen3-ForcedAligner-0.6B-4bit"
@@ -226,15 +140,10 @@ enum SpeechModelFiles {
         try HuggingFaceDownloader.getCacheDirectory(for: modelID, basePath: root)
     }
 
-    /// Whether all of an engine's models are on disk (they may still need loading).
-    static func isDownloaded(for engine: ListenEngine) -> Bool {
-        engine.modelIDs.allSatisfy { id in
+    /// Whether all of the voice model's files are on disk (they may still need loading).
+    static func isDownloaded() -> Bool {
+        ListenVoiceModel.modelIDs.allSatisfy { id in
             guard let directory = try? directory(for: id) else { return false }
-            // Kokoro is a compiled Core ML model rather than a weights file.
-            if id == kokoroModelID {
-                return FileManager.default.fileExists(atPath: directory.appendingPathComponent("kokoro_5s.mlmodelc").path)
-                    && FileManager.default.fileExists(atPath: directory.appendingPathComponent("vocab_index.json").path)
-            }
             return HuggingFaceDownloader.weightsExist(in: directory)
         }
     }
@@ -265,12 +174,30 @@ enum SpeechModelFiles {
 private let mlxQueue = DispatchQueue(label: "LectureTranscribe.Listen.MLX", qos: .userInitiated)
 
 private func onMLXQueue<T>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+    try await onMLXQueue { _ in try work() }
+}
+
+/// Runs `work` on the MLX queue; `isCancelled` turns true once the calling task is cancelled, so long work can stop
+/// between steps.
+private func onMLXQueue<T>(_ work: @escaping @Sendable (_ isCancelled: @escaping @Sendable () -> Bool) throws -> T) async throws -> T {
     try Task.checkCancellation()
-    return try await withCheckedThrowingContinuation { continuation in
-        mlxQueue.async {
-            continuation.resume(with: Result { try MLXWorkGate.shared.run(work) })
+    let cancelled = CancellationFlag()
+    return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+            mlxQueue.async {
+                continuation.resume(with: Result { try MLXWorkGate.shared.run { try work { cancelled.isSet } } })
+            }
         }
+    } onCancel: {
+        cancelled.set()
     }
+}
+
+private final class CancellationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
 }
 
 /// Counts the MLX work running (a model loading, a sentence being spoken) so the app can wait for it before it
@@ -387,14 +314,15 @@ final class Qwen3Synthesizer: SpeechSynthesizer, @unchecked Sendable {
         box.value = model
     }
 
-    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> SynthesizedSpeech {
+    func synthesize(_ texts: [String], voice: String, language: ListenLanguage) async throws -> [SynthesizedSpeech] {
         let box = box
-        let samples = try await onMLXQueue {
+        let made = try await onMLXQueue { isCancelled in
             guard let model = box.value else { throw SpeechEngineError.notLoaded }
-            return model.synthesize(text: text, language: language.rawValue, speaker: voice, languageExplicit: true)
+            return try model.synthesizeVoiceBatch(texts: texts, language: language.rawValue, speaker: voice) {
+                if isCancelled() { throw CancellationError() }
+            }
         }
-        guard !samples.isEmpty else { throw SpeechEngineError.noAudio }
-        return SynthesizedSpeech(samples: samples, sampleRate: 24_000, wordTimes: nil)
+        return made.map { SynthesizedSpeech(samples: $0, sampleRate: 24_000) }
     }
 
     func unload() {
@@ -434,34 +362,64 @@ final class Qwen3Aligner: WordAligner, @unchecked Sendable {
     }
 }
 
-// MARK: - Speaking a sentence
+// MARK: - Speaking sentences
 
-/// Speaks a sentence and times its words: the voice makes the audio and, unless it timed the words itself, the
-/// aligner listens to it.
+/// Speaks sentences and times their words: the voice makes the audio, several sentences at once, and the aligner
+/// listens to each for when its words are said.
 struct SentenceSpeaker: Sendable {
     let synthesizer: any SpeechSynthesizer
     let aligner: any WordAligner
 
-    var identifier: String { "\(synthesizer.identifier)+\(aligner.identifier)" }
+    /// Part of the key sentences are saved under. `spoken-numbers` marks speech made with numbers written out as
+    /// words (`SpokenNumbers`), so sentences saved before, with numbers that were never highlighted in time, are
+    /// made again.
+    var identifier: String { "\(synthesizer.identifier)+\(aligner.identifier)+spoken-numbers" }
 
-    func speak(_ sentence: ReadingSentence, voice: String, language: ListenLanguage) async throws -> SpokenSentence {
-        let audio = try await synthesizer.synthesize(sentence.spokenText, voice: voice, language: language)
-        try Task.checkCancellation()
-        let duration = Double(audio.samples.count) / Double(audio.sampleRate)
-        let words = sentence.words.map(\.text)
-        if let known = audio.wordTimes {
-            let times = WordTimingMatcher.timings(for: words, aligned: known, duration: duration)
-            return SpokenSentence(samples: audio.samples, sampleRate: audio.sampleRate, wordTimes: times)
+    func speak(_ sentences: [ReadingSentence], voice: String, language: ListenLanguage) async throws -> [SpokenSentence] {
+        let texts = sentences.map { $0.voiceText(in: language) }
+        let audio = try await synthesizer.synthesize(texts, voice: voice, language: language)
+        guard audio.count == sentences.count else { throw SpeechEngineError.noAudio }
+        var spoken: [SpokenSentence] = []
+        for (index, sentence) in sentences.enumerated() {
+            try Task.checkCancellation()
+            var speech = audio[index]
+            if speech.samples.isEmpty {
+                // Rarely the voice ends a sentence before saying anything. A short silence keeps the reading going
+                // (its words are highlighted in turn) rather than losing the whole document over it.
+                speech.samples = [Float](repeating: 0, count: speech.sampleRate / 2)
+            }
+            // A sentence still plays if timing fails; its words are then spread over it by length.
+            let aligned = (try? await aligner.align(samples: speech.samples, sampleRate: speech.sampleRate, text: texts[index], language: language)) ?? []
+            spoken.append(SpokenSentence(
+                samples: speech.samples,
+                sampleRate: speech.sampleRate,
+                wordTimes: Self.wordTimes(for: sentence, aligned: aligned, samples: speech.samples, sampleRate: speech.sampleRate, language: language)
+            ))
         }
-        // A sentence still plays if timing fails; its words are then spread over it by length.
-        let aligned = (try? await aligner.align(samples: audio.samples, sampleRate: audio.sampleRate, text: sentence.spokenText, language: language)) ?? []
+        return spoken
+    }
+
+    /// When each of the sentence's words is said. The aligner times the words the voice said (a number is several),
+    /// so each word of the sentence runs from the start of the first of its spoken words to the end of the last.
+    static func wordTimes(for sentence: ReadingSentence, aligned: [AlignedWordTime], samples: [Float], sampleRate: Int, language: ListenLanguage) -> [WordTime] {
+        let groups = sentence.spokenWords(in: language)
+        let spokenWords = groups.flatMap { $0 }
+        let duration = Double(samples.count) / Double(max(sampleRate, 1))
         // The aligner tends to start the word after a pause where the pause begins.
         let times = SpeechPauses.movingStarts(
-            of: WordTimingMatcher.timings(for: words, aligned: aligned, duration: duration),
-            outOf: SpeechPauses.find(in: audio.samples, sampleRate: audio.sampleRate),
-            words: words,
+            of: WordTimingMatcher.timings(for: spokenWords, aligned: aligned, duration: duration),
+            outOf: SpeechPauses.find(in: samples, sampleRate: sampleRate),
+            words: spokenWords,
             duration: duration
         )
-        return SpokenSentence(samples: audio.samples, sampleRate: audio.sampleRate, wordTimes: times)
+        var result: [WordTime] = []
+        var next = 0
+        for group in groups {
+            let first = times[next]
+            let last = times[next + group.count - 1]
+            result.append(WordTime(start: first.start, end: max(last.end, first.start)))
+            next += group.count
+        }
+        return result
     }
 }
