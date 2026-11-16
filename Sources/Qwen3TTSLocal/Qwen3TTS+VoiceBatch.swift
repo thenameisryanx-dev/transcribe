@@ -207,7 +207,12 @@ extension Qwen3TTSModel {
             compiledBatchTalkerSteps[rows] = compiled
         }
         let out = compiled([embeds, offsets] + cache.flatMap { [$0.0, $0.1] })
-        let newCache = (0..<layers).map { (out[2 + $0 * 2], out[3 + $0 * 2]) }
+        // Typed one step at a time: with MLXArray's arithmetic in play, Swift 6.3 couldn't work out `$0 * 2` in time.
+        var newCache: [(MLXArray, MLXArray)] = []
+        for layer in 0..<layers {
+            let first: Int = 2 + layer * 2
+            newCache.append((out[first], out[first + 1]))
+        }
         return (out[0], out[1], newCache)
     }
 
