@@ -113,4 +113,30 @@ final class ListenBenchmarkTests: XCTestCase {
         XCTAssertEqual(model.playback, .stopped, "Didn't finish reading")
         XCTAssertEqual(stops, 0)
     }
+
+    /// Reads the benchmark text with the real Kokoro voice and checks what was wrong with it before: sentences made
+    /// in pieces stopped for most of a second where the pieces met, and the aligner's word times were a quarter of a
+    /// second off on average. Kokoro now times its own words, so no word starts in a pause.
+    func testKokoroReadsWithoutLongPausesAndTimesItsOwnWords() async throws {
+        guard ProcessInfo.processInfo.environment["LISTEN_BENCHMARK"] == "1" else {
+            throw XCTSkip("Set LISTEN_BENCHMARK=1 to check the real voice.")
+        }
+        try XCTSkipUnless(SpeechModelFiles.isDownloaded(for: .kokoro), "The Kokoro model isn't downloaded.")
+        let voice = KokoroSynthesizer()
+        try await voice.load { _, _ in }
+        for sentence in ReadingDocument(text: Self.text).sentences {
+            let speech = try await voice.synthesize(sentence.spokenText, voice: ListenEngine.kokoro.defaultVoiceID, language: .english)
+            let times = try XCTUnwrap(speech.wordTimes, "Kokoro didn't time its words")
+            XCTAssertEqual(times.count, sentence.spokenText.split(separator: " ").count)
+            let duration = Double(speech.samples.count) / Double(speech.sampleRate)
+            let pauses = SpeechPauses.find(in: speech.samples, sampleRate: speech.sampleRate)
+            for pause in pauses where pause.lowerBound > 0.05 && pause.upperBound < duration - 0.05 {
+                XCTAssertLessThanOrEqual(pause.upperBound - pause.lowerBound, KokoroPieces.longestPause + 0.05, "A long pause in “\(sentence.spokenText)”")
+            }
+            for word in times {
+                XCTAssertFalse(pauses.contains { $0.lowerBound + 0.03 < word.start && word.start < $0.upperBound - 0.03 }, "“\(word.text)” starts in a pause")
+            }
+            print(String(format: "BENCH kokoro: %.2fs, %d words, %d pauses", duration, times.count, pauses.count))
+        }
+    }
 }

@@ -182,15 +182,33 @@ final class ListenAudioPlayer {
         pausedTime = nil
     }
 
-    /// Seconds into the current sentence, in the voice's own time (not sped up), or nil when nothing is scheduled.
+    /// Seconds into the current sentence that can be heard now, in the voice's own time (not sped up), or nil when
+    /// nothing is scheduled.
     var currentTime: Double? {
         if let pausedTime { return pausedTime }
         guard isPlaying,
               let nodeTime = player.lastRenderTime,
               let playerTime = player.playerTime(forNodeTime: nodeTime)
         else { return nil }
-        let frame = min(startFrame + max(playerTime.sampleTime, 0), frameCount)
-        return Double(frame) / sampleRate
+        return Self.heardTime(
+            rendered: Double(playerTime.sampleTime) / sampleRate,
+            from: Double(startFrame) / sampleRate,
+            length: Double(frameCount) / sampleRate,
+            latency: outputLatency,
+            rate: rate
+        )
+    }
+
+    /// The player hands audio on before it's heard: the speed change holds about 85 ms of it, and the output device
+    /// (a Bluetooth speaker most of all) more. Following the player's own position put the highlight that far ahead.
+    private var outputLatency: Double {
+        timePitch.latency + engine.outputNode.presentationLatency
+    }
+
+    /// Where the sound being heard is in a sentence: `rendered` seconds of it handed on since playing from `from`,
+    /// less what's still on its way to the speaker. Latency passes at the playback rate, which is in sped-up time.
+    nonisolated static func heardTime(rendered: Double, from start: Double, length: Double, latency: Double, rate: Double) -> Double {
+        min(start + max(rendered - latency * rate, 0), length)
     }
 
     private func connect(sampleRate rate: Double) throws {

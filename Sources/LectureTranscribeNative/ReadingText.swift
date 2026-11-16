@@ -359,3 +359,106 @@ enum WordTimingMatcher {
         return result
     }
 }
+
+// MARK: - Pauses
+
+/// Quiet stretches in a sentence's audio, used to correct word times. A word can't start in the middle of a pause,
+/// but an aligner often says so: it starts the word after a pause where the pause begins, so the highlight reached
+/// it most of a second before it was heard.
+enum SpeechPauses {
+    /// Shorter quiet stretches are left alone: a stop consonant ("p", "t", "k") is briefly silent inside a word.
+    static let shortestPause = 0.15
+    static let window = 0.01
+
+    /// The pauses in some audio, as start and end times in seconds. Quiet is judged against the sentence's own
+    /// loudness, so a soft voice's pauses are found too.
+    static func find(in samples: [Float], sampleRate: Int) -> [ClosedRange<Double>] {
+        let size = max(Int(Double(sampleRate) * window), 1)
+        let count = samples.count / size
+        guard count > 0 else { return [] }
+        var levels = [Float](repeating: 0, count: count)
+        samples.withUnsafeBufferPointer { buffer in
+            for index in 0..<count {
+                var sum: Float = 0
+                for sample in buffer[(index * size)..<((index + 1) * size)] { sum += sample * sample }
+                levels[index] = (sum / Float(size)).squareRoot()
+            }
+        }
+        let loud = levels.sorted()[Int(Double(count - 1) * 0.9)]
+        guard loud > 0 else { return [] }
+        let quiet = max(loud * 0.06, 0.002)
+        let shortest = Int((shortestPause / window).rounded(.up))
+        var pauses: [ClosedRange<Double>] = []
+        var start: Int?
+        for index in 0...count {
+            if index < count, levels[index] < quiet {
+                if start == nil { start = index }
+            } else if let first = start {
+                if index - first >= shortest {
+                    pauses.append(Double(first * size) / Double(sampleRate)...Double(index * size) / Double(sampleRate))
+                }
+                start = nil
+            }
+        }
+        return pauses
+    }
+
+    /// Moves words the timings start inside a pause to where speech resumes. Several words put in the same pause are
+    /// spread from there, by length, towards the next word.
+    static func movingStarts(of times: [WordTime], outOf pauses: [ClosedRange<Double>], words: [String], duration: Double) -> [WordTime] {
+        var times = times
+        for pause in pauses {
+            let inside = times.indices.filter { times[$0].start >= pause.lowerBound && times[$0].start < pause.upperBound }
+            guard let first = inside.first, let last = inside.last else { continue }
+            let next = last + 1 < times.count ? times[last + 1].start : duration
+            // Without the next word to go by, a word gets about a third of a second.
+            let end = min(max(next, pause.upperBound), pause.upperBound + 0.3 * Double(inside.count))
+            let weights = inside.map { Double(max(words.indices.contains($0) ? words[$0].count : 1, 1)) }
+            let total = weights.reduce(0, +)
+            var cursor = pause.upperBound
+            for (offset, index) in (first...last).enumerated() {
+                let length = (end - pause.upperBound) * weights[offset] / total
+                times[index] = WordTime(start: cursor, end: min(max(times[index].end, cursor + length), max(duration, cursor)))
+                cursor += length
+            }
+        }
+        return times
+    }
+}
+
+extension SpeechPauses {
+    /// Shortens pauses inside the audio to at most `longest` seconds by cutting out their middle, moving the word
+    /// times after each cut back with it. Kokoro trails off before the end of each piece it makes, so a sentence made
+    /// in pieces otherwise stops for half a second where its pieces meet. The silence before the first word and after
+    /// the last is left alone.
+    static func shortening(_ samples: [Float], sampleRate: Int, words: [AlignedWordTime], longest: Double) -> (samples: [Float], words: [AlignedWordTime]) {
+        let rate = Double(sampleRate)
+        let keep = Int(longest * rate)
+        var cuts: [Range<Int>] = []
+        for pause in find(in: samples, sampleRate: sampleRate) {
+            let start = Int(pause.lowerBound * rate)
+            let end = Int(pause.upperBound * rate)
+            guard start > 0, end < samples.count, end - start > keep else { continue }
+            // Keep each side of the pause, so the words before and after still fade naturally.
+            let middle = start + keep / 2
+            cuts.append(middle..<(end - (keep - keep / 2)))
+        }
+        guard !cuts.isEmpty else { return (samples, words) }
+        var shortened: [Float] = []
+        shortened.reserveCapacity(samples.count)
+        var next = 0
+        for cut in cuts {
+            shortened += samples[next..<cut.lowerBound]
+            next = cut.upperBound
+        }
+        shortened += samples[next...]
+        func moved(_ time: Double) -> Double {
+            let sample = Int(time * rate)
+            let removed = cuts.reduce(0) { total, cut in
+                total + (sample >= cut.upperBound ? cut.count : (sample > cut.lowerBound ? sample - cut.lowerBound : 0))
+            }
+            return Double(sample - removed) / rate
+        }
+        return (shortened, words.map { AlignedWordTime(text: $0.text, start: moved($0.start), end: moved($0.end)) })
+    }
+}

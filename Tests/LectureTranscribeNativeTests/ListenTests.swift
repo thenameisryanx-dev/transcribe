@@ -31,11 +31,15 @@ final class FakeSynthesizer: SpeechSynthesizer, @unchecked Sendable {
         lock.withLock { loaded = true }
     }
 
-    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> (samples: [Float], sampleRate: Int) {
+    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> SynthesizedSpeech {
         if secondsToMake > 0 { try await Task.sleep(for: .seconds(secondsToMake)) }
         lock.withLock { said.append(text) }
         let words = text.split(separator: " ").count
-        return ([Float](repeating: 0, count: Int(Double(max(words, 1) * Self.sampleRate) * secondsPerWord)), Self.sampleRate)
+        return SynthesizedSpeech(
+            samples: [Float](repeating: 0, count: Int(Double(max(words, 1) * Self.sampleRate) * secondsPerWord)),
+            sampleRate: Self.sampleRate,
+            wordTimes: nil
+        )
     }
 
     func unload() {
@@ -740,5 +744,204 @@ final class ListenModelTests: XCTestCase {
         XCTAssertEqual(ListenLanguage.automatic.resolved(for: "Bonjour tout le monde, comment allez-vous aujourd'hui ?"), .french)
         XCTAssertEqual(ListenLanguage.automatic.resolved(for: "The quick brown fox jumps over the lazy dog."), .english)
         XCTAssertEqual(ListenLanguage.german.resolved(for: "The quick brown fox."), .german)
+    }
+}
+
+// MARK: - Kokoro pieces
+
+final class KokoroPiecesTests: XCTestCase {
+    /// Units of `size` tokens each (not punctuation).
+    private func tokens(_ sizes: [Int]) -> [[Int]] {
+        sizes.map { [Int](repeating: 50, count: $0) }
+    }
+
+    func testAShortSentenceIsOnePiece() {
+        let units = ["It", "lets", "some", "molecules", "pass."]
+        XCTAssertEqual(KokoroPieces.plan(units: units, tokens: tokens([2, 4, 3, 9, 5])), [0..<5])
+    }
+
+    func testALongSentenceIsCutAfterItsCommaAndEveryPieceFits() {
+        let units = ["Water", "crosses", "by", "osmosis,", "moving", "toward", "the", "side", "with", "more", "dissolved", "particles."]
+        let sizes = [5, 6, 3, 8, 6, 5, 2, 4, 4, 4, 9, 10]
+        let pieces = KokoroPieces.plan(units: units, tokens: tokens(sizes))
+        XCTAssertEqual(pieces, [0..<4, 4..<12])
+        for piece in pieces {
+            XCTAssertLessThanOrEqual(KokoroPieces.ids(for: piece, tokens: tokens(sizes)).count, KokoroPieces.tokenBudget)
+        }
+    }
+
+    func testWithoutAPauseItCutsBeforeAJoiningWordAndLeavesNoStub() {
+        // 14 units of 5 tokens: too long for one piece, and greedy packing would strand the last word or two.
+        var units = (0..<14).map { "word\($0)" }
+        units[7] = "and"
+        let pieces = KokoroPieces.plan(units: units, tokens: tokens([Int](repeating: 5, count: 14)))
+        XCTAssertEqual(pieces, [0..<7, 7..<14])
+    }
+
+    func testIdsPutSpacesBetweenUnitsAndPaddingAround() {
+        XCTAssertEqual(KokoroPieces.ids(for: 0..<2, tokens: [[50, 51], [52]]), [0, 50, 51, 16, 52, 0])
+    }
+
+    func testLayoutFindsWhereEachUnitsSpeechEnds() {
+        let layout = KokoroPieces.layout(of: [[50, 51], [52, 3]])
+        XCTAssertEqual(layout.map(\.first), [1, 4])
+        XCTAssertEqual(layout.map(\.end), [3, 6])
+        // The comma (token 3) isn't speech.
+        XCTAssertEqual(layout.map(\.speechEnd), [3, 5])
+    }
+
+    func testJoiningTrimsSilenceAndTimesEachWordFromTheVoicesDurations() {
+        // "ab cd," then "ef.": padding, sounds, a space, sounds, a comma, padding; durations in 25 ms frames.
+        let first = KokoroPieces.Piece(units: 0..<2, tokens: [[50, 51], [52, 3]], audio: [Float](repeating: 0.5, count: 31 * 600), durations: [10, 2, 2, 1, 2, 8, 6])
+        let second = KokoroPieces.Piece(units: 2..<3, tokens: [[53, 4]], audio: [Float](repeating: 0.5, count: 30 * 600), durations: [12, 4, 10, 4])
+        let (samples, words) = KokoroPieces.join([first, second], units: ["ab", "cd,", "ef."])
+
+        // First piece: 0.12 s before its first sound, its 0.175 s of sounds, and the comma's pause cut to 0.16 s.
+        let firstLength = 2_880 + 4_200 + 3_840
+        // Second piece: 0.02 s before its first sound, then its sound and the full stop's 0.25 s pause.
+        let secondLength = 480 + 2_400 + 6_000
+        XCTAssertEqual(samples.count, firstLength + secondLength)
+        XCTAssertEqual(words.map(\.text), ["ab", "cd,", "ef."])
+        XCTAssertEqual(words[0].start, 0.12, accuracy: 0.001)
+        XCTAssertEqual(words[1].start, 0.12 + 0.125, accuracy: 0.001)
+        XCTAssertEqual(words[2].start, Double(firstLength) / 24_000 + 0.02, accuracy: 0.001)
+        // The joins fade, so nothing clicks.
+        XCTAssertEqual(samples[0], 0.5)
+        XCTAssertEqual(samples[firstLength], 0)
+        XCTAssertEqual(samples.last, 0)
+    }
+
+    func testUnitTokensComeFromTheWholeSentenceWhenTheSpacesLineUp() {
+        let tokenize: (String) -> [Int] = { text in
+            [1] + text.split(separator: " ").map { [Int](repeating: 50 + $0.count, count: $0.count) }.joined(separator: [16]) + [2]
+        }
+        XCTAssertEqual(KokoroSynthesizer.unitTokens(["ab", "cde"], text: "ab cde", tokenize: tokenize), [[52, 52], [53, 53, 53]])
+    }
+
+    func testUnitTokensFallBackToEachUnitWhenAUnitIsSpokenAsTwoWords() {
+        // "can't" is spoken as "can not": one more space than there are units.
+        let tokenize: (String) -> [Int] = { text in
+            let spoken = text.replacingOccurrences(of: "can't", with: "can not")
+            return [1] + spoken.split(separator: " ").map { [Int](repeating: 50 + $0.count, count: $0.count) }.joined(separator: [16]) + [2]
+        }
+        XCTAssertEqual(
+            KokoroSynthesizer.unitTokens(["I", "can't"], text: "I can't", tokenize: tokenize),
+            [[51], [53, 53, 53, 16, 53, 53, 53]]
+        )
+    }
+}
+
+// MARK: - Pauses and what's heard
+
+final class SpeechPausesTests: XCTestCase {
+    /// Half a second of sound, `gap` seconds of silence, then half a second of sound, at 1 kHz.
+    private func audio(gap: Double) -> [Float] {
+        let tone = (0..<500).map { Float(sin(Double($0) * 0.5)) * 0.5 }
+        return tone + [Float](repeating: 0, count: Int(gap * 1_000)) + tone
+    }
+
+    func testFindsAPauseButNotAShortGap() {
+        let pauses = SpeechPauses.find(in: audio(gap: 0.4), sampleRate: 1_000)
+        XCTAssertEqual(pauses.count, 1)
+        XCTAssertEqual(pauses[0].lowerBound, 0.5, accuracy: 0.02)
+        XCTAssertEqual(pauses[0].upperBound, 0.9, accuracy: 0.02)
+        XCTAssertTrue(SpeechPauses.find(in: audio(gap: 0.08), sampleRate: 1_000).isEmpty)
+    }
+
+    func testAWordStartedInAPauseMovesToWhereSpeechResumes() {
+        let times = [WordTime(start: 0, end: 0.5), WordTime(start: 0.55, end: 1.0), WordTime(start: 1.1, end: 1.4)]
+        let moved = SpeechPauses.movingStarts(of: times, outOf: [0.5...0.9], words: ["one", "two", "three"], duration: 1.4)
+        XCTAssertEqual(moved[0], times[0])
+        XCTAssertEqual(moved[1].start, 0.9)
+        XCTAssertEqual(moved[2], times[2])
+    }
+
+    func testSeveralWordsInOnePauseAreSpreadAfterIt() {
+        let times = [WordTime(start: 0.6, end: 0.6), WordTime(start: 0.7, end: 0.7), WordTime(start: 1.5, end: 1.8)]
+        let moved = SpeechPauses.movingStarts(of: times, outOf: [0.5...0.9], words: ["ab", "ab", "end"], duration: 2)
+        XCTAssertEqual(moved[0].start, 0.9, accuracy: 0.001)
+        XCTAssertEqual(moved[1].start, 1.2, accuracy: 0.001)
+        XCTAssertEqual(moved[2], times[2])
+    }
+
+    func testTheHeardPositionTrailsWhatThePlayerHandedOnByTheOutputLatency() {
+        // At double speed 0.1 s of latency holds 0.2 s of the sentence.
+        XCTAssertEqual(ListenAudioPlayer.heardTime(rendered: 1, from: 2, length: 10, latency: 0.1, rate: 2), 2.8, accuracy: 1e-9)
+        // Just after playing from a word, it stays at that word rather than going back before it.
+        XCTAssertEqual(ListenAudioPlayer.heardTime(rendered: 0.05, from: 2, length: 10, latency: 0.1, rate: 1), 2)
+        XCTAssertEqual(ListenAudioPlayer.heardTime(rendered: 20, from: 2, length: 10, latency: 0.1, rate: 1), 10)
+    }
+}
+
+// MARK: - Voices that time their own words
+
+/// A voice that says when it spoke each word, as Kokoro does.
+final class TimedSynthesizer: SpeechSynthesizer, @unchecked Sendable {
+    let identifier = "timed-voice"
+    var isLoaded = true
+    func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {}
+    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> SynthesizedSpeech {
+        let units = text.split(separator: " ").map(String.init)
+        return SynthesizedSpeech(
+            samples: [Float](repeating: 0, count: units.count * 500),
+            sampleRate: 1_000,
+            wordTimes: units.enumerated().map { AlignedWordTime(text: $1, start: Double($0) * 0.5 + 0.2, end: Double($0) * 0.5 + 0.4) }
+        )
+    }
+    func unload() {}
+}
+
+final class CountingAligner: WordAligner, @unchecked Sendable {
+    let identifier = "counting-aligner"
+    var isLoaded = true
+    private(set) var calls = 0
+    func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {}
+    func align(samples: [Float], sampleRate: Int, text: String, language: ListenLanguage) async throws -> [AlignedWordTime] {
+        calls += 1
+        return []
+    }
+    func unload() {}
+}
+
+final class SentenceSpeakerTests: XCTestCase {
+    func testAVoicesOwnWordTimesAreUsedWithoutTheAligner() async throws {
+        let aligner = CountingAligner()
+        let speaker = SentenceSpeaker(synthesizer: TimedSynthesizer(), aligner: aligner)
+        let sentence = ReadingDocument(text: "Cells need energy, mostly.").sentences[0]
+        let spoken = try await speaker.speak(sentence, voice: "any", language: .english)
+        XCTAssertEqual(aligner.calls, 0)
+        XCTAssertEqual(spoken.wordTimes.map(\.start), [0.2, 0.7, 1.2, 1.7])
+    }
+
+    func testAVoiceWithoutWordTimesIsTimedByTheAligner() async throws {
+        let aligner = CountingAligner()
+        let speaker = SentenceSpeaker(synthesizer: FakeSynthesizer(), aligner: aligner)
+        let sentence = ReadingDocument(text: "Cells need energy.").sentences[0]
+        _ = try await speaker.speak(sentence, voice: "any", language: .english)
+        XCTAssertEqual(aligner.calls, 1)
+    }
+}
+
+final class PauseShorteningTests: XCTestCase {
+    func testALongPauseInsideTheSentenceIsShortenedAndLaterWordsMoveBack() {
+        let tone = (0..<500).map { Float(sin(Double($0) * 0.5)) * 0.5 }
+        // 0.1 s of silence first, a word, 0.8 s of silence, a word, 0.1 s of silence.
+        let audio = [Float](repeating: 0, count: 100) + tone + [Float](repeating: 0, count: 800) + tone + [Float](repeating: 0, count: 100)
+        let words = [AlignedWordTime(text: "one", start: 0.1, end: 0.6), AlignedWordTime(text: "two", start: 1.4, end: 1.9)]
+        let (samples, moved) = SpeechPauses.shortening(audio, sampleRate: 1_000, words: words, longest: 0.3)
+        XCTAssertEqual(samples.count, audio.count - 500, accuracy: 20)
+        XCTAssertEqual(moved[0], words[0])
+        XCTAssertEqual(moved[1].start, 0.9, accuracy: 0.02)
+        // The silence before the first word and after the last stays.
+        XCTAssertEqual(Array(samples.prefix(100)), [Float](repeating: 0, count: 100))
+    }
+
+    func testShortPausesAreLeftAlone() {
+        let tone = (0..<500).map { Float(sin(Double($0) * 0.5)) * 0.5 }
+        let audio = tone + [Float](repeating: 0, count: 250) + tone
+        let words = [AlignedWordTime(text: "one", start: 0, end: 0.5), AlignedWordTime(text: "two", start: 0.75, end: 1.25)]
+        let (samples, moved) = SpeechPauses.shortening(audio, sampleRate: 1_000, words: words, longest: 0.3)
+        XCTAssertEqual(samples, audio)
+        XCTAssertEqual(moved, words)
     }
 }
