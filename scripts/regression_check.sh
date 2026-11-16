@@ -65,8 +65,12 @@ in_app 'editor.restoreDeletedTracks(kind)'
 # Listen reads text aloud: clicking a word jumps there, and Edit Text goes back to editing.
 in_app 'onClickLocation: model.jump(toLocation:)'
 in_app 'Button("Edit Text", action: model.editText)'
-# A voice slower than the reading gets a head start, which Start Now skips.
-in_app 'Button("Start Now", action: model.startNow)'
+# Play makes the speech first, with progress and a Cancel button, and the reader opens once it's made.
+in_app 'Button("Cancel", action: model.cancelPreparing)'
+in_app 'Picker("Sentences at Once", selection: $model.sentencesAtOnce)'
+# Listen reads with Qwen3-TTS only, from the copy in Sources/Qwen3TTSLocal whose batching works.
+not_in_app 'KokoroSynthesizer'
+in_app 'synthesizeVoiceBatch('
 in_app 'ListenSettingsSection(model: viewModel.listen)'
 # Removed on purpose; must not come back.
 not_in_app '.disabled(!viewModel.canOpenOutputFolder)'

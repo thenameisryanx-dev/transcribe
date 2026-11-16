@@ -66,6 +66,16 @@ final class SpokenSentenceStore: @unchecked Sendable {
         return SpokenSentence(samples: samples, sampleRate: header.sampleRate, wordTimes: header.wordTimes)
     }
 
+    /// Whether a sentence is saved, complete, without reading its audio.
+    func contains(_ key: String, wordCount: Int) -> Bool {
+        guard let headerData = try? Data(contentsOf: headerURL(key)),
+              let header = try? JSONDecoder().decode(Header.self, from: headerData),
+              header.wordTimes.count == wordCount,
+              let size = (try? fileManager.attributesOfItem(atPath: audioURL(key).path))?[.size] as? Int
+        else { return false }
+        return size == header.sampleCount * MemoryLayout<Float>.size
+    }
+
     /// Saves a sentence; failing to (a full disk) only means it gets spoken afresh next time.
     func save(_ sentence: SpokenSentence, key: String) {
         let header = Header(sampleRate: sentence.sampleRate, sampleCount: sentence.samples.count, wordTimes: sentence.wordTimes)
