@@ -21,7 +21,8 @@ struct MediaTrack: Equatable, Sendable {
     var codecTag = ""
 }
 
-/// An audio or subtitle track in the track editor: one of the video's own, or a subtitle file being added.
+/// An audio or subtitle track in the track editor: one of the video's own, a subtitle file being added, or a new
+/// audio track mixing several of the video's own together.
 struct EditableTrack: Identifiable, Equatable {
     enum Kind: String, Sendable {
         case audio
@@ -33,6 +34,8 @@ struct EditableTrack: Identifiable, Equatable {
         case original(index: Int)
         /// A subtitle file to add.
         case file(path: String)
+        /// A new audio track that plays these audio tracks of the video together (by their indices).
+        case mix(indices: [Int])
     }
 
     let id = UUID()
@@ -49,8 +52,14 @@ struct EditableTrack: Identifiable, Equatable {
     /// Unticked tracks of the video are left out of the copy.
     var keep = true
 
+    /// Added to the list rather than one of the video's own tracks: removed instead of unticked, and not exported.
     var isAdded: Bool {
-        if case .file = source { return true }
+        if case .original = source { return false }
+        return true
+    }
+
+    var isCombined: Bool {
+        if case .mix = source { return true }
         return false
     }
 
@@ -81,6 +90,12 @@ struct EditableTrack: Identifiable, Equatable {
             return parts.joined(separator: " · ")
         case let .file(path):
             return "Added · " + (path as NSString).lastPathComponent
+        case let .mix(indices):
+            var parts = ["Combined · Tracks " + indices.map { "\($0 + 1)" }.joined(separator: " + "), Self.codecName(codec)]
+            if let channels = Self.channelName(channels) {
+                parts.append(channels)
+            }
+            return parts.joined(separator: " · ")
         }
     }
 
@@ -127,6 +142,7 @@ struct EditableTrack: Identifiable, Equatable {
         switch source {
         case let .original(index): entry["index"] = index
         case let .file(path): entry["file"] = path
+        case let .mix(indices): entry["mix"] = indices
         }
         return entry
     }
@@ -151,7 +167,7 @@ enum TrackLanguage {
 }
 
 /// Lists a video's audio and subtitle tracks and saves a copy with them removed, reordered, retagged, or with
-/// subtitle files added. Like a document: Save writes the changes into the video, Save As writes another file
+/// subtitle files added, or with several audio tracks combined into one. Like a document: Save writes the changes into the video, Save As writes another file
 /// (in the same format) and goes on editing that one. Either way the file is replaced only once the new one is
 /// complete, so a failed or cancelled save leaves it as it was. Any of the video's own tracks can also be exported
 /// as a file of its own.
@@ -414,9 +430,107 @@ final class TrackEditorModel: ObservableObject {
         }
     }
 
-    /// Removes an added subtitle file (the video's own tracks are unticked instead).
+    /// Removes an added subtitle file or combined audio track, leaving the video's own tracks in the list.
     func removeAddedTrack(_ id: EditableTrack.ID) {
+        audioTracks.removeAll { $0.id == id && $0.isAdded }
         subtitleTracks.removeAll { $0.id == id && $0.isAdded }
+    }
+
+    /// Deletes any track from the list: the copy is saved without it. One of the video's own tracks can be brought
+    /// back with `restoreDeletedTracks(_:)` until the video is saved or reopened.
+    func deleteTrack(_ id: EditableTrack.ID) {
+        audioTracks.removeAll { $0.id == id }
+        subtitleTracks.removeAll { $0.id == id }
+    }
+
+    /// The video's own tracks of `kind` that were deleted from the list since it was opened or saved.
+    func deletedTracks(_ kind: EditableTrack.Kind) -> [EditableTrack] {
+        let listed = Set((audioTracks + subtitleTracks).map(\.id))
+        return savedTracks.filter { $0.kind == kind && !listed.contains($0.id) }
+    }
+
+    /// Puts deleted tracks of `kind` back where they were among the video's own tracks, as they were when loaded.
+    func restoreDeletedTracks(_ kind: EditableTrack.Kind) {
+        let deleted = deletedTracks(kind)
+        guard !deleted.isEmpty else { return }
+        let saved = savedTracks.filter { $0.kind == kind }
+        update(kind) { tracks in
+            for track in deleted {
+                let position = saved.firstIndex(of: track) ?? saved.count
+                // After the last listed track that came before it in the file (and after any added at the top).
+                let before = Set(saved.prefix(position).map(\.id))
+                let insertAt = tracks.lastIndex(where: { before.contains($0.id) }).map { $0 + 1 }
+                    ?? (tracks.firstIndex(where: { !$0.isAdded }) ?? tracks.count)
+                tracks.insert(track, at: insertAt)
+            }
+        }
+    }
+
+    // MARK: - Combining audio tracks
+
+    /// The video's own audio tracks, which can be combined into one.
+    var combinableAudioTracks: [EditableTrack] {
+        audioTracks.filter { !$0.isAdded }
+    }
+
+    /// Combining needs at least two of the video's audio tracks.
+    var canCombineAudio: Bool {
+        videoPath != nil && isEditable && !isLoading && !isBusy && combinableAudioTracks.count >= 2
+    }
+
+    /// True when a save will encode a combined track (everything else is copied as is).
+    var hasCombinedAudio: Bool {
+        audioTracks.contains { $0.keep && $0.isCombined }
+    }
+
+    /// The name offered for a track combining these tracks: their titles joined, like "Game + Mic", or their numbers
+    /// when any has no title, like "Tracks 2 + 3".
+    func suggestedCombinedName(for ids: Set<EditableTrack.ID>) -> String {
+        let sources = combinableAudioTracks.filter { ids.contains($0.id) }
+        let titles = sources.map { $0.title.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if !titles.isEmpty, !titles.contains(where: \.isEmpty) {
+            return titles.joined(separator: " + ")
+        }
+        let numbers = sources.compactMap { track -> String? in
+            if case let .original(index) = track.source { return "\(index + 1)" }
+            return nil
+        }
+        return numbers.isEmpty ? "Combined" : "Tracks " + numbers.joined(separator: " + ")
+    }
+
+    /// Adds an audio track that plays the chosen tracks of the video together, at the top of the list as the default
+    /// one, so players start with it. It's titled `name` (players list tracks by title), or the suggested name when
+    /// that's blank, and in the language the chosen tracks share, if they share one. With `keepingSources` off, the
+    /// chosen tracks are left out of the copy. Returns false when fewer than two of the video's audio tracks are chosen.
+    @discardableResult
+    func addCombinedAudioTrack(from ids: Set<EditableTrack.ID>, name: String = "", keepingSources: Bool = true) -> Bool {
+        let sources = combinableAudioTracks.filter { ids.contains($0.id) }
+        let indices = sources.compactMap { track -> Int? in
+            if case let .original(index) = track.source { return index }
+            return nil
+        }
+        guard indices.count >= 2 else { return false }
+        let languages = Set(sources.map(\.language))
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let combined = EditableTrack(
+            kind: .audio,
+            source: .mix(indices: indices),
+            codec: "aac",
+            channels: MediaTools.mixedChannelCount(sources.map(\.channels)),
+            language: languages.count == 1 ? languages.first! : "",
+            title: trimmedName.isEmpty ? suggestedCombinedName(for: ids) : trimmedName,
+            isDefault: false,
+            isForced: false
+        )
+        audioTracks.insert(combined, at: 0)
+        if !keepingSources {
+            for source in sources {
+                setKeep(source.id, kind: .audio, keep: false)
+            }
+        }
+        setDefault(combined.id, kind: .audio, isOn: true)
+        errorMessage = nil
+        return true
     }
 
     private func update(_ kind: EditableTrack.Kind, _ change: (inout [EditableTrack]) -> Void) {

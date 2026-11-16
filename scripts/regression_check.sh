@@ -56,6 +56,12 @@ in_app 'updateChecker.openDownload()'
 # Tracks exports one track as a file, from its row and from File ▸ Export Track.
 in_app 'editor.chooseExportLocation(for: track)'
 in_app 'Menu("Export Track")'
+# Tracks combines two or more audio tracks into one new track.
+in_app '"Combine Tracks…"'
+in_app 'editor.addCombinedAudioTrack(from: chosen, name: name, keepingSources: keepSources)'
+# Tracks deletes a track from its row, and restores deleted ones.
+in_app 'editor.deleteTrack(track.id)'
+in_app 'editor.restoreDeletedTracks(kind)'
 # Listen reads text aloud: clicking a word jumps there, and Edit Text goes back to editing.
 in_app 'onClickLocation: model.jump(toLocation:)'
 in_app 'Button("Edit Text", action: model.editText)'

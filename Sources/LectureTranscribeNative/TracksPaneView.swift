@@ -1,11 +1,12 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Shows a video's audio and subtitle tracks so they can be removed, reordered, retagged, added to, or exported
-/// one at a time as files of their own. Save writes the changes into the video; Save As writes another file.
+/// Shows a video's audio and subtitle tracks so they can be removed, reordered, retagged, added to, combined (audio),
+/// or exported one at a time as files of their own. Save writes the changes into the video; Save As writes another file.
 struct TracksPaneView: View {
     @ObservedObject var editor: TrackEditorModel
     @State private var isDropTargeted = false
+    @State private var isCombiningAudio = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -63,6 +64,9 @@ struct TracksPaneView: View {
             Button("Cancel", role: .cancel) { editor.resolvePendingOpen(save: nil) }
         } message: {
             Text("Your changes to its tracks will be lost if you don't save them.")
+        }
+        .sheet(isPresented: $isCombiningAudio) {
+            CombineAudioSheet(editor: editor)
         }
     }
 
@@ -137,6 +141,16 @@ struct TracksPaneView: View {
                     if editor.audioTracks.isEmpty {
                         Text("No audio tracks").foregroundStyle(.secondary)
                     }
+                    if editor.combinableAudioTracks.count >= 2 {
+                        Button {
+                            isCombiningAudio = true
+                        } label: {
+                            Label("Combine Tracks…", systemImage: "plus")
+                        }
+                        .disabled(!editor.canCombineAudio)
+                        .help("Add an audio track that plays two or more of these tracks together, like game sound and a microphone")
+                    }
+                    restoreButton(.audio)
                 } header: {
                     sectionHeader("Audio", kept: editor.keptAudioCount, total: editor.audioTracks.count)
                 } footer: {
@@ -160,6 +174,7 @@ struct TracksPaneView: View {
                         Label("Add Subtitles…", systemImage: "plus")
                     }
                     .disabled(editor.isBusy)
+                    restoreButton(.subtitle)
                 } header: {
                     sectionHeader("Subtitles", kept: editor.keptSubtitleCount, total: editor.subtitleTracks.count)
                 } footer: {
@@ -170,6 +185,21 @@ struct TracksPaneView: View {
             }
         }
         .disabled(editor.isBusy)
+    }
+
+    /// Brings back the video's own tracks deleted from the list, shown only while there are some.
+    @ViewBuilder
+    private func restoreButton(_ kind: EditableTrack.Kind) -> some View {
+        let count = editor.deletedTracks(kind).count
+        if count > 0 {
+            Button {
+                editor.restoreDeletedTracks(kind)
+            } label: {
+                Label(count == 1 ? "Restore Deleted Track" : "Restore \(count) Deleted Tracks", systemImage: "arrow.uturn.backward")
+            }
+            .disabled(editor.isBusy)
+            .help("Put the deleted tracks back in the list")
+        }
     }
 
     private func position(of track: EditableTrack, in tracks: [EditableTrack]) -> TrackRow.Position {
@@ -222,7 +252,9 @@ struct TracksPaneView: View {
                     : editor.lastExportCancelled
                     ? "Export cancelled."
                     : editor.hasChanges
-                        ? "Unsaved changes. Save writes them into the video; Save As makes a new file."
+                        ? editor.hasCombinedAudio
+                            ? "Unsaved changes. The combined audio is encoded as AAC when you save; everything else is copied as is."
+                            : "Unsaved changes. Save writes them into the video; Save As makes a new file."
                         : "Video and audio are copied without re-encoding when you save.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -577,15 +609,7 @@ private struct TrackRow: View {
             }
             .buttonStyle(.borderless)
 
-            if track.isAdded {
-                Button {
-                    editor.removeAddedTrack(track.id)
-                } label: {
-                    Image(systemName: "minus.circle")
-                }
-                .buttonStyle(.borderless)
-                .help("Remove this subtitle file from the list")
-            } else {
+            if !track.isAdded {
                 Button {
                     editor.chooseExportLocation(for: track)
                 } label: {
@@ -594,7 +618,20 @@ private struct TrackRow: View {
                 .buttonStyle(.borderless)
                 .disabled(!editor.canExport(track))
                 .help("Export this track as a .\(track.exportExtension) file")
+            } else {
+                // Keeps the Default checkboxes lined up with the rows that have an export button.
+                Image(systemName: "square.and.arrow.up")
+                    .hidden()
+                    .accessibilityHidden(true)
             }
+
+            Button {
+                editor.deleteTrack(track.id)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help(deleteHelp)
         }
         .padding(.vertical, 4)
         .contextMenu {
@@ -604,7 +641,111 @@ private struct TrackRow: View {
                 }
                 .disabled(!editor.canExport(track))
             }
+            Button("Delete Track", role: .destructive) {
+                editor.deleteTrack(track.id)
+            }
         }
+    }
+}
+
+/// Chooses which of the video's audio tracks to combine into one new track, and whether to keep them as well.
+private struct CombineAudioSheet: View {
+    @ObservedObject var editor: TrackEditorModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var chosen: Set<EditableTrack.ID> = []
+    @State private var keepSources = true
+    @State private var name = ""
+    /// Until the name is typed in, it follows the chosen tracks.
+    @State private var nameEdited = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Combine Audio Tracks")
+                .font(.headline)
+            Text("Adds an audio track that plays the chosen tracks together, at their own volumes. "
+                + "It goes at the top of the list as the default track, so players start with it.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(editor.combinableAudioTracks) { track in
+                    Toggle(isOn: Binding(
+                        get: { chosen.contains(track.id) },
+                        set: { isOn in
+                            if isOn { chosen.insert(track.id) } else { chosen.remove(track.id) }
+                        }
+                    )) {
+                        Text(label(for: track))
+                    }
+                    .toggleStyle(.checkbox)
+                }
+            }
+
+            LabeledContent("Name") {
+                TextField("Name", text: Binding(
+                    get: { name },
+                    set: { name = $0; nameEdited = true }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .labelsHidden()
+            }
+            .help("Players list the track by this name")
+
+            Toggle("Keep the separate tracks too", isOn: $keepSources)
+                .toggleStyle(.checkbox)
+                .help("Untick to leave the chosen tracks out of the copy, so it has only the combined one")
+
+            Text("The combined track is encoded as AAC when you save. The video and other tracks are still copied as is.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Add Combined Track") {
+                    editor.addCombinedAudioTrack(from: chosen, name: name, keepingSources: keepSources)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(chosen.count < 2)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+        .onAppear {
+            // Starts with the tracks the copy keeps, or all of them when fewer than two are kept.
+            let kept = editor.combinableAudioTracks.filter(\.keep)
+            chosen = Set((kept.count >= 2 ? kept : editor.combinableAudioTracks).map(\.id))
+            name = editor.suggestedCombinedName(for: chosen)
+        }
+        .onChange(of: chosen) { _, newValue in
+            if !nameEdited || name.trimmingCharacters(in: .whitespaces).isEmpty {
+                name = editor.suggestedCombinedName(for: newValue)
+                nameEdited = false
+            }
+        }
+    }
+
+    /// e.g. "Track 2 · AAC · Stereo · English · Game"
+    private func label(for track: EditableTrack) -> String {
+        var parts = [track.sourceDescription]
+        if !track.language.isEmpty {
+            parts.append(Locale.current.localizedString(forLanguageCode: track.language)?.capitalized ?? track.language)
+        }
+        let title = track.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty { parts.append(title) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+private extension TrackRow {
+    var deleteHelp: String {
+        if track.isCombined { return "Delete this combined track" }
+        if track.isAdded { return "Remove this subtitle file from the list" }
+        return "Delete this track: the copy is saved without it. Restore it from below the list until you save."
     }
 }
 

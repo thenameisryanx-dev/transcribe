@@ -145,6 +145,59 @@ final class TrackFilesTests: XCTestCase {
         XCTAssertEqual(try tools.mediaTracks(video).filter { $0.kind == "audio" }.map(\.title), ["", "Commentary"])
     }
 
+    /// The loudest sample of the audio track at `index`, in dB.
+    private func peak(_ file: URL, index: Int) throws -> Double {
+        let result = try tools.run(tools.ffmpeg, ["-hide_banner", "-nostdin", "-i", file.path, "-map", "0:\(index)", "-af", "volumedetect", "-f", "null", "-"])
+        XCTAssertEqual(result.status, 0, result.errors)
+        let line = try XCTUnwrap(result.errors.split(separator: "\n").first { $0.contains("max_volume:") })
+        let value = line.split(separator: ":").last!.replacingOccurrences(of: "dB", with: "").trimmingCharacters(in: .whitespaces)
+        return try XCTUnwrap(Double(value), String(line))
+    }
+
+    func testCombinedAudioPlaysBothTracksTogether() throws {
+        for format in Self.formats {
+            let video = videos[format]!
+            let output = directory.appendingPathComponent("combined.\(format)")
+            try tools.saveEditedTracks(video: video, output: output, plan: [
+                TrackPlanEntry(kind: "audio", source: .mix(indices: [1, 2]), language: "eng", title: "Game + Mic", isDefault: true, isForced: false),
+                track("audio", 2, "spa", "Spanish"),
+                track("subtitle", 3, "eng"),
+            ])
+            let saved = try tools.mediaTracks(output)
+            XCTAssertEqual(saved.map(\.kind), ["video", "audio", "audio", "subtitle"], format)
+            XCTAssertEqual(saved[1].codec, "aac", format)
+            XCTAssertEqual(saved[1].channels, 1, "\(format): two mono tracks mix to mono")
+            XCTAssertEqual(saved[1].title, "Game + Mic", format)
+            XCTAssertEqual(saved[1].language, "eng", format)
+            XCTAssertEqual(saved.map(\.default)[1...2], [true, false], format)
+            XCTAssertEqual(saved[2].title, "Spanish", format)
+            XCTAssertEqual(tools.duration(output), 1, accuracy: 0.2, format)
+            // Both tones at full volume: the mix peaks louder than either track alone (about 6 dB for two equal tones).
+            let single = try peak(video, index: 1)
+            let mixed = try peak(output, index: 1)
+            XCTAssertGreaterThan(mixed, single + 4, "\(format): \(mixed) dB mixed vs \(single) dB alone")
+            XCTAssertLessThanOrEqual(mixed, 0, format)
+        }
+        XCTAssertEqual(try leftovers(), [])
+    }
+
+    func testAMonoTrackCombinedWithSurroundIsSurround() throws {
+        let video = directory.appendingPathComponent("surround.mkv")
+        try ffmpeg([
+            "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=1",
+            "-f", "lavfi", "-i", "sine=duration=1",
+            "-f", "lavfi", "-i", "sine=frequency=660:duration=1",
+            "-map", "0", "-map", "1", "-map", "2",
+            "-c:v", "libx264", "-c:a", "aac", "-filter:a:1", "aformat=channel_layouts=5.1",
+            video.path,
+        ])
+        XCTAssertEqual(try tools.mediaTracks(video).compactMap(\.channels), [1, 6])
+        let saved = try save(video, "mixed", [
+            TrackPlanEntry(kind: "audio", source: .mix(indices: [1, 2]), language: "", title: "", isDefault: true, isForced: false),
+        ])
+        XCTAssertEqual(saved.map(\.channels), [6])
+    }
+
     func testPlansThatCantBeSavedAreRefused() throws {
         let mp4 = videos["mp4"]!
         func refusal(_ output: URL, _ plan: [TrackPlanEntry], replaceOriginal: Bool = false) -> String? {
@@ -164,6 +217,13 @@ final class TrackFilesTests: XCTestCase {
                        "notes.txt isn't a subtitle file the app can add (.srt, .ass, .ssa or .vtt).")
         XCTAssertEqual(refusal(other, [TrackPlanEntry(kind: "video", source: .original(index: 0), language: "", title: "", isDefault: false, isForced: false)]),
                        "Unknown track kind: 'video'.")
+        func mix(_ kind: String, _ indices: [Int]) -> TrackPlanEntry {
+            TrackPlanEntry(kind: kind, source: .mix(indices: indices), language: "", title: "", isDefault: false, isForced: false)
+        }
+        XCTAssertEqual(refusal(other, [mix("audio", [1])]), "A combined track needs two or more different audio tracks of the video.")
+        XCTAssertEqual(refusal(other, [mix("audio", [1, 1])]), "A combined track needs two or more different audio tracks of the video.")
+        XCTAssertEqual(refusal(other, [mix("audio", [1, 3])]), "The video has no audio track #3.")
+        XCTAssertEqual(refusal(other, [mix("subtitle", [1, 2])]), "Only audio tracks can be combined.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: other.path))
         XCTAssertThrowsError(try tools.saveEditedTracks(video: srt, output: directory.appendingPathComponent("x.srt"), plan: [])) {
             XCTAssertEqual($0.localizedDescription, "Tracks can only be edited in .m4v, .mkv, .mov, .mp4 videos.")
