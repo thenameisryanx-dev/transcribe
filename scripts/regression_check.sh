@@ -20,7 +20,13 @@ scripts/ensure_dev_media_tools.sh
 scripts/ensure_metal_toolchain.sh
 
 echo "[1/4] Building Swift app..."
-swift build --scratch-path "$BUILD_DIR" >/dev/null
+# Quiet when it builds; on a failure, show the compiler's errors (on GitHub they were the only clue, and were hidden).
+if ! SWIFT_BUILD_OUTPUT="$(swift build --scratch-path "$BUILD_DIR" 2>&1)"; then
+  BUILD_ERRORS="$(print -r -- "$SWIFT_BUILD_OUTPUT" | grep -E 'error: |Killed|signal [0-9]|ld: ' | grep -vE 'ld: warning|-frontend ' | cut -c1-400 | tail -80 || true)"
+  # Nothing matched (a crash with no message): show the end of the output instead.
+  print -r -- "${BUILD_ERRORS:-$(print -r -- "$SWIFT_BUILD_OUTPUT" | cut -c1-400 | tail -40)}"
+  exit 1
+fi
 
 # Core features (sidebar panes, run history, default output folder, model options, clear draft)
 # are checked by Tests/LectureTranscribeNativeTests/CoreFeaturesTests.swift.
