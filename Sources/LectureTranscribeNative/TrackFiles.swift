@@ -1,13 +1,15 @@
 import Foundation
 
-/// One track the Tracks pane saves: a track of the video or a subtitle
-/// file to add, with the language, title and flags it's saved with.
+/// One track the Tracks pane saves: a track of the video, a subtitle file to add, or a new audio track combining
+/// several of the video's, with the language, title and flags it's saved with.
 struct TrackPlanEntry: Equatable, Sendable {
     enum Source: Equatable, Sendable {
         /// A track of the video, by its index among all of the file's tracks (see `MediaTools.mediaTracks`).
         case original(index: Int)
         /// A subtitle file to add.
         case file(path: String)
+        /// A new audio track playing these audio tracks of the video together, by their indices.
+        case mix(indices: [Int])
     }
 
     let kind: String
@@ -26,6 +28,8 @@ struct TrackPlanEntry: Equatable, Sendable {
             let source: Source
             if let path = entry["file"] as? String {
                 source = .file(path: path)
+            } else if let indices = entry["mix"] as? [Int] {
+                source = .mix(indices: indices)
             } else {
                 source = .original(index: (entry["index"] as? Int) ?? -1)
             }
@@ -58,6 +62,40 @@ extension MediaTools {
     /// Handler types of .mp4/.mov subtitle tracks. Older versions of the app gave subtitles added to a .mov "text",
     /// the type of chapter tracks too; those are never enabled, so clearing their flag changes nothing.
     static let movSubtitleHandlerTypes: Set<Data> = [Data("sbtl".utf8), Data("subt".utf8), Data("text".utf8)]
+
+    /// Channel layouts a combined audio track can have, by channel count.
+    static let mixLayouts = [1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"]
+
+    /// The channels of a track combining tracks with these channel counts: the most any of them has, so 5.1 stays
+    /// 5.1 and a mono microphone is heard on both sides of a stereo mix. Unknown counts count as stereo, and counts
+    /// with no standard layout as the next one up.
+    static func mixedChannelCount(_ counts: [Int?]) -> Int {
+        let most = counts.map { $0 ?? 2 }.max() ?? 2
+        return mixLayouts.keys.sorted().first { $0 >= most } ?? 8
+    }
+
+    /// The AAC bit rate a combined track is encoded at: 192 kb/s for stereo or mono, more for surround.
+    static func mixBitRate(channels: Int) -> String {
+        channels <= 2 ? "192k" : "\(channels * 64)k"
+    }
+
+    /// The ffmpeg filter that plays `indices` (audio tracks of input 0) together into the output labelled `label`.
+    /// Each track is first brought to the same layout, then they're summed at full volume (a game and a microphone
+    /// stay as loud as they were), with a limiter so loud moments where they overlap don't clip. The limiter's
+    /// look-ahead is compensated, so the mix stays in sync with the video.
+    static func mixFilter(indices: [Int], channels: Int, label: String) -> String {
+        let layout = mixLayouts[channels] ?? "stereo"
+        var parts: [String] = []
+        var inputs = ""
+        for (n, index) in indices.enumerated() {
+            let input = "\(label)_\(n)"
+            parts.append("[0:\(index)]aformat=channel_layouts=\(layout)[\(input)]")
+            inputs += "[\(input)]"
+        }
+        parts.append("\(inputs)amix=inputs=\(indices.count):duration=longest:normalize=0,"
+            + "alimiter=limit=0.98:level=0:latency=1[\(label)]")
+        return parts.joined(separator: ";")
+    }
 
     /// Every track in the file, in order. `index` is the stream's position in the whole file (ffmpeg's `0:N`);
     /// cover art counts as an attachment.
@@ -126,8 +164,9 @@ extension MediaTools {
             .appendingPathComponent(url.lastPathComponent).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
-    /// Writes `video` with the audio and subtitle tracks in `plan`, in that order, without re-encoding. Tracks of
-    /// the original that aren't in the plan are left out. Video, cover art, fonts and chapters are kept. `output`
+    /// Writes `video` with the audio and subtitle tracks in `plan`, in that order, without re-encoding, except that a
+    /// combined audio track is mixed and encoded as AAC (see `mixFilter`). Tracks of the original that aren't in the
+    /// plan are left out. Video, cover art, fonts and chapters are kept. `output`
     /// must have the video's extension. It is the video itself only with `replaceOriginal` (Save); otherwise it
     /// must be another file (Save As). Either way the new file is written under a temporary name next to `output`
     /// and moved into place only once complete, so a failed or cancelled save leaves `output` as it was and nothing
@@ -184,6 +223,7 @@ extension MediaTools {
 
         var counts = ["audio": 0, "subtitle": 0]
         var extraInputs = 0
+        var filters: [String] = []
         for entry in plan {
             guard let n = counts[entry.kind] else { throw Failure("Unknown track kind: '\(entry.kind)'.") }
             switch entry.source {
@@ -201,6 +241,25 @@ extension MediaTools {
                 if isMOV {
                     options += ["-c:s:\(n)", "mov_text", "-tag:s:\(n)", Self.movTextTag]
                 }
+            case let .mix(indices):
+                guard entry.kind == "audio" else {
+                    throw Failure("Only audio tracks can be combined.")
+                }
+                guard Set(indices).count >= 2, Set(indices).count == indices.count else {
+                    throw Failure("A combined track needs two or more different audio tracks of the video.")
+                }
+                var channels: [Int?] = []
+                for index in indices {
+                    guard let source = originals.first(where: { $0.index == index }), source.kind == "audio" else {
+                        throw Failure("The video has no audio track #\(index).")
+                    }
+                    channels.append(source.channels)
+                }
+                let count = Self.mixedChannelCount(channels)
+                let label = "mix\(filters.count)"
+                filters.append(Self.mixFilter(indices: indices, channels: count, label: label))
+                maps += ["-map", "[\(label)]"]
+                options += ["-c:a:\(n)", "aac", "-b:a:\(n)", Self.mixBitRate(channels: count)]
             case let .original(index):
                 guard let source = originals.first(where: { $0.index == index }), source.kind == entry.kind else {
                     throw Failure("The video has no \(entry.kind) track #\(index).")
@@ -229,8 +288,9 @@ extension MediaTools {
         // Written next to the destination under a temporary name, then moved into place once complete.
         let stem = output.deletingPathExtension().lastPathComponent
         let partial = directory.appendingPathComponent(".\(stem).partial-\(ProcessInfo.processInfo.processIdentifier).\(output.pathExtension)")
+        let filterArguments = filters.isEmpty ? [] : ["-filter_complex", filters.joined(separator: ";")]
         let arguments = ["-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats", "-y"]
-            + inputs + maps + ["-c", "copy"] + options + [partial.path]
+            + inputs + filterArguments + maps + ["-c", "copy"] + options + [partial.path]
         do {
             // Copying keeps every byte of the kept tracks, so the copy is about the size of the original.
             let reader = Self.progressReader(totalSeconds: duration(video), totalBytes: size, onProgress)

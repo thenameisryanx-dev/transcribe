@@ -222,6 +222,129 @@ final class TrackEditorTests: XCTestCase {
     }
 
     @MainActor
+    func testCombinedAudioGoesFirstAsTheDefault() throws {
+        let editor = loadedEditor()
+        XCTAssertTrue(editor.canCombineAudio)
+        XCTAssertFalse(editor.hasCombinedAudio)
+        let ids = Set(editor.audioTracks.map(\.id))
+        XCTAssertTrue(editor.addCombinedAudioTrack(from: ids))
+
+        XCTAssertEqual(editor.audioTracks.count, 3)
+        let combined = editor.audioTracks[0]
+        XCTAssertTrue(combined.isCombined)
+        XCTAssertTrue(combined.isAdded)
+        XCTAssertEqual(combined.source, .mix(indices: [1, 2]))
+        XCTAssertEqual(combined.sourceDescription, "Combined · Tracks 2 + 3 · AAC · 5.1")
+        // Neither track has a title, so the mix is named by their numbers.
+        XCTAssertEqual(combined.title, "Tracks 2 + 3")
+        // Italian and English: no shared language.
+        XCTAssertEqual(combined.language, "")
+        XCTAssertEqual(editor.audioTracks.map(\.isDefault), [true, false, false])
+        XCTAssertEqual(editor.audioTracks.map(\.keep), [true, true, true])
+        XCTAssertTrue(editor.hasCombinedAudio)
+        XCTAssertTrue(editor.hasChanges)
+        // A combined track isn't in the video yet, so it can't be exported, and can't be combined again.
+        XCTAssertFalse(editor.canExport(combined))
+        XCTAssertFalse(editor.exportableTracks.contains(combined))
+        XCTAssertEqual(editor.combinableAudioTracks.count, 2)
+
+        let plan = try TrackPlanEntry.parse(editor.planJSON())
+        XCTAssertEqual(plan[0], TrackPlanEntry(kind: "audio", source: .mix(indices: [1, 2]), language: "", title: "Tracks 2 + 3", isDefault: true, isForced: false))
+        XCTAssertEqual(plan[1].source, .original(index: 1))
+
+        editor.removeAddedTrack(combined.id)
+        XCTAssertEqual(editor.audioTracks.count, 2)
+        XCTAssertFalse(editor.hasCombinedAudio)
+    }
+
+    @MainActor
+    func testCombiningCanLeaveOutTheSeparateTracks() throws {
+        let editor = loadedEditor()
+        editor.audioTracks[1].language = "it"
+        editor.addCombinedAudioTrack(from: Set(editor.audioTracks.map(\.id)), keepingSources: false)
+        XCTAssertEqual(editor.audioTracks.map(\.keep), [true, false, false])
+        XCTAssertEqual(editor.audioTracks[0].language, "it", "Tracks that share a language give it to the mix")
+        XCTAssertEqual(editor.trackSummary, "1 of 3 audio · 3 subtitles")
+        XCTAssertEqual(try TrackPlanEntry.parse(editor.planJSON()).filter { $0.kind == "audio" }.map(\.source), [.mix(indices: [1, 2])])
+    }
+
+    @MainActor
+    func testCombinedTracksAreNamed() {
+        let editor = loadedEditor()
+        let ids = Set(editor.audioTracks.map(\.id))
+        XCTAssertEqual(editor.suggestedCombinedName(for: ids), "Tracks 2 + 3")
+        editor.audioTracks[0].title = "Game"
+        XCTAssertEqual(editor.suggestedCombinedName(for: ids), "Tracks 2 + 3", "Named by number unless every track has a title")
+        editor.audioTracks[1].title = " Mic "
+        XCTAssertEqual(editor.suggestedCombinedName(for: ids), "Game + Mic")
+
+        editor.addCombinedAudioTrack(from: ids, name: "  Game and voice  ")
+        XCTAssertEqual(editor.audioTracks[0].title, "Game and voice")
+        editor.addCombinedAudioTrack(from: ids, name: "   ")
+        XCTAssertEqual(editor.audioTracks[0].title, "Game + Mic", "A blank name falls back to the suggestion")
+    }
+
+    @MainActor
+    func testDeletingTracksLeavesThemOutAndTheyCanBeRestored() throws {
+        let editor = loadedEditor()
+        let english = editor.audioTracks[1]
+        editor.addCombinedAudioTrack(from: Set(editor.audioTracks.map(\.id)))
+        editor.audioTracks[1].title = "Italian"
+
+        // Delete both of the video's audio tracks, keeping only the combined one.
+        editor.deleteTrack(editor.audioTracks[1].id)
+        editor.deleteTrack(english.id)
+        XCTAssertEqual(editor.audioTracks.map(\.isCombined), [true])
+        XCTAssertEqual(editor.deletedTracks(.audio).count, 2)
+        XCTAssertEqual(editor.deletedTracks(.subtitle).count, 0)
+        XCTAssertEqual(editor.trackSummary, "1 audio · 3 subtitles")
+        let audioPlan = try TrackPlanEntry.parse(editor.planJSON()).filter { $0.kind == "audio" }
+        XCTAssertEqual(audioPlan.map(\.source), [.mix(indices: [1, 2])], "The mix still reads the deleted tracks from the video")
+        XCTAssertTrue(editor.hasChanges)
+
+        // Restored in the video's order, below the combined track, as they were when loaded.
+        editor.restoreDeletedTracks(.audio)
+        XCTAssertEqual(editor.audioTracks.map(\.source), [.mix(indices: [1, 2]), .original(index: 1), .original(index: 2)])
+        XCTAssertEqual(editor.audioTracks[1].title, "")
+        XCTAssertTrue(editor.deletedTracks(.audio).isEmpty)
+
+        // Deleting a subtitle track, then restoring it, leaves nothing to save.
+        let fresh = loadedEditor()
+        fresh.deleteTrack(fresh.subtitleTracks[1].id)
+        XCTAssertEqual(fresh.subtitleTracks.map(\.language), ["it", "hrv"])
+        XCTAssertTrue(fresh.hasChanges)
+        fresh.restoreDeletedTracks(.subtitle)
+        XCTAssertEqual(fresh.subtitleTracks.map(\.language), ["it", "en", "hrv"])
+        XCTAssertFalse(fresh.hasChanges)
+
+        // Added tracks are simply gone.
+        fresh.addSubtitleFile(path: "/tmp/Episode 2.srt")
+        fresh.deleteTrack(fresh.subtitleTracks[3].id)
+        XCTAssertEqual(fresh.subtitleTracks.count, 3)
+        XCTAssertTrue(fresh.deletedTracks(.subtitle).isEmpty)
+    }
+
+    @MainActor
+    func testCombiningNeedsTwoTracks() {
+        let editor = loadedEditor()
+        XCTAssertFalse(editor.addCombinedAudioTrack(from: [editor.audioTracks[0].id]))
+        XCTAssertEqual(editor.audioTracks.count, 2)
+
+        editor.load(Array(Self.episodeTracks.filter { $0.index != 2 }))
+        XCTAssertFalse(editor.canCombineAudio)
+    }
+
+    func testMixedTracksHaveTheMostChannels() {
+        XCTAssertEqual(MediaTools.mixedChannelCount([1, 1]), 1)
+        XCTAssertEqual(MediaTools.mixedChannelCount([1, 2]), 2)
+        XCTAssertEqual(MediaTools.mixedChannelCount([2, 6]), 6)
+        XCTAssertEqual(MediaTools.mixedChannelCount([nil, 1]), 2)
+        XCTAssertEqual(MediaTools.mixedChannelCount([3, 2]), 6)
+        XCTAssertEqual(MediaTools.mixBitRate(channels: 2), "192k")
+        XCTAssertEqual(MediaTools.mixBitRate(channels: 6), "384k")
+    }
+
+    @MainActor
     func testOpeningWithoutChangesDoesntAsk() {
         let editor = loadedEditor()
         editor.open(videoPath: "/tmp/Episode 2.mkv")

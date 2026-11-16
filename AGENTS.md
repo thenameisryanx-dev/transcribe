@@ -9,6 +9,12 @@ Preserve existing shipped behavior while adding or fixing features. Do not remov
 3. Run `./scripts/regression_check.sh`.
 4. Report what changed and what checks passed/failed.
 
+## Branches And Cleanup
+- Make every change on its own branch off `main`; never edit or commit on `main` directly.
+- After a branch is merged into `main`, delete it right away (`git branch -d`, and the remote branch if it was pushed).
+- If the branch had a worktree (e.g. under `.claude/worktrees/`), remove it too (`git worktree remove`) along with its build cache, which is about 2 GB: `rm -rf "$(scripts/swift_build_dir.sh <worktree path>)"`.
+- Never force either deletion: `git branch -d` refuses unmerged work and `git worktree remove` refuses uncommitted changes.
+
 ## Non-Regression Invariants (Must Keep)
 - Sidebar includes `Transcribe`, `Tracks`, `Runs`, and `Settings`.
 - `Runs` pane remains reachable from `RootView` and renders run list/details.
