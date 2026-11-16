@@ -15,8 +15,16 @@ protocol SpeechSynthesizer: AnyObject, Sendable {
     var identifier: String { get }
     var isLoaded: Bool { get }
     func load(progress: @escaping @Sendable (Double, String) -> Void) async throws
-    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> (samples: [Float], sampleRate: Int)
+    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> SynthesizedSpeech
     func unload()
+}
+
+/// A voice's speech for a text. A voice that knows when it spoke each word (as Kokoro does) gives `wordTimes`, one
+/// per run of the text between spaces; otherwise the aligner listens for them.
+struct SynthesizedSpeech: Sendable {
+    var samples: [Float]
+    var sampleRate: Int
+    var wordTimes: [AlignedWordTime]?
 }
 
 /// Finds when each word of a text is spoken in a recording of it.
@@ -347,11 +355,13 @@ private final class ModelBox<Model>: @unchecked Sendable {
 enum SpeechEngineError: LocalizedError {
     case notLoaded
     case noAudio
+    case noVoice(String)
 
     var errorDescription: String? {
         switch self {
         case .notLoaded: return "The voice isn't loaded yet."
         case .noAudio: return "The voice didn't produce any audio for this sentence."
+        case .noVoice(let voice): return "The voice “\(voice)” isn't in the downloaded voice model."
         }
     }
 }
@@ -377,62 +387,18 @@ final class Qwen3Synthesizer: SpeechSynthesizer, @unchecked Sendable {
         box.value = model
     }
 
-    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> (samples: [Float], sampleRate: Int) {
+    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> SynthesizedSpeech {
         let box = box
         let samples = try await onMLXQueue {
             guard let model = box.value else { throw SpeechEngineError.notLoaded }
             return model.synthesize(text: text, language: language.rawValue, speaker: voice, languageExplicit: true)
         }
         guard !samples.isEmpty else { throw SpeechEngineError.noAudio }
-        return (samples, 24_000)
+        return SynthesizedSpeech(samples: samples, sampleRate: 24_000, wordTimes: nil)
     }
 
     func unload() {
         box.release()
-    }
-}
-
-/// Kokoro uses Core ML, not MLX, so it has its own queue and can make the next sentence while the aligner times the
-/// last one on the GPU.
-private let kokoroQueue = DispatchQueue(label: "LectureTranscribe.Listen.Kokoro", qos: .userInitiated)
-
-/// Kokoro-82M: 50 voices in seven languages, 24 kHz audio, on the Neural Engine. It makes a whole sentence in one
-/// pass instead of one step at a time, so it stays well ahead of the reading.
-final class KokoroSynthesizer: SpeechSynthesizer, @unchecked Sendable {
-    let identifier = "kokoro|\(SpeechModelFiles.kokoroModelID)"
-    private let lock = NSLock()
-    private var model: KokoroTTSModel?
-
-    var isLoaded: Bool { lock.withLock { model != nil } }
-
-    func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {
-        guard !isLoaded else { return }
-        // The first load compiles the model for this Mac's Neural Engine (about 20 seconds); later loads take a second.
-        let loaded = try await KokoroTTSModel.fromPretrained(
-            cacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.kokoroModelID),
-            progressHandler: { fraction, message in progress(fraction, message) }
-        )
-        lock.withLock { model = loaded }
-    }
-
-    func synthesize(_ text: String, voice: String, language: ListenLanguage) async throws -> (samples: [Float], sampleRate: Int) {
-        try Task.checkCancellation()
-        let samples: [Float] = try await withCheckedThrowingContinuation { continuation in
-            kokoroQueue.async { [self] in
-                continuation.resume(with: Result {
-                    guard let model = lock.withLock({ model }) else { throw SpeechEngineError.notLoaded }
-                    // Kokoro takes the same language names ("english", "french", …) as the menu.
-                    return try model.synthesize(text: text, voice: voice, language: language.rawValue)
-                })
-            }
-        }
-        guard !samples.isEmpty else { throw SpeechEngineError.noAudio }
-        return (samples, KokoroTTSModel.outputSampleRate)
-    }
-
-    /// A sentence being made holds its own reference, so the model is freed once that sentence is done.
-    func unload() {
-        lock.withLock { model = nil }
     }
 }
 
@@ -470,7 +436,8 @@ final class Qwen3Aligner: WordAligner, @unchecked Sendable {
 
 // MARK: - Speaking a sentence
 
-/// Speaks a sentence and times its words: the voice makes the audio, then the aligner listens to it.
+/// Speaks a sentence and times its words: the voice makes the audio and, unless it timed the words itself, the
+/// aligner listens to it.
 struct SentenceSpeaker: Sendable {
     let synthesizer: any SpeechSynthesizer
     let aligner: any WordAligner
@@ -481,9 +448,20 @@ struct SentenceSpeaker: Sendable {
         let audio = try await synthesizer.synthesize(sentence.spokenText, voice: voice, language: language)
         try Task.checkCancellation()
         let duration = Double(audio.samples.count) / Double(audio.sampleRate)
+        let words = sentence.words.map(\.text)
+        if let known = audio.wordTimes {
+            let times = WordTimingMatcher.timings(for: words, aligned: known, duration: duration)
+            return SpokenSentence(samples: audio.samples, sampleRate: audio.sampleRate, wordTimes: times)
+        }
         // A sentence still plays if timing fails; its words are then spread over it by length.
         let aligned = (try? await aligner.align(samples: audio.samples, sampleRate: audio.sampleRate, text: sentence.spokenText, language: language)) ?? []
-        let times = WordTimingMatcher.timings(for: sentence.words.map(\.text), aligned: aligned, duration: duration)
+        // The aligner tends to start the word after a pause where the pause begins.
+        let times = SpeechPauses.movingStarts(
+            of: WordTimingMatcher.timings(for: words, aligned: aligned, duration: duration),
+            outOf: SpeechPauses.find(in: audio.samples, sampleRate: audio.sampleRate),
+            words: words,
+            duration: duration
+        )
         return SpokenSentence(samples: audio.samples, sampleRate: audio.sampleRate, wordTimes: times)
     }
 }
