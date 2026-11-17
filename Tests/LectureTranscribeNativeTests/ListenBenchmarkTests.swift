@@ -138,6 +138,77 @@ final class ListenBenchmarkTests: XCTestCase {
         }
     }
 
+    /// Makes 64 sentences 48 and then 64 at a time, the largest choices, and checks every sentence still ends by itself
+    /// at a normal pace, as in smaller batches; prints how fast each was and the most GPU memory it used.
+    func testTheLargestBatchesStillSoundRight() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["LISTEN_BENCHMARK"] == "1", environment["LISTEN_BATCH_SWEEP"] == "1" else {
+            throw XCTSkip("Set LISTEN_BENCHMARK=1 and LISTEN_BATCH_SWEEP=1 to check the largest batches.")
+        }
+        try XCTSkipUnless(SpeechModelFiles.isDownloaded(), "The Qwen3-TTS models aren't downloaded.")
+        let source = (ReadingDocument(text: Self.longerText).sentences + ReadingDocument(text: Self.text).sentences).map(\.spokenText)
+        let sentences = (0..<64).map { source[$0 % source.count] }.sorted { $0.count > $1.count }
+        let model = try await Qwen3TTSModel.fromPretrained(
+            modelId: SpeechModelFiles.ttsModelID,
+            tokenizerModelId: SpeechModelFiles.ttsTokenizerID,
+            cacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.ttsModelID),
+            tokenizerCacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.ttsTokenizerID)
+        )
+        for atOnce in [48, 64] {
+            _ = try model.synthesizeVoiceBatch(texts: Array(repeating: "Warming up.", count: atOnce), language: "english", speaker: "ryan")
+            Memory.peakMemory = 0
+            let start = Date()
+            var made: [(String, [Float])] = []
+            for batch in stride(from: 0, to: sentences.count, by: atOnce) {
+                let texts = Array(sentences[batch..<min(batch + atOnce, sentences.count)])
+                made += zip(texts, try model.synthesizeVoiceBatch(texts: texts, language: "english", speaker: "ryan")).map { ($0, $1) }
+            }
+            let time = Date().timeIntervalSince(start)
+            let audioSeconds = made.reduce(0) { $0 + Double($1.1.count) / 24_000 }
+            var outside = 0
+            for (text, audio) in made {
+                let length = Double(audio.count) / 24_000
+                let pace = Double(text.split(separator: " ").count) / length
+                // As in the 8-at-once check: people speak about 2.5 words a second; a sentence run to its cap is under 1.5.
+                XCTAssertGreaterThan(pace, 1.4, "\(atOnce) at once: “\(text)” ran on (\(length)s)")
+                XCTAssertLessThan(pace, 5, "\(atOnce) at once: “\(text)” was cut short (\(length)s)")
+                if pace <= 1.4 || pace >= 5 { outside += 1 }
+            }
+            print(String(format: "BENCH %d at once: RTF %.2f (%.1fs for %.1fs of audio), peak GPU memory %.2f GB, %d of %d sentences at a normal pace",
+                         atOnce, time / audioSeconds, time, audioSeconds, Double(Memory.peakMemory) / 1_073_741_824,
+                         made.count - outside, made.count))
+        }
+    }
+
+    /// Times one batch of 32 sentences through the real voice and the real aligner, to see where preparing spends its
+    /// time: the batch itself, or the aligner, which times one sentence after another.
+    func testWhereTheTimeGoes() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["LISTEN_BENCHMARK"] == "1", environment["LISTEN_BATCH_SWEEP"] == "1" else {
+            throw XCTSkip("Set LISTEN_BENCHMARK=1 and LISTEN_BATCH_SWEEP=1 to time a big batch.")
+        }
+        try XCTSkipUnless(SpeechModelFiles.isDownloaded(), "The Qwen3-TTS models aren't downloaded.")
+        let source = (ReadingDocument(text: Self.longerText).sentences + ReadingDocument(text: Self.text).sentences).map(\.spokenText)
+        let texts = (0..<32).map { source[$0 % source.count] }
+        let synthesizer = Qwen3Synthesizer()
+        let aligner = Qwen3Aligner()
+        try await synthesizer.load { _, _ in }
+        try await aligner.load { _, _ in }
+        _ = try await synthesizer.synthesize(Array(repeating: "Warming up.", count: 32), voice: "ryan", language: .english)
+
+        var start = Date()
+        let audio = try await synthesizer.synthesize(texts, voice: "ryan", language: .english)
+        let synthesisTime = Date().timeIntervalSince(start)
+        start = Date()
+        for (text, speech) in zip(texts, audio) {
+            _ = try await aligner.align(samples: speech.samples, sampleRate: speech.sampleRate, text: text, language: .english)
+        }
+        let alignTime = Date().timeIntervalSince(start)
+        let audioSeconds = audio.reduce(0) { $0 + Double($1.samples.count) / Double($1.sampleRate) }
+        print(String(format: "BENCH 32 at once: voice %.1fs, aligner %.1fs (%.2fs a sentence), for %.1fs of audio",
+                     synthesisTime, alignTime, alignTime / 32, audioSeconds))
+    }
+
     /// Prepares a document with the real voice and aligner, as Play does, then reads it through the real (muted)
     /// player to the end without stopping. Takes a minute or two.
     @MainActor
