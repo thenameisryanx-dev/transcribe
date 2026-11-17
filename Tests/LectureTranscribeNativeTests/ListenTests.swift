@@ -71,7 +71,7 @@ final class FakeAligner: WordAligner, @unchecked Sendable {
     func unload() {}
 }
 
-/// A Listen model with a fake voice, making `sentencesAtOnce` sentences at a time, with its own saved text, settings
+/// A Listen model with a fake voice (already downloaded, unless `downloader` says otherwise), making `sentencesAtOnce` sentences at a time, with its own saved text, settings
 /// and saved speech in `directory`. By default its audio device fails at once, so tests don't use this Mac's speakers.
 @MainActor
 func makeTestListenModel(
@@ -80,7 +80,8 @@ func makeTestListenModel(
     sentencesAtOnce: Int = 2,
     player: ListenAudioPlayer? = nil,
     mlxWork: MLXWorkGate = MLXWorkGate(),
-    defaults: UserDefaults = InMemoryDefaults()
+    defaults: UserDefaults = InMemoryDefaults(),
+    downloader: FakeDownloader = FakeDownloader(downloaded: true)
 ) -> ListenModel {
     let model = ListenModel(
         synthesizer: synthesizer,
@@ -89,7 +90,8 @@ func makeTestListenModel(
         defaults: defaults,
         textFileURL: directory.appendingPathComponent("listen.txt"),
         player: player ?? makeSlowDevicePlayer(delay: 0),
-        mlxWork: mlxWork
+        mlxWork: mlxWork,
+        downloader: downloader
     )
     model.sentencesAtOnce = sentencesAtOnce
     return model

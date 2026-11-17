@@ -74,6 +74,11 @@ in_app 'Button("Edit Text", action: model.editText)'
 # Play makes the speech first, with progress and a Cancel button, and the reader opens once it's made.
 in_app 'Button("Cancel", action: model.cancelPreparing)'
 in_app 'Picker("Sentences at Once", selection: $model.sentencesAtOnce)'
+# Until the voice is downloaded, Listen offers Download Voice (with progress, Cancel and Try Again) instead of Play.
+in_app 'VoiceSetupBar(model: model)'
+in_app 'Button("Download Voice", action: model.downloadVoice)'
+in_app 'Button("Cancel", action: model.cancelVoiceDownload)'
+in_app 'Button("Try Again", action: model.downloadVoice)'
 # Listen reads with Qwen3-TTS only, from the copy in Sources/Qwen3TTSLocal whose batching works.
 not_in_app 'KokoroSynthesizer'
 in_app 'synthesizeVoiceBatch('

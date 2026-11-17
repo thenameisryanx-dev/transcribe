@@ -75,9 +75,12 @@ final class ListenModel: ObservableObject {
     @Published private(set) var preparation: Preparation?
     @Published private(set) var position: ReadingPosition?
     @Published private(set) var playback: Playback = .stopped
+    /// Loading the downloaded voice into memory, which happens when speech is made.
     @Published private(set) var voiceState: VoiceState = .notLoaded
-    /// Whether the voice model's files are on disk.
-    @Published private(set) var modelsDownloaded: Bool
+    /// Getting the voice's files onto this Mac, which happens once, before Play is offered.
+    @Published private(set) var voiceDownload: VoiceDownload
+    /// The download just finished, so the pane can say the voice is ready until Play is first pressed.
+    @Published private(set) var voiceJustDownloaded = false
     @Published var errorMessage: String?
 
     @Published var voiceID: String {
@@ -105,6 +108,8 @@ final class ListenModel: ObservableObject {
 
     var isReading: Bool { stage == .reading }
     var isPreparing: Bool { stage == .preparing }
+    /// Whether the voice model's files are on disk.
+    var modelsDownloaded: Bool { voiceDownload == .downloaded }
     var voice: ListenVoice { ListenVoiceModel.voice(voiceID) ?? ListenVoiceModel.voices[0] }
 
     private let speaker: SentenceSpeaker
@@ -114,6 +119,10 @@ final class ListenModel: ObservableObject {
     private let textFileURL: URL?
     private let player: ListenAudioPlayer
     private let mlxWork: MLXWorkGate
+    private let downloader: any SpeechModelDownloader
+    private var downloadTask: Task<Void, Never>?
+    /// Counts downloads started, so a cancelled one that finishes late can't change the state of the next.
+    private var downloadGeneration = 0
     /// The sentences near the one playing, loaded from disk.
     private var spoken: [Int: SpokenSentence] = [:]
     /// The sentence being started (while the audio device wakes), so it isn't started twice.
@@ -143,7 +152,8 @@ final class ListenModel: ObservableObject {
         defaults: UserDefaults = .standard,
         textFileURL: URL? = ListenModel.defaultTextFileURL,
         player: ListenAudioPlayer? = nil,
-        mlxWork: MLXWorkGate = .shared
+        mlxWork: MLXWorkGate = .shared,
+        downloader: any SpeechModelDownloader = HubSpeechModelDownloader()
     ) {
         self.player = player ?? ListenAudioPlayer()
         self.mlxWork = mlxWork
@@ -151,7 +161,8 @@ final class ListenModel: ObservableObject {
         self.store = store
         self.defaults = defaults
         self.textFileURL = textFileURL
-        modelsDownloaded = SpeechModelFiles.isDownloaded()
+        self.downloader = downloader
+        voiceDownload = downloader.isDownloaded() ? .downloaded : .notDownloaded
         voiceID = defaults.string(forKey: Keys.voice).flatMap { ListenVoiceModel.voice($0)?.id } ?? ListenVoiceModel.defaultVoiceID
         language = defaults.string(forKey: Keys.language).flatMap(ListenLanguage.init(rawValue:)) ?? .automatic
         let savedSpeed = defaults.double(forKey: Keys.speed)
@@ -181,8 +192,11 @@ final class ListenModel: ObservableObject {
     /// Makes the speech for the text (whatever isn't saved yet), then opens the reader. While reading, resumes.
     func play() {
         errorMessage = nil
+        voiceJustDownloaded = false
         switch stage {
         case .editing:
+            // Play isn't offered until the voice is downloaded; the pane offers Download Voice instead.
+            guard modelsDownloaded else { return }
             let document = ReadingDocument(text: text)
             guard !document.isEmpty else { return }
             self.document = document
@@ -573,7 +587,7 @@ final class ListenModel: ObservableObject {
 
     // MARK: - Voice models
 
-    /// Downloads (the first time) and loads the voice and the aligner.
+    /// Loads the downloaded voice and the aligner into memory.
     func loadVoice() async throws {
         if isVoiceLoaded {
             voiceState = .ready
@@ -591,40 +605,131 @@ final class ListenModel: ObservableObject {
                     self.voiceState = .loading(progress: min(max(fraction, 0), 1), message: message)
                 }
             }
-            // The voice is most of the download, so it takes most of the bar.
+            // The voice is most of what's loaded, so it takes most of the bar.
             try await speaker.synthesizer.load { fraction, message in report(fraction * 0.85, message) }
             try await speaker.aligner.load { fraction, message in report(0.85 + fraction * 0.15, message) }
         }
         loadTask = task
-        voiceState = .loading(progress: 0, message: modelsDownloaded ? "Loading the voice…" : "Downloading the voice…")
+        voiceState = .loading(progress: 0, message: "Loading the voice…")
         defer { if loadTask == task { loadTask = nil } }
         do {
             try await task.value
             voiceState = .ready
-            modelsDownloaded = true
         } catch {
             voiceState = error is CancellationError ? .notLoaded : .failed(Self.describe(error))
             throw error
         }
     }
 
-    /// Downloads the voice models now (from Settings), so the first Play doesn't wait for them.
+    // MARK: - Downloading the voice
+
+    /// Downloads the voice's files (only what isn't on disk yet), from the Listen pane or Settings. It carries on
+    /// while other panes are open. Loading them into memory waits for Play.
     func downloadVoice() {
-        Task {
-            do { try await loadVoice() } catch {}
-            scheduleIdleUnload()
+        guard !voiceDownload.isDownloading else { return }
+        if downloader.isDownloaded() {
+            voiceDownload = .downloaded
+            return
+        }
+        errorMessage = nil
+        voiceJustDownloaded = false
+        let downloader = downloader
+        let totalBytes = ListenVoiceModel.approximateDownloadSize
+        downloadGeneration += 1
+        let generation = downloadGeneration
+        voiceDownload = .downloading(VoiceDownloadProgress(fraction: 0, totalBytes: totalBytes))
+        downloadTask = Task { [weak self] in
+            // Keeps an idle Mac from sleeping partway through a download of several gigabytes.
+            let activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled],
+                reason: "Downloading the Listen voice"
+            )
+            defer { ProcessInfo.processInfo.endActivity(activity) }
+            let estimate = DownloadTimeEstimate()
+            do {
+                try await downloader.download { fraction in
+                    Task { @MainActor in
+                        guard let self, self.downloadGeneration == generation,
+                              case .downloading(let current) = self.voiceDownload else { return }
+                        // Many small steps arrive a second; a tenth of a percent is plenty for the bar.
+                        guard fraction - current.fraction >= 0.001 || fraction >= 1 else { return }
+                        self.voiceDownload = .downloading(VoiceDownloadProgress(
+                            fraction: fraction,
+                            totalBytes: totalBytes,
+                            secondsLeft: estimate.secondsLeft(at: fraction)
+                        ))
+                    }
+                }
+                try Task.checkCancellation()
+                guard let self, self.downloadGeneration == generation else { return }
+                self.downloadTask = nil
+                self.voiceDownload = downloader.isDownloaded()
+                    ? .downloaded
+                    : .failed(VoiceDownloadFailure(reason: .other, message: "Some of the voice's files are missing after downloading. Try again."))
+                if self.voiceDownload == .downloaded {
+                    self.voiceJustDownloaded = true
+                    // In the background, the Dock icon bounces once to say it's done.
+                    if !NSApplication.shared.isActive {
+                        NSApplication.shared.requestUserAttention(.informationalRequest)
+                    }
+                }
+            } catch {
+                guard let self, self.downloadGeneration == generation else { return }
+                self.downloadTask = nil
+                if error is CancellationError || Task.isCancelled {
+                    self.voiceDownload = downloader.isDownloaded() ? .downloaded : .notDownloaded
+                } else {
+                    self.voiceDownload = .failed(VoiceDownloadFailure(error))
+                }
+            }
         }
     }
 
+    /// Stops the download. What's on disk is kept, so downloading again carries on from about where it stopped.
+    func cancelVoiceDownload() {
+        downloadGeneration += 1
+        downloadTask?.cancel()
+        downloadTask = nil
+        if voiceDownload.isDownloading {
+            voiceDownload = downloader.isDownloaded() ? .downloaded : .notDownloaded
+        }
+    }
+
+    /// Checks the disk again, for when the voice's files were changed outside the app.
+    func refreshVoiceDownload() {
+        guard !voiceDownload.isDownloading else { return }
+        let onDisk = downloader.isDownloaded()
+        if onDisk {
+            voiceDownload = .downloaded
+        } else if voiceDownload == .downloaded {
+            voiceDownload = .notDownloaded
+        }
+    }
+
+    /// About how many more bytes the download needs, and how much free space it should leave beside them.
+    var downloadSpaceNeeded: Int64 {
+        downloader.bytesStillNeeded() + Self.downloadSpaceMargin
+    }
+
+    /// Room kept free beside the voice, so downloading it never fills the disk to the brim.
+    static let downloadSpaceMargin: Int64 = 500_000_000
+
+    func voiceModelsSize() async -> Int64 {
+        let downloader = downloader
+        return await Task.detached { downloader.size() }.value
+    }
+
     func deleteVoiceModels() {
+        cancelVoiceDownload()
         editText()
         unloadVoice()
+        voiceJustDownloaded = false
         do {
-            try SpeechModelFiles.removeAll()
+            try downloader.removeAll()
         } catch {
             errorMessage = "Couldn't delete the voice models: \(error.localizedDescription)"
         }
-        modelsDownloaded = SpeechModelFiles.isDownloaded()
+        voiceDownload = downloader.isDownloaded() ? .downloaded : .notDownloaded
     }
 
     func clearSavedSpeech() {
@@ -645,6 +750,8 @@ final class ListenModel: ObservableObject {
         loader?.cancel()
         loader = nil
         loadTask?.cancel()
+        downloadTask?.cancel()
+        downloadTask = nil
         cancelIdleUnload()
         stopTicker()
         player.stop()

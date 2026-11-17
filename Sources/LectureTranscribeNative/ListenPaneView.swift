@@ -2,8 +2,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Reads text aloud with an on-device voice, highlighting each word as it's spoken. Click any word to jump to it.
-/// Play first makes the speech for the whole text, showing how far along it is (Cancel goes back to the text), and
-/// the reader opens once it's all made.
+/// Until the voice is on this Mac, the bar at the bottom offers to download it (the text can be written meanwhile)
+/// instead of Play. Play then makes the speech for the whole text, showing how far along it is (Cancel goes back to
+/// the text), and the reader opens once it's all made.
 struct ListenPaneView: View {
     @ObservedObject var model: ListenModel
     @State private var isDropTargeted = false
@@ -31,11 +32,18 @@ struct ListenPaneView: View {
             }
             if !model.isPreparing {
                 Divider()
-                transportBar
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 12)
+                Group {
+                    if model.modelsDownloaded {
+                        transportBar
+                    } else {
+                        VoiceSetupBar(model: model)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
             }
         }
+        .onAppear(perform: model.refreshVoiceDownload)
         .overlay {
             if isDropTargeted {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -96,8 +104,12 @@ struct ListenPaneView: View {
                 Text("Type or paste text here, or open a file.")
                     .font(.system(size: 18))
                 Text("PDFs, Word documents, web pages saved as HTML, and text or Markdown files all work. "
-                    + "You can also drop a file here. Press Play to make the speech on this Mac; then it's read "
-                    + "aloud with each word highlighted as it's spoken. Click any word to jump to it.")
+                    + "You can also drop a file here. "
+                    + (model.modelsDownloaded
+                        ? "Press Play to make the speech on this Mac; then it's read aloud with each word highlighted "
+                            + "as it's spoken. Click any word to jump to it."
+                        : "Once the voice below is downloaded, it's read aloud with each word highlighted as it's "
+                            + "spoken."))
                     .font(.callout)
             }
             .allowsHitTesting(false)
@@ -162,7 +174,7 @@ struct ListenPaneView: View {
 
     private var preparingStatus: String {
         if case .loading(_, let message) = model.voiceState {
-            return model.modelsDownloaded ? message : "\(message) (about \(downloadSize), once)"
+            return message
         }
         guard let preparation = model.preparation else { return "" }
         guard preparation.wordsToMake > 0 else { return "Checking what's already made…" }
@@ -255,19 +267,15 @@ struct ListenPaneView: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-        } else if !model.modelsDownloaded {
-            Text("The first time, Play downloads the voice (about \(downloadSize)). After that it works offline.")
+        } else if model.voiceJustDownloaded {
+            Label("The voice is ready. Press Play to listen.", systemImage: "checkmark.circle.fill")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
+                .symbolRenderingMode(.multicolor)
         } else {
             // Holds the space, so the controls stay at the leading edge instead of drifting to the middle.
             Color.clear.frame(height: 1)
         }
-    }
-
-    private var downloadSize: String {
-        ListenSettingsSection.format(ListenVoiceModel.approximateDownloadSize)
     }
 
     private var readingSummary: String {
