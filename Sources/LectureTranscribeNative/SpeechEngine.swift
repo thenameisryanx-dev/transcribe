@@ -107,7 +107,12 @@ enum ListenVoiceModel {
         return min(byMemory, byGPU)
     }
 
-    static let sentencesAtOnceChoices = [1, 2, 4, 8, 16, 24, 32]
+    /// 48 and 64 are for big GPUs (Pro and Max chips). On a base M4, 64 sentences made 48 and 64 at a time came to 0.16
+    /// and 0.14 seconds of work per second of audio, every sentence ending normally and peak GPU memory still 3.8 GB
+    /// (`ListenBenchmarkTests.testTheLargestBatchesStillSoundRight`; one run each). The voice step is only
+    /// part of the work: on a base M4 with 32 at once it took 30% of the time, decoding the codes into audio 47% and
+    /// the aligner 22%, both of which go one sentence at a time (`ListenBenchmarkTests.testWhereTheTimeGoes`).
+    static let sentencesAtOnceChoices = [1, 2, 4, 8, 16, 24, 32, 48, 64]
 
     /// Read once: it doesn't change while the app runs.
     static let thisMacGPUCores = gpuCoreCount()
