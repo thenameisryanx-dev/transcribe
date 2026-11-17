@@ -7,6 +7,12 @@ import XCTest
 /// How sentences reach the Qwen voice: with their whole text in the prompt, several at once, the shorter prompts
 /// padded at the front and the padding masked out. (`ListenBenchmarkTests` checks the same with the real model.)
 final class ListenVoicePromptTests: XCTestCase {
+    /// The masks are small sums, so they're worked out on MLX's CPU backend: GitHub's macOS runners are virtual
+    /// machines whose GPU MLX can't use.
+    override func invokeTest() {
+        Device.withDefaultDevice(.cpu) { super.invokeTest() }
+    }
+
     /// Speech saved before whole-text prompts and whole decoding (made a word at a time, or decoded in 2-second pieces
     /// that each lost a little) isn't reused.
     func testSpeechMadeAWordAtATimeIsMadeAgain() {

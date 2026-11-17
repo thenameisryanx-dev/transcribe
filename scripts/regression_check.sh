@@ -33,7 +33,9 @@ fi
 echo "[2/4] Running Swift unit tests..."
 # Quiet when the tests pass; on a failure, show which tests failed and why (without the linker's warnings).
 if ! SWIFT_TEST_OUTPUT="$(swift test --scratch-path "$BUILD_DIR" 2>&1)"; then
-  print -r -- "$SWIFT_TEST_OUTPUT" | grep -E ': error: |^error: |failed \(|Executed [0-9]+ tests' | grep -v 'ld: warning' | tail -80
+  # A crash ends the run without a failed test, so its message and the last suite started are shown too.
+  print -r -- "$SWIFT_TEST_OUTPUT" | grep -E ': error: |^error: |failed \(|Executed [0-9]+ tests?|Fatal error|fatal error|Exited with|signal|libc\+\+abi|MLX error|\[METAL\]' | grep -v 'ld: warning' | tail -80
+  print -r -- "$SWIFT_TEST_OUTPUT" | grep -E "^Test (Suite|Case) '.*' started" | tail -2
   exit 1
 fi
 
