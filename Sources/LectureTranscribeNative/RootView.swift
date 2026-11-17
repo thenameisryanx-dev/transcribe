@@ -36,6 +36,10 @@ struct RootView: View {
                     Image(systemName: pane.systemImage)
                         .frame(width: 16, alignment: .center)
                     Text(pane.rawValue)
+                    if pane == .listen {
+                        Spacer(minLength: 4)
+                        ListenSidebarDownloadBadge(model: viewModel.listen)
+                    }
                 }
                 .foregroundStyle(.primary)
                 .tag(pane)
