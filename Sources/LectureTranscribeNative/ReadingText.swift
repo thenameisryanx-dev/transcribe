@@ -72,18 +72,65 @@ struct ReadingDocument: Equatable, Sendable {
                 .replacingOccurrences(of: "\r", with: " ")
                 .replacingOccurrences(of: "\n", with: " ")
             tokenizer.string = blockText
+            var ranges: [NSRange] = []
             tokenizer.enumerateTokens(in: blockText.startIndex..<blockText.endIndex) { tokenRange, _ in
                 let local = NSRange(tokenRange, in: blockText)
-                let range = NSRange(location: block.location + local.location, length: local.length)
-                for piece in pieces(of: range, in: nsText) {
-                    if let sentence = sentence(in: piece, of: nsText) {
-                        sentences.append(sentence)
-                    }
-                }
+                ranges += pieces(of: NSRange(location: block.location + local.location, length: local.length), in: nsText)
                 return true
+            }
+            for range in joiningFragments(ranges, in: nsText) {
+                if let sentence = sentence(in: range, of: nsText) {
+                    sentences.append(sentence)
+                }
             }
         }
         return sentences
+    }
+
+    /// Joins a piece of a block onto the next when it isn't a sentence of its own: it ends in an abbreviation the
+    /// sentence tokenizer took for a full stop ("pp. 67–79 p." before "67"), or it's a single word ("Bestir!"), which
+    /// the voice drags out or babbles alone. A single word at the end of a block joins the piece before it instead.
+    /// Never past `maxSentenceLength`.
+    private static func joiningFragments(_ ranges: [NSRange], in text: NSString) -> [NSRange] {
+        var joined: [NSRange] = []
+        var held: NSRange?
+        for range in ranges {
+            var current = range
+            if let previous = held {
+                held = nil
+                let union = NSUnionRange(previous, current)
+                if union.length <= maxSentenceLength {
+                    current = union
+                } else {
+                    joined.append(previous)
+                }
+            }
+            if endsWithAbbreviation(current, in: text) || words(in: current, of: text).count == 1 {
+                held = current
+            } else {
+                joined.append(current)
+            }
+        }
+        if let last = held {
+            if words(in: last, of: text).count == 1, let previous = joined.last,
+               NSUnionRange(previous, last).length <= maxSentenceLength {
+                joined[joined.count - 1] = NSUnionRange(previous, last)
+            } else {
+                joined.append(last)
+            }
+        }
+        return joined
+    }
+
+    /// Abbreviations that end in a full stop without ending the sentence. ("No." and "St." are left out: they end
+    /// sentences too.)
+    private static let abbreviation = try! NSRegularExpression(
+        pattern: #"(?:^|[\s(\[])(?:pp?|vols?|chs?|figs?|eqs?|cf|vs|e\.g|i\.e|approx|ca|dr|mrs?|ms|prof)\.$"#,
+        options: [.caseInsensitive])
+
+    private static func endsWithAbbreviation(_ range: NSRange, in text: NSString) -> Bool {
+        let piece = text.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+        return abbreviation.firstMatch(in: piece, range: NSRange(location: 0, length: (piece as NSString).length)) != nil
     }
 
     /// The text's lines, with lines that were wrapped mid-sentence joined back up: a line that doesn't end in

@@ -343,7 +343,10 @@ enum SpeechEngineError: LocalizedError {
 
 /// Qwen3-TTS 0.6B CustomVoice: nine built-in voices, ten languages, 24 kHz audio.
 final class Qwen3Synthesizer: SpeechSynthesizer, @unchecked Sendable {
-    let identifier = "qwen3-tts|\(SpeechModelFiles.ttsModelID)"
+    /// `whole-text` marks speech made with each sentence's whole text in the prompt and no instruction, and
+    /// `whole-decode` speech decoded in one pass, both as Qwen's own code does, so sentences saved before (fed a word
+    /// at a time and read word by word, or missing a little at every 2-second seam) are made again.
+    let identifier = "qwen3-tts|\(SpeechModelFiles.ttsModelID)|whole-text|whole-decode"
     /// Unloaded before it's dropped: its audio decoder's compiled pass keeps the decoder, and its half a gigabyte of
     /// weights, alive after the model is gone.
     private let box = ModelBox<Qwen3TTSModel>(free: { $0.unload() })
@@ -414,6 +417,41 @@ final class Qwen3Aligner: WordAligner, @unchecked Sendable {
 
 // MARK: - Speaking sentences
 
+/// Spots speech the voice got wrong, so it can be made again. Qwen3-TTS now and then crackles through a sentence:
+/// made eight times, most takes of a sentence had no crackle and one or two had 20 or 30 clicks, alone or in a batch,
+/// in speech-swift's own path too, and lowering the temperature made it worse. It can also run on, babbling, to its
+/// length cap, or say nothing.
+enum SpeechCheck {
+    /// More clicks than this is a crackle. A clean take has a few at most, from a sharp "t" or "s".
+    static let allowedClicks = 5
+
+    /// How wrong a take sounds: 0 when it's fine, more the worse it is.
+    static func faults(in speech: SynthesizedSpeech, words: Int) -> Int {
+        guard !speech.samples.isEmpty else { return 1_000 }
+        var faults = 0
+        let clickCount = clicks(in: speech.samples)
+        if clickCount > allowedClicks { faults += clickCount }
+        // People say about 2.5 words a second; two seconds plus a second a word is babbling.
+        let seconds = Double(speech.samples.count) / Double(max(speech.sampleRate, 1))
+        if seconds > 2 + Double(max(words, 1)) { faults += 1_000 }
+        return faults
+    }
+
+    /// Samples that jump from the one before by more than a quarter of full scale and half the take's peak: speech
+    /// moves far less than that from one sample to the next, so each is a click.
+    static func clicks(in samples: [Float]) -> Int {
+        guard samples.count > 1 else { return 0 }
+        var peak: Float = 0
+        for sample in samples { peak = max(peak, abs(sample)) }
+        let threshold = max(0.25, peak * 0.5)
+        var count = 0
+        for index in 1..<samples.count where abs(samples[index] - samples[index - 1]) > threshold {
+            count += 1
+        }
+        return count
+    }
+}
+
 /// Speaks sentences and times their words: the voice makes the audio, several sentences at once, and the aligner
 /// listens to each for when its words are said.
 struct SentenceSpeaker: Sendable {
@@ -425,10 +463,30 @@ struct SentenceSpeaker: Sendable {
     /// made again.
     var identifier: String { "\(synthesizer.identifier)+\(aligner.identifier)+spoken-numbers" }
 
+    /// How many more times a sentence that came out wrong (`SpeechCheck`) is made, keeping the best take.
+    static let retries = 2
+
     func speak(_ sentences: [ReadingSentence], voice: String, language: ListenLanguage) async throws -> [SpokenSentence] {
         let texts = sentences.map { $0.voiceText(in: language) }
-        let audio = try await synthesizer.synthesize(texts, voice: voice, language: language)
+        var audio = try await synthesizer.synthesize(texts, voice: voice, language: language)
         guard audio.count == sentences.count else { throw SpeechEngineError.noAudio }
+        // Sentences that came out wrong are made again together, and the take with the fewest faults is kept.
+        let wordCounts = texts.map { $0.split(whereSeparator: \.isWhitespace).count }
+        var faults = audio.indices.map { SpeechCheck.faults(in: audio[$0], words: wordCounts[$0]) }
+        for _ in 0..<Self.retries {
+            let redo = faults.indices.filter { faults[$0] > 0 }
+            guard !redo.isEmpty else { break }
+            try Task.checkCancellation()
+            let again = try await synthesizer.synthesize(redo.map { texts[$0] }, voice: voice, language: language)
+            guard again.count == redo.count else { break }
+            for (take, index) in zip(again, redo) {
+                let takeFaults = SpeechCheck.faults(in: take, words: wordCounts[index])
+                if takeFaults < faults[index] {
+                    audio[index] = take
+                    faults[index] = takeFaults
+                }
+            }
+        }
         var spoken: [SpokenSentence] = []
         for (index, sentence) in sentences.enumerated() {
             try Task.checkCancellation()

@@ -10,21 +10,60 @@ import MLXNN
 // for all, so on a base M4 four sentences take about as long as two do one at a time.
 //
 // The library's `synthesizeBatch` can't be used for this: it leaves out the chosen voice and the repetition penalty,
-// and its sentences came out alike. This follows `synthesize(text:language:speaker:...)` step for step instead: the
-// same prompt (voice, language and "Speak naturally."), the same sampling with each sentence's own repetition
-// penalty, and each sentence's own length cap. A sentence leaves the batch as soon as it ends, so a short one
-// doesn't keep running beside a long one.
+// and its sentences came out alike. This follows Qwen's own `generate_custom_voice` instead: the same prompt (voice
+// and language), the same sampling with each sentence's own repetition penalty, and each sentence's own length cap.
+// A sentence leaves the batch as soon as it ends, so a short one doesn't keep running beside a long one.
+//
+// The whole sentence goes into the prompt before any speech is made, as Qwen's code does by default
+// (`non_streaming_mode=True`). speech-swift fed it one token per frame instead (Qwen's simulated streaming input), so
+// the voice only ever knew the word it was on and the next one, and read word by word, with odd pauses and a tone
+// that wandered from sentence to sentence. Whole sentences make prompts of different lengths, so shorter ones are
+// padded at the front and the padding is masked out of attention.
 
 extension Qwen3TTSModel {
+    /// How a sentence's text reaches the model.
+    public enum TextFeed: Sendable {
+        /// All of it is in the prompt before the first frame of speech, so the voice can phrase the sentence as a
+        /// whole. Qwen's default for its built-in voices.
+        case wholeText
+        /// One token per frame of speech after the first (Qwen's simulated streaming input): the voice reads word by
+        /// word. What speech-swift did; kept to compare against.
+        case tokenPerStep
+    }
+
     /// Speaks `texts` in one voice, several at once. Returns each text's 24 kHz audio, in order (empty when the model
-    /// made none). `checkCancellation` runs between steps and may throw to stop.
+    /// made none). `instruct` is an instruction to the voice; Qwen's code drops it for the 0.6B models, which weren't
+    /// trained with one, so it's nil by default. `checkCancellation` runs between steps and may throw to stop.
     public func synthesizeVoiceBatch(
         texts: [String],
         language: String,
         speaker: String?,
         sampling: SamplingConfig = .default,
+        textFeed: TextFeed = .wholeText,
+        instruct: String? = nil,
         checkCancellation: () throws -> Void = {}
     ) throws -> [[Float]] {
+        let codes = try makeVoiceBatchCodes(
+            texts: texts, language: language, speaker: speaker, sampling: sampling, textFeed: textFeed,
+            instruct: instruct, checkCancellation: checkCancellation)
+        // Turn each sentence's codes into audio.
+        return try codes.map { codes in
+            try checkCancellation()
+            guard let codes else { return [] }
+            return codecDecoder.decode(codes: codes)
+        }
+    }
+
+    /// The codes `synthesizeVoiceBatch` turns into audio: each text's [1, 16, frames], or nil when the model made none.
+    func makeVoiceBatchCodes(
+        texts: [String],
+        language: String,
+        speaker: String?,
+        sampling: SamplingConfig = .default,
+        textFeed: TextFeed = .wholeText,
+        instruct: String? = nil,
+        checkCancellation: () throws -> Void = {}
+    ) throws -> [MLXArray?] {
         guard !texts.isEmpty else { return [] }
         guard let tokenizer else { throw TTSError.tokenizerNotLoaded }
         try checkCancellation()
@@ -33,50 +72,57 @@ extension Qwen3TTSModel {
         guard let languageId = CodecTokens.languageId(for: effectiveLanguage) else {
             throw TTSError.unknownLanguage(effectiveLanguage)
         }
-        let instructTokens = (speakerConfig != nil ? Self.defaultInstruct : nil)
-            .map { prepareInstructTokens(instruct: $0, tokenizer: tokenizer) }
+        let instructTokens = instruct.map { prepareInstructTokens(instruct: $0, tokenizer: tokenizer) }
         let codecPrefix = buildCodecPrefix(languageId: languageId, speakerTokenId: speakerTokenId)
 
-        // Every prompt is the same length up to the first word; the rest of each text is fed in a token per step.
-        var prefills: [MLXArray] = []
+        var prompts: [MLXArray] = []
         var trailings: [MLXArray] = []
         var padEmbed: MLXArray?
         for text in texts {
             let textTokens = prepareTextTokens(text: text, tokenizer: tokenizer)
-            let (prefill, trailing, pad) = buildPrefillEmbeddings(
-                textTokens: textTokens, codecPrefixTokens: codecPrefix, instructTokens: instructTokens)
-            prefills.append(prefill)
-            trailings.append(trailing)
-            padEmbed = pad
+            switch textFeed {
+            case .wholeText:
+                let (prompt, pad) = buildWholeTextPrompt(
+                    textTokens: textTokens, codecPrefixTokens: codecPrefix, instructTokens: instructTokens)
+                prompts.append(prompt)
+                padEmbed = pad
+            case .tokenPerStep:
+                // Every prompt is the same length up to the first word; the rest of each text is fed in a token per step.
+                let (prefill, trailing, pad) = buildPrefillEmbeddings(
+                    textTokens: textTokens, codecPrefixTokens: codecPrefix, instructTokens: instructTokens)
+                prompts.append(prefill)
+                trailings.append(trailing)
+                padEmbed = pad
+            }
         }
         guard let padEmbed else { return [] }
         let hiddenSize = config.talker.hiddenSize
         let longestTrailing = trailings.map { $0.dim(1) }.max() ?? 0
         // A text that has run out is fed the pad token, as the one-sentence path does.
-        let trailing = concatenated(trailings.map { item in
+        let trailing: MLXArray? = trailings.isEmpty ? nil : concatenated(trailings.map { item in
             let missing = longestTrailing - item.dim(1)
             return missing == 0 ? item : concatenated([item, broadcast(padEmbed, to: [1, missing, hiddenSize])], axis: 1)
         }, axis: 0)  // [B, longestTrailing, D]
         // As in the one-sentence path: the text's own cap, and never more than 2048 frames.
         let caps = texts.map { min(maxTokenCap(for: [$0], tokenizer: tokenizer, sampling: sampling), 2048) }
 
+        // Prefill all prompts at once.
+        var (logits, hidden, cache, padding) = prefillPadded(prompts)
+        let promptLength = prompts.map { $0.dim(1) }.max() ?? 0
+        logits = logits[0..., (promptLength - 1)..<promptLength, 0...]
+        hidden = hidden[0..., (promptLength - 1)..<promptLength, 0...]
         var batch = VoiceBatchState(
             rows: Array(texts.indices),
             trailing: trailing,
-            seen: MLXArray.zeros([texts.count, config.talker.codecVocabSize], type: Bool.self))
-        var frames = [[Int32]](repeating: [], count: texts.count)
-
-        // Prefill all prompts at once.
-        let prefill = concatenated(prefills, axis: 0)
-        let prefillLength = prefill.dim(1)
-        var (logits, hidden, cache) = talker(inputsEmbeds: prefill, offset: MLXArray(Int32(0)), cache: nil)
-        logits = logits[0..., (prefillLength - 1)..<prefillLength, 0...]
-        hidden = hidden[0..., (prefillLength - 1)..<prefillLength, 0...]
+            seen: MLXArray.zeros([texts.count, config.talker.codecVocabSize], type: Bool.self),
+            padding: padding,
+            shift: padding)
         batch.cache = cache
+        var frames = [[Int32]](repeating: [], count: texts.count)
         try checkCancellation()
 
         var trailingIndex = 0
-        var position = prefillLength
+        var position = promptLength
         let codeGroups = config.codePredictor.numCodeGroups
         while !batch.rows.isEmpty {
             try checkCancellation()
@@ -106,10 +152,11 @@ extension Qwen3TTSModel {
                 if frames[item].count / codeGroups >= caps[item] { capped.append(row) }
             }
 
-            // Next step's input: the next token of each text plus this frame's codes.
+            // Next step's input: the next token of each text (or the pad token, once it's all in) plus this frame's
+            // codes.
             let textEmbed: MLXArray
-            if trailingIndex < longestTrailing {
-                textEmbed = batch.trailing[0..., trailingIndex..<(trailingIndex + 1), 0...]
+            if let trailing = batch.trailing, trailingIndex < longestTrailing {
+                textEmbed = trailing[0..., trailingIndex..<(trailingIndex + 1), 0...]
                 trailingIndex += 1
             } else {
                 textEmbed = broadcast(padEmbed, to: [batch.rows.count, 1, hiddenSize])
@@ -125,19 +172,103 @@ extension Qwen3TTSModel {
                 guard !batch.rows.isEmpty else { break }
             }
 
-            (logits, hidden, cache) = executeTalkerStepBatch(embeds: stepEmbeds, offset: position, cache: batch.cache)
+            (logits, hidden, cache) = executeTalkerStepBatch(
+                embeds: stepEmbeds, offset: position, cache: batch.cache, padding: batch.padding, shift: batch.shift)
             batch.cache = cache
             position += 1
         }
 
-        // Turn each sentence's codes into audio.
-        return try frames.map { codes in
-            try checkCancellation()
+        return frames.map { codes in
             let count = codes.count / codeGroups
-            guard count > 0 else { return [] }
-            let codebooks = MLXArray(codes).reshaped(count, codeGroups).transposed(1, 0).expandedDimensions(axis: 0)
-            return codecDecoder.decode(codes: codebooks)  // [1, 16, T] → samples
+            guard count > 0 else { return nil }
+            return MLXArray(codes).reshaped(count, codeGroups).transposed(1, 0).expandedDimensions(axis: 0)  // [1, 16, T]
         }
+    }
+
+    /// The prompt with the whole text in it, as Qwen's `generate` builds it with `non_streaming_mode`:
+    /// `[instruct?, <|im_start|>assistant\n, codec prefix (all but its last token) under tts_pad… tts_bos,
+    /// every text token and tts_eos each over codec_pad, tts_pad over codec_bos]`. Returns it and the tts_pad
+    /// embedding, which every step after it adds.
+    func buildWholeTextPrompt(
+        textTokens: [Int], codecPrefixTokens: [Int32], instructTokens: [Int]?
+    ) -> (prompt: MLXArray, ttsPadEmbed: MLXArray) {
+        let hiddenSize = config.talker.hiddenSize
+        let textEmbeds = talker.embedText(MLXArray(textTokens.map { Int32($0) }).expandedDimensions(axis: 0))
+        let codecEmbeds = talker.embedCodec(MLXArray(codecPrefixTokens).expandedDimensions(axis: 0))
+        let codecLength = codecEmbeds.dim(1)
+        func special(_ token: Int) -> MLXArray {
+            talker.embedText(MLXArray([Int32(token)]).expandedDimensions(axis: 0))  // [1, 1, D]
+        }
+        let ttsPad = special(CodecTokens.ttsPad)
+        let ttsBos = special(CodecTokens.ttsBos)
+        let ttsEos = special(CodecTokens.ttsEos)
+        func codec(_ token: Int, count: Int) -> MLXArray {
+            talker.embedCodec(MLXArray([Int32](repeating: Int32(token), count: count)).expandedDimensions(axis: 0))
+        }
+
+        // <|im_start|>assistant\n
+        let role = textEmbeds[0..., 0..<3, 0...]
+        // The codec prefix but its last token (codec_bos), under tts_pad and then tts_bos.
+        let overlay = concatenated([broadcast(ttsPad, to: [1, codecLength - 2, hiddenSize]), ttsBos], axis: 1)
+        let prefix = overlay + codecEmbeds[0..., 0..<(codecLength - 1), 0...]
+        // The text: everything between the role and the closing `<|im_end|>\n<|im_start|>assistant\n`.
+        let textEnd = max(textTokens.count - 5, 3)
+        let body = concatenated([textEmbeds[0..., 3..<textEnd, 0...], ttsEos], axis: 1)
+        let text = body + codec(CodecTokens.codecPad, count: body.dim(1))
+        let start = ttsPad + codec(CodecTokens.codecBos, count: 1)
+
+        var parts = [role, prefix, text, start]
+        if let instructTokens {
+            parts.insert(talker.embedText(MLXArray(instructTokens.map { Int32($0) }).expandedDimensions(axis: 0)), at: 0)
+        }
+        return (concatenated(parts, axis: 1), ttsPad)
+    }
+
+    /// Runs `prompts` through the talker together. Shorter ones are padded at the front, so every prompt ends at the
+    /// same step and the rows step together; attention never looks at the padding, and each row's positions start at 0
+    /// as they do alone (a row shifted along by its padding came out noticeably different a step later). Returns the
+    /// talker's outputs for every position and how much padding each row has.
+    func prefillPadded(_ prompts: [MLXArray]) -> (
+        logits: MLXArray, hidden: MLXArray, cache: [(MLXArray, MLXArray)], padding: [Int]
+    ) {
+        let hiddenSize = config.talker.hiddenSize
+        let length = prompts.map { $0.dim(1) }.max() ?? 0
+        let padding = prompts.map { length - $0.dim(1) }
+        let embeds = concatenated(prompts.map { prompt in
+            let missing = length - prompt.dim(1)
+            guard missing > 0 else { return prompt }
+            return concatenated([MLXArray.zeros([1, missing, hiddenSize]).asType(prompt.dtype), prompt], axis: 1)
+        }, axis: 0)  // [B, length, D]
+        guard padding.contains(where: { $0 > 0 }) else {
+            let (logits, hidden, cache) = talker(inputsEmbeds: embeds, offset: MLXArray(Int32(0)), cache: nil)
+            return (logits, hidden, cache, padding)
+        }
+        let (logits, hidden, cache) = talker(
+            inputsEmbeds: embeds,
+            offset: MLXArray(padding.map { Int32(-$0) }),
+            attentionMask: Self.paddedCausalMask(padding: padding, length: length, dtype: embeds.dtype),
+            cache: nil)
+        return (logits, hidden, cache, padding)
+    }
+
+    /// A causal mask for prompts padded at the front: row `b` sees neither later positions nor its first
+    /// `padding[b]`. [B, 1, length, length].
+    static func paddedCausalMask(padding: [Int], length: Int, dtype: DType) -> MLXArray {
+        let positions = MLXArray(0..<Int32(length))
+        let later = positions.reshaped(1, 1, length) .> positions.reshaped(1, length, 1)  // [1, L, L]
+        let padded = positions.reshaped(1, 1, length) .< MLXArray(padding.map(Int32.init)).reshaped(-1, 1, 1)  // [B, 1, L]
+        return MLX.where(logicalOr(later, padded), MLXArray(Float(-1e9)), MLXArray(Float(0)))
+            .expandedDimensions(axis: 1).asType(dtype)
+    }
+
+    /// For one step after the prompt: row `b` doesn't see its first `padding[b]` keys. [B, heads, 1, keys], the full
+    /// shape of the attention scores: MLX's attention broadcasts a smaller mask to the shape the compiled step was traced
+    /// with, which is a key short by the next step.
+    static func paddingMask(padding: [Int], heads: Int, keys: Int, dtype: DType) -> MLXArray {
+        let positions = MLXArray(0..<Int32(keys)).reshaped(1, 1, 1, keys)
+        let padded = positions .< MLXArray(padding.map(Int32.init)).reshaped(-1, 1, 1, 1)
+        let mask = MLX.where(padded, MLXArray(Float(-1e9)), MLXArray(Float(0))).asType(dtype)
+        return broadcast(mask, to: [padding.count, heads, 1, keys])
     }
 
     /// The first codebook's token for each row, sampled as `sampleToken` samples it for one sentence: the codes the
@@ -183,30 +314,48 @@ extension Qwen3TTSModel {
     }
 
     /// One talker step for every row, compiled for this many rows (see `compiledBatchTalkerSteps`). All rows are at the
-    /// same position: they started together.
+    /// same step: they started together. `padding` is how many keys at the start of each row's cache to skip, and
+    /// `shift` how far back each row's position is from `offset` (its prompt's padding; see `prefillPadded`).
     func executeTalkerStepBatch(
-        embeds: MLXArray, offset: Int, cache: [(MLXArray, MLXArray)]
+        embeds: MLXArray, offset: Int, cache: [(MLXArray, MLXArray)], padding: [Int] = [], shift: [Int] = []
     ) -> (MLXArray, MLXArray, [(MLXArray, MLXArray)]) {
         let rows = embeds.dim(0)
-        guard rows > 1 else { return executeTalkerStep(embeds: embeds, offset: offset, cache: cache) }
+        let masked = padding.contains { $0 > 0 }
+        let positions = shift.isEmpty ? [Int](repeating: offset, count: rows) : shift.map { offset - $0 }
+        guard rows > 1 || masked else { return executeTalkerStep(embeds: embeds, offset: positions[0], cache: cache) }
         // One position per row: given a single position, the fused RoPE kernel moves only the first row there and
         // leaves the others at the start, so they never come to an end.
-        let offsets = MLXArray([Int32](repeating: Int32(offset), count: rows))
+        let offsets = MLXArray(positions.map(Int32.init))
         let layers = config.talker.numLayers
+        // The cache comes after the embeddings, the positions and (when masked) the mask.
+        let cacheStart = masked ? 3 : 2
         let compiled: ([MLXArray]) -> [MLXArray]
-        if let cached = compiledBatchTalkerSteps[rows] {
+        if let cached = masked ? compiledMaskedBatchTalkerSteps[rows] : compiledBatchTalkerSteps[rows] {
             compiled = cached
         } else {
             let talker = talker
             compiled = compile(inputs: [talker], outputs: [talker], shapeless: true) { inputs in
                 var cache: [(MLXArray, MLXArray)] = []
-                for layer in 0..<layers { cache.append((inputs[2 + layer * 2], inputs[3 + layer * 2])) }
-                let (logits, hidden, newCache) = talker(inputsEmbeds: inputs[0], offset: inputs[1], cache: cache)
+                for layer in 0..<layers {
+                    let key: Int = cacheStart + layer * 2
+                    cache.append((inputs[key], inputs[key + 1]))
+                }
+                let (logits, hidden, newCache) = talker(
+                    inputsEmbeds: inputs[0], offset: inputs[1], attentionMask: masked ? inputs[2] : nil, cache: cache)
                 return [logits, hidden] + newCache.flatMap { [$0.0, $0.1] }
             }
-            compiledBatchTalkerSteps[rows] = compiled
+            if masked {
+                compiledMaskedBatchTalkerSteps[rows] = compiled
+            } else {
+                compiledBatchTalkerSteps[rows] = compiled
+            }
         }
-        let out = compiled([embeds, offsets] + cache.flatMap { [$0.0, $0.1] })
+        var inputs = [embeds, offsets]
+        if masked {
+            let keys = (cache.first?.0.dim(2) ?? 0) + embeds.dim(1)
+            inputs.append(Self.paddingMask(padding: padding, heads: config.talker.numHeads, keys: keys, dtype: embeds.dtype))
+        }
+        let out = compiled(inputs + cache.flatMap { [$0.0, $0.1] })
         // Typed one step at a time: with MLXArray's arithmetic in play, Swift 6.3 couldn't work out `$0 * 2` in time.
         var newCache: [(MLXArray, MLXArray)] = []
         for layer in 0..<layers {
@@ -291,18 +440,33 @@ extension CodePredictorModel {
 private struct VoiceBatchState {
     /// Which text each row is.
     var rows: [Int]
-    var trailing: MLXArray
+    /// The text still to feed each row, a token a step (nil when the whole text was in the prompt).
+    var trailing: MLXArray?
     /// Tokens each row has made, for the repetition penalty: [B, vocab].
     var seen: MLXArray
+    /// How many positions at the start of each row's cache are padding, which attention must skip.
+    var padding: [Int]
+    /// How far back each row's position is from the step's (its prompt's padding). Unlike `padding`, it stays as it
+    /// is when padding is dropped from the cache.
+    var shift: [Int]
     var cache: [(MLXArray, MLXArray)] = []
 
     /// Keeps only the rows at `kept` (`indices` is the same, as an array).
     mutating func keep(_ kept: [Int], indices: MLXArray) {
         rows = kept.map { rows[$0] }
+        padding = kept.map { padding[$0] }
+        shift = kept.map { shift[$0] }
         guard !kept.isEmpty else { return }
-        trailing = trailing[indices]
+        trailing = trailing?[indices]
         seen = seen[indices]
         cache = cache.map { ($0.0[indices], $0.1[indices]) }
+        // Padding every row left has is dropped from the cache, so the last row left needs no mask. Positions are
+        // kept as they were: RoPE only cares how far apart two positions are.
+        let shared = padding.min() ?? 0
+        if shared > 0 {
+            cache = cache.map { ($0.0[0..., 0..., shared..., 0...], $0.1[0..., 0..., shared..., 0...]) }
+            padding = padding.map { $0 - shared }
+        }
     }
 }
 

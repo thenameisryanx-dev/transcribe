@@ -93,6 +93,8 @@ public class Qwen3TTSModel {
     /// The talker step for several sentences at once, by batch size: a shapeless graph keeps the batch size it was traced
     /// with (the one in `compiledTalkerStep` gives one row back whatever it's given), so each size gets its own.
     var compiledBatchTalkerSteps: [Int: ([MLXArray]) -> [MLXArray]] = [:]
+    /// The same step with an attention mask, for batches whose prompts were padded to one length.
+    var compiledMaskedBatchTalkerSteps: [Int: ([MLXArray]) -> [MLXArray]] = [:]
 
     /// Cache for voice-cloning reference audio artifacts (speaker embedding, ICL codec tokens).
     /// Bounded LRU; survives across synthesize calls on the same model instance.
