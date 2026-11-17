@@ -156,7 +156,7 @@ final class ListenBenchmarkTests: XCTestCase {
         }
         let model = ListenModel(
             store: SpokenSentenceStore(root: directory.appendingPathComponent("listen_audio", isDirectory: true)),
-            defaults: UserDefaults(suiteName: "ListenBenchmark.\(UUID().uuidString)")!,
+            defaults: InMemoryDefaults(),
             textFileURL: directory.appendingPathComponent("listen.txt"),
             player: player,
             mlxWork: MLXWorkGate()
