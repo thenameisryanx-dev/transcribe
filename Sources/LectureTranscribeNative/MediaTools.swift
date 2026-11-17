@@ -24,6 +24,9 @@ final class MediaTools: @unchecked Sendable {
     static let audioBitrate = "128k"
     static let audioChannels = "1"
     static let processTimeout: TimeInterval = 30 * 60
+    /// Re-encoding mostly decodes the source (TrueHD, DTS, FLAC), which ffmpeg does on one core, so a long
+    /// recording is re-encoded in up to this many stretches at once, each its own ffmpeg reading only its part.
+    static let maxParallelEncodes = 4
 
     /// Containers a subtitled copy of a video can be saved in (by extension), with the subtitle format each takes.
     /// The .srt is added without re-encoding, so only containers that hold text subtitles qualify. The subtitles
@@ -49,7 +52,7 @@ final class MediaTools: @unchecked Sendable {
     let ffmpeg: URL
     let ffprobe: URL
     private let lock = NSLock()
-    private var running: Process?
+    private var running: Set<Process> = []
     private var cancelled = false
 
     init(ffmpeg: URL, ffprobe: URL) {
@@ -86,11 +89,11 @@ final class MediaTools: @unchecked Sendable {
         return MediaTools(ffmpeg: try find("ffmpeg", variable: "FFMPEG_BIN"), ffprobe: try find("ffprobe", variable: "FFPROBE_BIN"))
     }
 
-    /// Stops the ffmpeg or ffprobe running now, and any started later.
+    /// Stops the ffmpegs or ffprobe running now, and any started later.
     func cancel() {
         lock.withLock {
             cancelled = true
-            running?.terminate()
+            running.forEach { $0.terminate() }
         }
     }
 
@@ -116,9 +119,9 @@ final class MediaTools: @unchecked Sendable {
         try lock.withLock {
             if cancelled { throw CancellationError() }
             try process.run()
-            running = process
+            running.insert(process)
         }
-        defer { lock.withLock { running = nil } }
+        defer { lock.withLock { _ = running.remove(process) } }
 
         let timedOut = Flag()
         let timer = DispatchWorkItem {
@@ -317,8 +320,12 @@ final class MediaTools: @unchecked Sendable {
 
     /// Splits `audioTrack` of `url` into `part_NNN.m4a` files of at most `chunkSeconds`, cut at pauses.
     /// Mono or stereo AAC is copied without re-encoding when every piece fits the upload limit; anything else,
-    /// including surround audio, is re-encoded to mono AAC. `onProgress` gets how far along the split is.
-    func split(_ url: URL, into directory: URL, chunkSeconds: Int, audioTrack: Int = 0, onProgress: ((Double) -> Void)? = nil) throws -> [URL] {
+    /// including surround audio, is re-encoded to mono AAC, by up to `parallel` ffmpegs at once (each a stretch of
+    /// whole chunks). `onProgress` gets how far along the split is.
+    func split(
+        _ url: URL, into directory: URL, chunkSeconds: Int, audioTrack: Int = 0, parallel: Int = MediaTools.maxParallelEncodes,
+        onProgress: ((Double) -> Void)? = nil
+    ) throws -> [URL] {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var reported = 0.0
         func report(_ fraction: Double) {
@@ -369,16 +376,83 @@ final class MediaTools: @unchecked Sendable {
         }
 
         removeChunkFiles(in: directory)
-        try runWithProgress(
-            ["-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
-             "-i", url.path, "-vn", "-f", "segment"] + segmentArguments
-                + ["-reset_timestamps", "1", "-map", "0:a:\(audioTrack)", "-c:a", "aac",
-                   "-ac", Self.audioChannels, "-b:a", Self.audioBitrate, output],
-            totalSeconds: total, quiet: false, onProgress: reportWriting
-        )
+        let stretches = Self.encodeStretches(cuts: cuts, total: total, parallel: parallel)
+        if stretches.count > 1 {
+            try encodeInParallel(url, stretches: stretches, audioTrack: audioTrack, output: output, total: total, onProgress: reportWriting)
+        } else {
+            try runWithProgress(
+                ["-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
+                 "-i", url.path, "-vn", "-f", "segment"] + segmentArguments
+                    + ["-reset_timestamps", "1", "-map", "0:a:\(audioTrack)", "-c:a", "aac",
+                       "-ac", Self.audioChannels, "-b:a", Self.audioBitrate, output],
+                totalSeconds: total, quiet: false, onProgress: reportWriting
+            )
+        }
         let parts = chunkFiles(in: directory)
         guard !parts.isEmpty else { throw Failure("No chunks created. Is the input a valid audio file?") }
         return parts
+    }
+
+    /// A stretch of the recording re-encoded by one ffmpeg: from `start` to `end` (nil: to the end), its chunks
+    /// numbered from `firstChunk`, cut at `cuts` (seconds from `start`).
+    struct EncodeStretch: Equatable {
+        var firstChunk: Int
+        var start: Double
+        var end: Double?
+        var cuts: [Double]
+    }
+
+    /// The chunks between `cuts` shared out, in order, over up to `maxParallelEncodes` stretches, each with
+    /// about the same number of chunks. One stretch (the whole recording) when there are no cuts.
+    static func encodeStretches(cuts: [Double], total: Double, parallel: Int = maxParallelEncodes) -> [EncodeStretch] {
+        guard !cuts.isEmpty, total > 0, parallel > 1 else { return [EncodeStretch(firstChunk: 0, start: 0, end: nil, cuts: cuts)] }
+        let bounds = [0] + cuts
+        let chunks = cuts.count + 1
+        let count = min(parallel, chunks)
+        return (0..<count).map { index in
+            let first = index * chunks / count
+            let next = (index + 1) * chunks / count
+            let start = bounds[first]
+            return EncodeStretch(
+                firstChunk: first,
+                start: start,
+                end: next < chunks ? bounds[next] : nil,
+                cuts: cuts[first..<(next - 1)].map { $0 - start }
+            )
+        }
+    }
+
+    /// Re-encodes each stretch with its own ffmpeg, all at once. Each seeks straight to its start, so none
+    /// reads or decodes another's part; together they write the same `part_NNN.m4a` files, cut at the same
+    /// times, as one ffmpeg would.
+    private func encodeInParallel(
+        _ url: URL, stretches: [EncodeStretch], audioTrack: Int, output: String, total: Double,
+        onProgress: @escaping (Double) -> Void
+    ) throws {
+        let state = ParallelEncodes(stretches: stretches.count, total: total, onProgress: onProgress)
+        DispatchQueue.concurrentPerform(iterations: stretches.count) { index in
+            let stretch = stretches[index]
+            let length = (stretch.end ?? total) - stretch.start
+            var range = ["-ss", String(format: "%.3f", stretch.start)]
+            if let end = stretch.end { range += ["-to", String(format: "%.3f", end)] }
+            // A stretch of one chunk still goes through the segment muxer, so its file is named the same way.
+            let segments = stretch.cuts.isEmpty
+                ? ["-segment_time", String(Int(length.rounded(.up)) + 60)]
+                : ["-segment_times", stretch.cuts.map { String(format: "%.3f", $0) }.joined(separator: ",")]
+            do {
+                try runWithProgress(
+                    ["-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats"] + range
+                        + ["-i", url.path, "-vn", "-f", "segment"] + segments
+                        + ["-segment_start_number", String(stretch.firstChunk),
+                           "-reset_timestamps", "1", "-map", "0:a:\(audioTrack)", "-c:a", "aac",
+                           "-ac", Self.audioChannels, "-b:a", Self.audioBitrate, output],
+                    totalSeconds: length, quiet: false
+                ) { state.reached(fraction: $0, ofSeconds: length, stretch: index) }
+            } catch {
+                state.failed(error, stretch: index)
+            }
+        }
+        try state.throwFirstFailure()
     }
 
     /// Copies `audioTrack` of a .qta file (a QuickTime container) to `output`, an .m4a holding only that track
@@ -528,4 +602,39 @@ private final class Flag: @unchecked Sendable {
 /// Data one thread writes before another reads it (ordered by a DispatchGroup).
 private final class DataBox: @unchecked Sendable {
     var value = Data()
+}
+
+/// What the ffmpegs re-encoding stretches at once share: how far each has got, and how any failed.
+private final class ParallelEncodes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seconds: [Double]
+    private var failures: [Int: Error] = [:]
+    private let total: Double
+    private let onProgress: (Double) -> Void
+
+    init(stretches: Int, total: Double, onProgress: @escaping (Double) -> Void) {
+        seconds = Array(repeating: 0, count: stretches)
+        self.total = total
+        self.onProgress = onProgress
+    }
+
+    /// Under the lock, so `onProgress` hears from one ffmpeg at a time.
+    func reached(fraction: Double, ofSeconds length: Double, stretch: Int) {
+        lock.withLock {
+            seconds[stretch] = fraction * length
+            onProgress(min(seconds.reduce(0, +) / total, 1))
+        }
+    }
+
+    func failed(_ error: Error, stretch: Int) {
+        lock.withLock { failures[stretch] = error }
+    }
+
+    /// Cancelling stops them all, so that's what's reported; otherwise the earliest stretch's error.
+    func throwFirstFailure() throws {
+        try lock.withLock {
+            if failures.values.contains(where: { $0 is CancellationError }) { throw CancellationError() }
+            if let first = failures.keys.min(), let error = failures[first] { throw error }
+        }
+    }
 }

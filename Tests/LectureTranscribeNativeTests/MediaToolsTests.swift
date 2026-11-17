@@ -74,4 +74,90 @@ final class MediaToolsTests: XCTestCase {
             XCTAssertEqual(tools.duration(output), 3, accuracy: 0.1, "The chosen (second) track, \(codec)")
         }
     }
+
+    /// Chunks are shared out in order over up to four stretches, each starting at a cut.
+    func testChunksAreSharedOutOverStretches() {
+        XCTAssertEqual(MediaTools.encodeStretches(cuts: [], total: 50), [.init(firstChunk: 0, start: 0, end: nil, cuts: [])])
+        XCTAssertEqual(MediaTools.encodeStretches(cuts: [10, 20], total: 30, parallel: 1),
+                       [.init(firstChunk: 0, start: 0, end: nil, cuts: [10, 20])])
+        XCTAssertEqual(MediaTools.encodeStretches(cuts: [10], total: 25), [
+            .init(firstChunk: 0, start: 0, end: 10, cuts: []),
+            .init(firstChunk: 1, start: 10, end: nil, cuts: []),
+        ])
+        // Sixteen chunks, as a 2.5-hour movie makes: four stretches of four.
+        let cuts = (1...15).map { Double($0) * 600 }
+        let stretches = MediaTools.encodeStretches(cuts: cuts, total: 9_000)
+        XCTAssertEqual(stretches.map(\.firstChunk), [0, 4, 8, 12])
+        XCTAssertEqual(stretches.map(\.start), [0, 2_400, 4_800, 7_200])
+        XCTAssertEqual(stretches.map(\.end), [2_400, 4_800, 7_200, nil])
+        XCTAssertEqual(stretches[1].cuts, [600, 1_200, 1_800])
+        XCTAssertEqual(stretches.map(\.cuts.count).reduce(0, +) + stretches.count, 16)
+        // Seven chunks over four stretches: none empty, in order.
+        let uneven = MediaTools.encodeStretches(cuts: [1, 2, 3, 4, 5, 6], total: 7)
+        XCTAssertEqual(uneven.map(\.firstChunk), [0, 1, 3, 5])
+        XCTAssertEqual(uneven.map(\.cuts), [[], [1], [1], [1]])
+    }
+
+    /// Surround audio re-encoded by several ffmpegs at once comes out as the same chunks, cut at the same times,
+    /// as when one ffmpeg does it all.
+    func testParallelReencodingMakesTheSameChunks() throws {
+        let tools = try MediaTools.located()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Five minutes of 5.1 tone with a short pause every 50 seconds, in a Matroska file like a movie's.
+        let video = directory.appendingPathComponent("movie.mkv")
+        let made = try tools.run(tools.ffmpeg, [
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "sine=frequency=300:sample_rate=48000:duration=300",
+            "-af", "volume='if(lt(mod(t,50),49.4),1,0)':eval=frame,pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0",
+            "-c:a", "flac", video.path,
+        ])
+        XCTAssertEqual(made.status, 0, made.errors)
+        XCTAssertEqual(tools.channelCount(video), 6)
+
+        var progress: [Double] = []
+        let parallel = try tools.split(video, into: directory.appendingPathComponent("parallel"), chunkSeconds: 60) {
+            progress.append($0)
+        }
+        let single = try tools.split(video, into: directory.appendingPathComponent("single"), chunkSeconds: 60, parallel: 1)
+        XCTAssertEqual(parallel.count, 6)
+        XCTAssertEqual(parallel.map(\.lastPathComponent), single.map(\.lastPathComponent))
+        for (a, b) in zip(parallel, single) {
+            XCTAssertEqual(tools.duration(a), tools.duration(b), accuracy: 0.05, a.lastPathComponent)
+            XCTAssertEqual(tools.codecName(a), "aac")
+            XCTAssertEqual(tools.channelCount(a), 1)
+        }
+        XCTAssertEqual(parallel.map(tools.duration).reduce(0, +), 300, accuracy: 0.2)
+        XCTAssertEqual(progress, progress.sorted(), "Progress never moves backwards")
+        XCTAssertEqual(progress.last ?? 0, 1, accuracy: 0.01)
+    }
+
+    /// Cancelling stops every ffmpeg re-encoding at once, not just the last one started.
+    func testCancellingStopsEveryParallelEncode() throws {
+        let tools = try MediaTools.located()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let video = directory.appendingPathComponent("movie.mkv")
+        let made = try tools.run(tools.ffmpeg, [
+            "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "anoisesrc=d=1500:c=pink:r=48000:a=0.1",
+            "-af", "pan=5.1|FL=c0|FR=c0|FC=c0|LFE=c0|BL=c0|BR=c0", "-c:a", "flac", video.path,
+        ])
+        XCTAssertEqual(made.status, 0, made.errors)
+
+        // Cancelled once the chunks are being written (past the share spent finding pauses).
+        var cancelledAt: Date?
+        XCTAssertThrowsError(try tools.split(video, into: directory.appendingPathComponent("chunks"), chunkSeconds: 300) { fraction in
+            if cancelledAt == nil, fraction > MediaTools.splitPlanShare + 0.05 {
+                cancelledAt = Date()
+                tools.cancel()
+            }
+        }) {
+            XCTAssertTrue($0 is CancellationError, "\($0)")
+        }
+        let stopped = try XCTUnwrap(cancelledAt, "Cancelled while writing")
+        XCTAssertLessThan(Date().timeIntervalSince(stopped), 2, "Every ffmpeg stopped when cancelled")
+    }
 }
