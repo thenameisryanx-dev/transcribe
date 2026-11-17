@@ -984,10 +984,19 @@ final class ModelBoxTests: XCTestCase {
         var unloaded = false
     }
 
+    /// Counts the times MLX would be asked to hand its memory back (MLX itself isn't started).
+    final class MemoryReturns: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        var times: Int { lock.withLock { count } }
+        func returned() { lock.withLock { count += 1 } }
+    }
+
     /// The model is unloaded first (the Qwen voice's decoder otherwise keeps its weights alive after the model is
-    /// dropped), then dropped.
+    /// dropped), then dropped, then MLX's spare memory goes back to macOS.
     func testReleasingUnloadsTheModelThenDropsIt() async {
-        let box = ModelBox<Model>(free: { $0.unloaded = true })
+        let returns = MemoryReturns()
+        let box = ModelBox<Model>(free: { $0.unloaded = true }, returnMemory: returns.returned)
         var model: Model? = Model()
         weak var dropped = model
         box.value = model
@@ -997,7 +1006,18 @@ final class ModelBoxTests: XCTestCase {
         XCTAssertNil(box.value)
         await mlxQueueIdle()
         XCTAssertTrue(held.unloaded)
+        XCTAssertEqual(returns.times, 1)
         _ = consume held
         XCTAssertNil(dropped)
+    }
+
+    /// Unloading a voice that was never loaded (deleting the voice models, say) has nothing to free and leaves MLX
+    /// alone.
+    func testReleasingAnEmptyBoxDoesNothing() async {
+        let returns = MemoryReturns()
+        let box = ModelBox<Model>(free: { _ in XCTFail("Nothing to unload") }, returnMemory: returns.returned)
+        box.release()
+        await mlxQueueIdle()
+        XCTAssertEqual(returns.times, 0)
     }
 }

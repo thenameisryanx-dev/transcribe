@@ -294,10 +294,14 @@ final class ModelBox<Model>: @unchecked Sendable {
     private let lock = NSLock()
     private var model: Model?
     private let free: (Model) -> Void
+    private let returnMemory: () -> Void
 
     /// `free` lets go of what the model holds before it's dropped, for models that keep part of themselves alive.
-    init(free: @escaping (Model) -> Void = { _ in }) {
+    /// `returnMemory` hands what MLX kept back to macOS afterwards (tests pass their own, since starting MLX without
+    /// its shaders, as on GitHub's runner, stops the test run).
+    init(free: @escaping (Model) -> Void = { _ in }, returnMemory: @escaping () -> Void = MetalBudget.returnSpareMemory) {
         self.free = free
+        self.returnMemory = returnMemory
     }
 
     var value: Model? {
@@ -306,22 +310,26 @@ final class ModelBox<Model>: @unchecked Sendable {
     }
 
     /// Frees the model on `mlxQueue` and hands its memory back to macOS. Freeing it removes its compiled graphs from
-    /// MLX's compile cache, which must not happen while the other model is using that cache there.
+    /// MLX's compile cache, which must not happen while the other model is using that cache there. Without a model
+    /// (the voice was never loaded) there's nothing to free, and MLX isn't touched.
     func release() {
-        let old = ModelBox(free: free)
-        lock.withLock {
-            old.model = model
-            model = nil
+        let old: Model? = lock.withLock {
+            defer { model = nil }
+            return model
         }
+        guard let old else { return }
+        let held = ModelBox(free: free, returnMemory: returnMemory)
+        held.value = old
         let free = free
+        let returnMemory = returnMemory
         mlxQueue.async {
             // Once the app is quitting the model stays until the process ends.
             try? MLXWorkGate.shared.run {
-                if let model = old.value { free(model) }
-                old.value = nil
+                if let model = held.value { free(model) }
+                held.value = nil
                 // MLX keeps freed memory to reuse it, so without this the app kept the models' gigabytes until it
                 // quit.
-                MetalBudget.returnSpareMemory()
+                returnMemory()
             }
         }
     }
