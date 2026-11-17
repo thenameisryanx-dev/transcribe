@@ -223,6 +223,11 @@ private func onMLXQueue<T>(_ work: @escaping @Sendable (_ isCancelled: @escaping
     }
 }
 
+/// Returns once the MLX work queued so far, a model being freed among it, is done.
+func mlxQueueIdle() async {
+    await withCheckedContinuation { continuation in mlxQueue.async { continuation.resume() } }
+}
+
 private final class CancellationFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
@@ -285,26 +290,39 @@ final class MLXWorkGate: @unchecked Sendable {
 
 /// Holds a model that isn't Sendable. Only touched on `mlxQueue` (and while loading, before anything else can
 /// reach it).
-private final class ModelBox<Model>: @unchecked Sendable {
+final class ModelBox<Model>: @unchecked Sendable {
     private let lock = NSLock()
     private var model: Model?
+    private let free: (Model) -> Void
+
+    /// `free` lets go of what the model holds before it's dropped, for models that keep part of themselves alive.
+    init(free: @escaping (Model) -> Void = { _ in }) {
+        self.free = free
+    }
 
     var value: Model? {
         get { lock.withLock { model } }
         set { lock.withLock { model = newValue } }
     }
 
-    /// Frees the model on `mlxQueue`. Freeing it removes its compiled graphs from MLX's compile cache, which must
-    /// not happen while the other model is using that cache there.
+    /// Frees the model on `mlxQueue` and hands its memory back to macOS. Freeing it removes its compiled graphs from
+    /// MLX's compile cache, which must not happen while the other model is using that cache there.
     func release() {
-        let old = ModelBox()
+        let old = ModelBox(free: free)
         lock.withLock {
             old.model = model
             model = nil
         }
+        let free = free
         mlxQueue.async {
             // Once the app is quitting the model stays until the process ends.
-            try? MLXWorkGate.shared.run { old.value = nil }
+            try? MLXWorkGate.shared.run {
+                if let model = old.value { free(model) }
+                old.value = nil
+                // MLX keeps freed memory to reuse it, so without this the app kept the models' gigabytes until it
+                // quit.
+                MetalBudget.returnSpareMemory()
+            }
         }
     }
 }
@@ -326,7 +344,9 @@ enum SpeechEngineError: LocalizedError {
 /// Qwen3-TTS 0.6B CustomVoice: nine built-in voices, ten languages, 24 kHz audio.
 final class Qwen3Synthesizer: SpeechSynthesizer, @unchecked Sendable {
     let identifier = "qwen3-tts|\(SpeechModelFiles.ttsModelID)"
-    private let box = ModelBox<Qwen3TTSModel>()
+    /// Unloaded before it's dropped: its audio decoder's compiled pass keeps the decoder, and its half a gigabyte of
+    /// weights, alive after the model is gone.
+    private let box = ModelBox<Qwen3TTSModel>(free: { $0.unload() })
 
     var isLoaded: Bool { box.value != nil }
 

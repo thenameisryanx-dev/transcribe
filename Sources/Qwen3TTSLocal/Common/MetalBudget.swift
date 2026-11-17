@@ -30,6 +30,18 @@ public enum MetalBudget {
         Memory.activeMemory
     }
 
+    /// MLX memory kept for reuse (freed arrays it hasn't handed back yet) in bytes.
+    public static var cacheMemory: Int {
+        Memory.cacheMemory
+    }
+
+    /// Hands the memory MLX kept for reuse back to the system. MLX keeps freed arrays to reuse them, up to its cache
+    /// limit, and the limit goes back to MLX's own (most of the Mac's memory) once no model holds it lower, so a
+    /// freed model's weights otherwise stay in the app until it quits.
+    public static func returnSpareMemory() {
+        Memory.clearCache()
+    }
+
     /// Check if a model of the given size (bytes) can fit in available GPU memory.
     public static func canFit(modelBytes: Int) -> Bool {
         guard let available = availableBytes else { return true }

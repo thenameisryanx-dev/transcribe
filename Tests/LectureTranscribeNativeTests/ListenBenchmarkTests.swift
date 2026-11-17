@@ -257,4 +257,48 @@ final class ListenBenchmarkTests: XCTestCase {
         XCTAssertEqual(model.playback, .stopped, "Didn't finish reading")
         XCTAssertEqual(stops, 0)
     }
+
+    /// Unloading the voice gives its memory back to macOS: after reading a few sentences and unloading, the app holds
+    /// about what it held before loading, not the models' 3 GB and what making speech used.
+    func testUnloadingTheVoiceGivesItsMemoryBack() async throws {
+        guard ProcessInfo.processInfo.environment["LISTEN_BENCHMARK"] == "1" else {
+            throw XCTSkip("Set LISTEN_BENCHMARK=1 to measure the real voice.")
+        }
+        try XCTSkipUnless(SpeechModelFiles.isDownloaded(), "The Qwen3-TTS models aren't downloaded.")
+        let before = Self.footprint()
+        let speaker = SentenceSpeaker(synthesizer: Qwen3Synthesizer(), aligner: Qwen3Aligner())
+        try await speaker.synthesizer.load { _, _ in }
+        try await speaker.aligner.load { _, _ in }
+        let sentences = Array(ReadingDocument(text: Self.longerText).sentences.prefix(8))
+        _ = try await speaker.speak(sentences, voice: "ryan", language: .english)
+        let loaded = Self.footprint()
+        speaker.synthesizer.unload()
+        speaker.aligner.unload()
+        await mlxQueueIdle()
+        // macOS takes freed GPU memory off the app's count a moment later.
+        try await Task.sleep(for: .seconds(5))
+        let after = Self.footprint()
+        print(String(format: "BENCH memory: before %.2f GB, loaded %.2f GB, after unloading %.2f GB (MLX active %.2f GB, kept %.2f GB)",
+                     Double(before) / 1e9, Double(loaded) / 1e9, Double(after) / 1e9,
+                     Double(MetalBudget.activeMemory) / 1e9, Double(MetalBudget.cacheMemory) / 1e9))
+        XCTAssertLessThan(after, before + 600_000_000)
+
+        // And the voice loads and speaks again afterwards.
+        try await speaker.synthesizer.load { _, _ in }
+        try await speaker.aligner.load { _, _ in }
+        let again = try await speaker.speak(Array(sentences.prefix(1)), voice: "ryan", language: .english)
+        XCTAssertGreaterThan(again.first?.samples.count ?? 0, 24_000)
+    }
+
+    /// The process's memory as Activity Monitor counts it.
+    static func footprint() -> Int {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? Int(info.phys_footprint) : 0
+    }
 }
