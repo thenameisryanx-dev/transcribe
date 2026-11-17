@@ -127,6 +127,42 @@ final class UpdateInstallerTests: XCTestCase {
         XCTAssertFalse(try isMounted(work.appendingPathComponent("mount")), "The DMG should be ejected.")
     }
 
+    /// Opening the DMG is tried again, after a short wait, while macOS's disk image service is busy; a different
+    /// failure, or one that lasts, is reported.
+    func testOpeningTheDMGWaitsOutABusyDiskImageService() throws {
+        let busy = UpdateInstallError("The download couldn't be opened (hdiutil: attach failed - Resource temporarily unavailable).")
+        let damaged = UpdateInstallError("The download couldn't be opened (hdiutil: attach failed - image not recognized).")
+        let dmg = URL(fileURLWithPath: "/tmp/update.dmg")
+        let mount = URL(fileURLWithPath: "/tmp/mount")
+
+        var tries = 0
+        var waited: [TimeInterval] = []
+        try UpdateInstaller.attach(dmg, at: mount, open: { _, _ in
+            tries += 1
+            if tries < 3 { throw busy }
+        }, wait: { waited.append($0) })
+        XCTAssertEqual(tries, 3, "Opened on the third try")
+        XCTAssertEqual(waited, [1, 2])
+
+        tries = 0
+        waited = []
+        XCTAssertThrowsError(try UpdateInstaller.attach(dmg, at: mount, open: { _, _ in
+            tries += 1
+            throw damaged
+        }, wait: { waited.append($0) })) { XCTAssertEqual($0.localizedDescription, damaged.localizedDescription) }
+        XCTAssertEqual(tries, 1, "A damaged download isn't tried again")
+        XCTAssertEqual(waited, [])
+
+        tries = 0
+        waited = []
+        XCTAssertThrowsError(try UpdateInstaller.attach(dmg, at: mount, open: { _, _ in
+            tries += 1
+            throw busy
+        }, wait: { waited.append($0) })) { XCTAssertEqual($0.localizedDescription, busy.localizedDescription) }
+        XCTAssertEqual(tries, 4, "Gives up after four tries")
+        XCTAssertEqual(waited, [1, 2, 4])
+    }
+
     func testRejectsDMGWithWrongVersionOrApp() throws {
         let dmg = try fakeDMG()
         let work = try UpdateInstaller.makeWorkDirectory()

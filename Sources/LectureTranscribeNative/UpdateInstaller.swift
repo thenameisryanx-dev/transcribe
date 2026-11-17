@@ -44,6 +44,36 @@ enum UpdateInstaller {
         return url
     }
 
+    /// Waits between tries at opening the DMG while macOS's disk image service is busy: four tries over about seven
+    /// seconds.
+    static let attachRetryDelays: [TimeInterval] = [1, 2, 4]
+
+    /// Opens `dmg` at `mountPoint`. hdiutil now and then fails with "Resource temporarily unavailable" while the disk
+    /// image service is busy (it failed GitHub's check once, on a DMG that opened fine the next time), so that, or
+    /// "Resource busy", is tried again after a moment; any other failure, such as a damaged download, ends at once.
+    /// `open` and `wait` are swapped out by tests.
+    static func attach(
+        _ dmg: URL,
+        at mountPoint: URL,
+        open: (URL, URL) throws -> Void = { dmg, mountPoint in
+            try run("/usr/bin/hdiutil", ["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mountPoint.path, dmg.path],
+                    failure: "The download couldn't be opened")
+        },
+        wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) throws {
+        var delays = attachRetryDelays[...]
+        while true {
+            do {
+                return try open(dmg, mountPoint)
+            } catch {
+                let message = error.localizedDescription.lowercased()
+                let busy = message.contains("temporarily unavailable") || message.contains("resource busy")
+                guard busy, let delay = delays.popFirst() else { throw error }
+                wait(delay)
+            }
+        }
+    }
+
     /// Opens the downloaded DMG, checks the app inside, and copies it into `workDirectory`. Returns the copy.
     static func stageApp(
         fromDMG dmgURL: URL,
@@ -53,8 +83,7 @@ enum UpdateInstaller {
     ) throws -> URL {
         let mountPoint = workDirectory.appendingPathComponent("mount", isDirectory: true)
         try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: true)
-        try run("/usr/bin/hdiutil", ["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mountPoint.path, dmgURL.path],
-                failure: "The download couldn't be opened")
+        try attach(dmgURL, at: mountPoint)
         defer {
             _ = try? run("/usr/bin/hdiutil", ["detach", mountPoint.path, "-force"], failure: "")
         }
