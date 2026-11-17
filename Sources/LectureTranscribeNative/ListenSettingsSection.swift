@@ -46,7 +46,8 @@ struct ListenSettingsSection: View {
         } footer: {
             Text("Listen reads text aloud on this Mac with Qwen3-TTS and times each word with Qwen3-ForcedAligner. "
                 + "Play makes the speech for the whole text first, several sentences at once, then opens the reader. "
-                + "Making more at once is faster (on a base M4, 8 at once is about 3.5 times as fast as 1) but keeps "
+                + "Making more at once is faster until the GPU is full (on a base M4, 24 at once is about 3.6 times as fast "
+                + "as 1, and 32 is no faster) but keeps "
                 + "the GPU busier, so other apps may feel slower while it works. The voice downloads once (about "
                 + "3.5 GB) and then works offline. Speech already made is saved so it plays at once next time; "
                 + "speech not heard for a month is removed.")
