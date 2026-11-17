@@ -819,3 +819,27 @@ final class SpokenNumbersTests: XCTestCase {
         XCTAssertEqual(sentence.voiceText(in: .english), "From nineteen ninety to two thousand.")
     }
 }
+
+/// Unloading a voice model lets go of it entirely, so its memory goes back to macOS.
+final class ModelBoxTests: XCTestCase {
+    final class Model {
+        var unloaded = false
+    }
+
+    /// The model is unloaded first (the Qwen voice's decoder otherwise keeps its weights alive after the model is
+    /// dropped), then dropped.
+    func testReleasingUnloadsTheModelThenDropsIt() async {
+        let box = ModelBox<Model>(free: { $0.unloaded = true })
+        var model: Model? = Model()
+        weak var dropped = model
+        box.value = model
+        let held = model!
+        model = nil
+        box.release()
+        XCTAssertNil(box.value)
+        await mlxQueueIdle()
+        XCTAssertTrue(held.unloaded)
+        _ = consume held
+        XCTAssertNil(dropped)
+    }
+}
