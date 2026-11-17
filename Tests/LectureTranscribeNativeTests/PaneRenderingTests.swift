@@ -137,3 +137,16 @@ final class ModelMenuTests: XCTestCase {
         )
     }
 }
+
+/// The Listen pane's empty-text hint says what opens and what happens next, before and after the voice is downloaded.
+final class ListenPlaceholderTests: XCTestCase {
+    func testTheHintFollowsTheVoiceDownload() {
+        let downloaded = ListenPaneView.placeholderDetail(voiceDownloaded: true)
+        let notYet = ListenPaneView.placeholderDetail(voiceDownloaded: false)
+        for hint in [downloaded, notYet] {
+            XCTAssertTrue(hint.hasPrefix("PDFs, Word documents, web pages saved as HTML, and text or Markdown files all work. You can also drop a file here. "), hint)
+        }
+        XCTAssertTrue(downloaded.hasSuffix("Press Play to make the speech on this Mac; then it's read aloud with each word highlighted as it's spoken. Click any word to jump to it."), downloaded)
+        XCTAssertTrue(notYet.hasSuffix("Once the voice below is downloaded, it's read aloud with each word highlighted as it's spoken."), notYet)
+    }
+}
