@@ -103,13 +103,7 @@ struct ListenPaneView: View {
             Group {
                 Text("Type or paste text here, or open a file.")
                     .font(.system(size: 18))
-                Text("PDFs, Word documents, web pages saved as HTML, and text or Markdown files all work. "
-                    + "You can also drop a file here. "
-                    + (model.modelsDownloaded
-                        ? "Press Play to make the speech on this Mac; then it's read aloud with each word highlighted "
-                            + "as it's spoken. Click any word to jump to it."
-                        : "Once the voice below is downloaded, it's read aloud with each word highlighted as it's "
-                            + "spoken."))
+                Text(Self.placeholderDetail(voiceDownloaded: model.modelsDownloaded))
                     .font(.callout)
             }
             .allowsHitTesting(false)
@@ -120,6 +114,21 @@ struct ListenPaneView: View {
         .frame(maxWidth: 520, alignment: .leading)
         .padding(.horizontal, 33)
         .padding(.vertical, 24)
+    }
+
+    /// What can be opened, and what happens next once the voice is (or isn't yet) downloaded. Built from separate
+    /// strings: one long `+` expression around the choice took Xcode 26's compiler too long to type-check.
+    static func placeholderDetail(voiceDownloaded: Bool) -> String {
+        let files: String = "PDFs, Word documents, web pages saved as HTML, and text or Markdown files all work. "
+            + "You can also drop a file here. "
+        let next: String
+        if voiceDownloaded {
+            next = "Press Play to make the speech on this Mac; then it's read aloud with each word highlighted as it's "
+                + "spoken. Click any word to jump to it."
+        } else {
+            next = "Once the voice below is downloaded, it's read aloud with each word highlighted as it's spoken."
+        }
+        return files + next
     }
 
     private func errorBanner(_ message: String) -> some View {
