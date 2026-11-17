@@ -777,7 +777,7 @@ enum ListenDocumentImporter {
         if type?.conforms(to: .pdf) == true {
             guard let pdf = PDFDocument(url: url) else { throw ImportError.unreadable }
             let pages = (0..<pdf.pageCount).compactMap { pdf.page(at: $0)?.string }
-            return unwrapLines(pages.joined(separator: "\n\n"))
+            return unwrapLines(PDFPageText.withoutHeadersAndFooters(pages).joined(separator: "\n\n"))
         }
         if let type, type.conforms(to: .plainText) || type.conforms(to: UTType("net.daringfireball.markdown") ?? .plainText) {
             var encoding = String.Encoding.utf8

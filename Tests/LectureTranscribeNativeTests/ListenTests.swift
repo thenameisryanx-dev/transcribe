@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 
@@ -52,6 +53,40 @@ final class FakeSynthesizer: SpeechSynthesizer, @unchecked Sendable {
 
     func unload() {
         lock.withLock { loaded = false }
+    }
+}
+
+/// A voice whose takes are given in advance, batch by batch: clean, crackling or babbling. Records what each batch
+/// was asked to say.
+final class ScriptedSynthesizer: SpeechSynthesizer, @unchecked Sendable {
+    enum Take { case clean, crackle, babble }
+    let identifier = "scripted-voice"
+    private let lock = NSLock()
+    private var takes: [[Take]]
+    private var said: [[String]] = []
+
+    init(takes: [[Take]]) { self.takes = takes }
+
+    var batches: [[String]] { lock.withLock { said } }
+    var isLoaded: Bool { true }
+    func load(progress: @escaping @Sendable (Double, String) -> Void) async throws {}
+    func unload() {}
+
+    func synthesize(_ texts: [String], voice: String, language: ListenLanguage) async throws -> [SynthesizedSpeech] {
+        let batch = lock.withLock { () -> [Take] in
+            said.append(texts)
+            return takes.isEmpty ? [] : takes.removeFirst()
+        }
+        return texts.indices.map { index in
+            let take = batch.indices.contains(index) ? batch[index] : .clean
+            let rate = 24_000
+            let seconds = take == .babble ? 30.0 : 1.0
+            var samples = (0..<Int(seconds * Double(rate))).map { Float(sin(Double($0) * 2 * .pi * 220 / Double(rate)) * 0.5) }
+            if take == .crackle {
+                for at in stride(from: 1_000, to: samples.count - 1, by: 1_000) { samples[at] = -samples[at - 1] - 0.4 }
+            }
+            return SynthesizedSpeech(samples: samples, sampleRate: rate)
+        }
     }
 }
 
@@ -163,6 +198,31 @@ final class ReadingDocumentTests: XCTestCase {
         }
         // Nothing is lost or read twice.
         XCTAssertEqual(document.wordCount, 12 * clause.split(separator: " ").count)
+    }
+
+    /// The sentence tokenizer ends a sentence at "p." and the like; the piece is joined onto the next.
+    func testAnAbbreviationDoesntEndTheSentence() {
+        let text = "Act 1: pp. 67–79 p. 67 (1.1.1–4) Spot it: the opening. See e.g. the storm."
+        let document = ReadingDocument(text: text)
+        XCTAssertEqual(document.sentences.map(\.spokenText), [
+            "Act 1: pp. 67–79 p. 67 (1.1.1–4) Spot it: the opening.",
+            "See e.g. the storm.",
+        ])
+    }
+
+    /// A one-word sentence is read with the next (or, last in its paragraph, the one before): alone, the voice drags it
+    /// out or babbles. Two words are fine alone, and a paragraph that's only one word stays as it is.
+    func testOneWordSentencesAreReadWithTheirNeighbours() {
+        let text = "Speak to the mariners. Bestir! Bestir! To cabin! Silence!\nHeading\nNext one. Here."
+        let document = ReadingDocument(text: text)
+        XCTAssertEqual(document.sentences.map(\.spokenText), [
+            "Speak to the mariners.",
+            "Bestir! Bestir!",
+            "To cabin! Silence!",
+            "Heading",
+            "Next one. Here.",
+        ])
+        XCTAssertEqual(document.wordCount, 13)
     }
 
     func testChineseIsSplitIntoWords() {
@@ -331,6 +391,52 @@ final class ListenDocumentImporterTests: XCTestCase {
             ListenDocumentImporter.unwrapLines(text),
             "This line was broken by the page, and a hyphenated word too.\n\nNew paragraph."
         )
+    }
+
+    /// A header and footer on every page ("Page 3 of 4" counts as the same line on each) aren't read between pages;
+    /// the text, its paragraphs and a line that only repeats twice are.
+    func testRepeatedHeadersAndFootersAreLeftOut() {
+        let topics = ["Storms", "Islands", "Spirits", "Masques"]
+        let pages = (1...4).map { number in
+            "Course Reader — Week 3\n\n\(topics[number - 1]) come first\nand run on.\n\nA second paragraph.\n"
+                + (number == 2 || number == 3 ? "Twice only\n" : "") + "Page \(number) of 4"
+        }
+        let cleaned = PDFPageText.withoutHeadersAndFooters(pages)
+        // The first page keeps its first line: the document's title.
+        XCTAssertEqual(cleaned[0], "Course Reader — Week 3\n\nStorms come first\nand run on.\n\nA second paragraph.")
+        XCTAssertEqual(cleaned[1], "\nIslands come first\nand run on.\n\nA second paragraph.\nTwice only")
+        // A sentence on every page is text; two pages are too few to tell.
+        let sentences = (1...4).map { "Remember to cite your sources.\nBody \($0)." }
+        XCTAssertEqual(PDFPageText.withoutHeadersAndFooters(sentences), sentences)
+        let two = ["Header\nOne.", "Header\nTwo."]
+        XCTAssertEqual(PDFPageText.withoutHeadersAndFooters(two), two)
+    }
+
+    func testAPDFsRunningFooterIsntRead() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("reader.pdf")
+        var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let context = try XCTUnwrap(CGContext(url as CFURL, mediaBox: &box, nil))
+        for page in 1...4 {
+            context.beginPDFPage(nil)
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            let font = [NSAttributedString.Key.font: NSFont.systemFont(ofSize: 12)]
+            NSAttributedString(string: "The Tempest — Reading Guide", attributes: font).draw(at: CGPoint(x: 72, y: 740))
+            NSAttributedString(string: "Prospero speaks on page \(page).", attributes: font).draw(at: CGPoint(x: 72, y: 400))
+            NSAttributedString(string: "Page \(page) of 4", attributes: font).draw(at: CGPoint(x: 72, y: 40))
+            NSGraphicsContext.current = nil
+            context.endPDFPage()
+        }
+        context.closePDF()
+
+        let text = try ListenDocumentImporter.text(from: url)
+        // Read once, as the title, and not again on every page.
+        XCTAssertTrue(text.hasPrefix("The Tempest — Reading Guide"), text)
+        XCTAssertEqual(text.components(separatedBy: "Reading Guide").count, 2, text)
+        XCTAssertFalse(text.contains("of 4"), text)
+        for page in 1...4 { XCTAssertTrue(text.contains("Prospero speaks on page \(page)."), text) }
     }
 
     func testReadsTextAndHTMLFiles() throws {
@@ -602,7 +708,7 @@ final class ListenModelTests: XCTestCase {
     @MainActor
     func testReadingPicksUpWhereItStopped() async {
         let model = makeTestListenModel(directory: directory)
-        model.text = "First. Second. Third. Fourth."
+        model.text = "The first. The second. The third. The fourth."
         model.play()
         await waitUntil { model.isReading }
         model.jump(to: ReadingPosition(sentence: 2, word: 0))
@@ -763,6 +869,47 @@ final class SentenceSpeakerTests: XCTestCase {
         }
     }
 
+    /// A crackling take, or one that babbles on, is made again (up to twice), and the best take is kept.
+    func testSpeechThatComesOutWrongIsMadeAgain() async throws {
+        let synthesizer = ScriptedSynthesizer(takes: [
+            // First the batch: "Cells need energy." crackles; "They get it from food." is fine.
+            [.crackle, .clean],
+            // Made again: it babbles on this time, which is worse than one crackle, so the first take stays…
+            [.babble],
+            // …until a clean take.
+            [.clean],
+        ])
+        let speaker = SentenceSpeaker(synthesizer: synthesizer, aligner: FakeAligner())
+        let sentences = ReadingDocument(text: "Cells need energy. They get it from food.").sentences
+        let spoken = try await speaker.speak(sentences, voice: "ryan", language: .english)
+        XCTAssertEqual(synthesizer.batches, [["Cells need energy.", "They get it from food."], ["Cells need energy."], ["Cells need energy."]])
+        XCTAssertEqual(SpeechCheck.clicks(in: spoken[0].samples), 0)
+        XCTAssertEqual(SpeechCheck.clicks(in: spoken[1].samples), 0)
+    }
+
+    func testASentenceThatNeverComesOutRightIsTriedTwiceMore() async throws {
+        let synthesizer = ScriptedSynthesizer(takes: [[.crackle], [.crackle], [.crackle], [.clean]])
+        let speaker = SentenceSpeaker(synthesizer: synthesizer, aligner: FakeAligner())
+        let sentences = ReadingDocument(text: "Cells need energy.").sentences
+        _ = try await speaker.speak(sentences, voice: "ryan", language: .english)
+        XCTAssertEqual(synthesizer.batches.count, 1 + SentenceSpeaker.retries)
+    }
+
+    func testCracklesAndBabblingAreFaults() {
+        let tone = (0..<24_000).map { Float(sin(Double($0) * 2 * .pi * 220 / 24_000) * 0.5) }
+        XCTAssertEqual(SpeechCheck.faults(in: SynthesizedSpeech(samples: tone, sampleRate: 24_000), words: 2), 0)
+        // A few sharp jumps are a consonant; many are a crackle.
+        var crackle = tone
+        for at in stride(from: 1_000, to: 21_000, by: 1_000) { crackle[at] = -crackle[at - 1] - 0.4 }
+        XCTAssertGreaterThan(SpeechCheck.clicks(in: crackle), SpeechCheck.allowedClicks)
+        XCTAssertGreaterThan(SpeechCheck.faults(in: SynthesizedSpeech(samples: crackle, sampleRate: 24_000), words: 2), 0)
+        // Ten seconds for two words is babbling; nothing at all is a fault too.
+        let long = [Float](repeating: 0.1, count: 240_000)
+        XCTAssertGreaterThan(SpeechCheck.faults(in: SynthesizedSpeech(samples: long, sampleRate: 24_000), words: 2), 0)
+        XCTAssertEqual(SpeechCheck.faults(in: SynthesizedSpeech(samples: long, sampleRate: 24_000), words: 12), 0)
+        XCTAssertGreaterThan(SpeechCheck.faults(in: SynthesizedSpeech(samples: [], sampleRate: 24_000), words: 2), 0)
+    }
+
     func testANumberIsHighlightedForAllTheWordsItsReadAs() {
         // "1990" is said as "nineteen ninety": the aligner times those two words, and the number on screen spans
         // both, so the word after it starts when it's heard.
@@ -783,6 +930,17 @@ final class SentenceSpeakerTests: XCTestCase {
 final class SpokenNumbersTests: XCTestCase {
     private func spoken(_ text: String, _ language: ListenLanguage = .english) -> String {
         SpokenNumbers.spoken(text, language: language)
+    }
+
+    func testPagesAndLineReferencesAreReadAsTheyAreMeant() {
+        // Not the letter p, and not "one point one" with a stray ".1".
+        XCTAssertEqual(spoken("p. 67 (1.1.1–4)"), "page sixty-seven (one one one to four)")
+        XCTAssertEqual(spoken("pp. 67–79, and 1.2.345"), "pages sixty-seven to seventy-nine, and one two three hundred forty-five")
+        // A decimal is still a decimal, and "p" before a word is left alone.
+        XCTAssertEqual(spoken("It rose 1.5 points, p for pressure."), "It rose one point five points, p for pressure.")
+        let sentence = ReadingDocument(text: "See p. 67 (1.1.1–4).").sentences[0]
+        XCTAssertEqual(sentence.voiceText(in: .english), "See page sixty-seven (one one one to four).")
+        XCTAssertEqual(sentence.spokenWords(in: .english), [["See"], ["page"], ["sixty-seven"], ["one", "one", "one", "to", "four"]])
     }
 
     func testYearsAreReadAsYears() {

@@ -620,8 +620,8 @@ public class SpeechTokenizerDecoder: Module {
     /// Set up compiled decoder forward pass for Metal kernel fusion.
     ///
     /// With shapeless=false, the compiled graph is traced once per input shape
-    /// and cached. Most decode chunks share the shape [1, 16, 35], so the graph
-    /// is reused across chunks. Different sizes (e.g., last chunk) retrace once.
+    /// and cached. `chunkedDecode` pads every piece to a multiple of 25 frames,
+    /// so there are only a few shapes, each traced once.
     public func setupCompilation() {
         let selfRef = self
 
@@ -643,12 +643,12 @@ public class SpeechTokenizerDecoder: Module {
     }
 
     /// Warm up the compiled decoder with a dummy forward pass.
-    /// Pre-traces the graph for the common chunk shape [1, 16, 35] and
+    /// Pre-traces the graph for a short sentence's shape, [1, 16, 50] (see `chunkedDecode`), and
     /// compiles Metal shaders so subsequent decodes pay zero compilation cost.
     public func warmUp() {
         guard compiledDecoder != nil else { return }
 
-        let dummyCodes = MLXArray.zeros([1, 16, 35]).asType(.int32)
+        let dummyCodes = MLXArray.zeros([1, 16, 50]).asType(.int32)
         let result = executeDecoder(dummyCodes)
         eval(result)
     }
@@ -686,52 +686,46 @@ public class SpeechTokenizerDecoder: Module {
         return h  // [B, T*1920, 1]
     }
 
-    /// Chunked decode: process codec frames in overlapping chunks to reduce O(T²) attention cost.
-    /// Mirrors Python's `chunked_decode(codes, chunk_size=25, left_context=10)`.
+    /// Decodes the codes in pieces of up to `chunkSize` frames, each after the `leftContext` frames before it, as
+    /// Qwen's `chunked_decode(codes, chunk_size=300, left_context_size=25)` does, so most sentences go in one pass.
     ///
-    /// Each chunk processes `leftContext + chunkSize` frames through the full decoder pipeline.
-    /// Only the last `chunkSize * samplesPerFrame` samples are kept (overlap is trimmed).
-    /// All convolutions are causal (left-padded), so chunks produce correct output with left context.
-    public func chunkedDecode(codes: MLXArray, chunkSize: Int = 25, leftContext: Int = 10) -> MLXArray {
+    /// (Changed in this copy. speech-swift decoded 25 frames at a time after 10 frames of context, and each piece
+    /// came out short, so about 0.1 s of speech went missing at every 2-second seam and the audio no longer matched
+    /// a single pass after it.)
+    ///
+    /// Each piece is padded at the end to a multiple of 25 frames, with at least two frames over. The decoder is
+    /// causal, so padding changes nothing before it; it makes the decoder give out the last frame's last samples (one
+    /// pass alone came out a frame and a half short, clipping the sentence's last sound), and keeps the pieces to a
+    /// few lengths, which the compiled decoder traces once each. Returns exactly 1920 samples per frame.
+    public func chunkedDecode(codes: MLXArray, chunkSize: Int = 300, leftContext: Int = 25) -> MLXArray {
         let numFrames = codes.dim(2)  // [B, 16, T]
         let samplesPerFrame = 1920    // 24000 / 12.5
-
-        if numFrames <= chunkSize + leftContext {
-            // Short enough to decode in one pass
-            return executeDecoder(codes)
-        }
-
         var audioChunks: [MLXArray] = []
-
         var offset = 0
         while offset < numFrames {
             let chunkEnd = min(offset + chunkSize, numFrames)
             let contextStart = max(offset - leftContext, 0)
-            let actualContext = offset - contextStart
-
-            let chunkCodes = codes[0..., 0..., contextStart..<chunkEnd]  // [B, 16, contextFrames + chunkFrames]
-            let chunkWaveform = executeDecoder(chunkCodes)  // [B, T_samples, 1]
-
-            // Trim left context samples — clamp to actual output length because
-            // convolutional boundary effects can make the decoder produce fewer
-            // samples than (inputFrames * samplesPerFrame), especially on short last chunks.
-            let trimSamples = min(actualContext * samplesPerFrame, chunkWaveform.dim(1))
-            let totalSamples = chunkWaveform.dim(1)
-            guard trimSamples < totalSamples else {
-                offset = chunkEnd
-                continue
-            }
-            let kept = chunkWaveform[0..., trimSamples..<totalSamples, 0...]
-
-            // Eval each chunk to free intermediate decoder tensors (480x upsample).
-            // Without this, all chunks' intermediates stay in memory as lazy graph nodes.
+            let context = offset - contextStart
+            let length = chunkEnd - contextStart
+            let paddedLength = Self.paddedLength(frames: length)
+            let piece = concatenated([
+                codes[0..., 0..., contextStart..<chunkEnd],
+                MLXArray.zeros([codes.dim(0), codes.dim(1), paddedLength - length]).asType(codes.dtype),
+            ], axis: 2)
+            let waveform = executeDecoder(piece)  // [B, samples, 1]
+            let kept = waveform[0..., (context * samplesPerFrame)..<min(length * samplesPerFrame, waveform.dim(1)), 0...]
+            // Eval each piece to free its intermediate tensors (the decoder upsamples 1920 times).
             eval(kept)
-
             audioChunks.append(kept)
             offset = chunkEnd
         }
-
+        guard audioChunks.count > 1 else { return audioChunks.first ?? MLXArray.zeros([codes.dim(0), 0, 1]) }
         return concatenated(audioChunks, axis: 1)
+    }
+
+    /// How many frames a piece of `frames` is decoded as: at least two more, rounded up to a multiple of 25.
+    static func paddedLength(frames: Int) -> Int {
+        (frames + 2 + 24) / 25 * 25
     }
 
     /// Convert codes to float audio samples using chunked decoding + bulk extraction

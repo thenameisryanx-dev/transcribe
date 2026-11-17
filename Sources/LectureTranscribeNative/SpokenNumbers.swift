@@ -24,8 +24,16 @@ enum SpokenNumbers {
                 }
                 return "\(amount) \(unit)"
             }
+            // "p. 67" and "pp. 67–79": page and pages, not the letter p.
+            result = replacing(Self.pageAbbreviation, in: result) { match in match[1].count == 1 ? "page " : "pages " }
             // "1990–1995" and "10-20": a range.
             result = replacing(#"(?<=\d)\s?[–—-]\s?(?=\d)"#, in: result) { _ in " to " }
+            // "1.2.345", a reference like act, scene and line: each part as a number, "one two three hundred
+            // forty-five", rather than "one point two" and a stray ".345".
+            result = replacing(#"(?<![\p{L}\d.,])(\d+(?:\.\d+){2,})(?![\p{L}\d]|\.\d)"#, in: result) { match in
+                let parts = match[1].split(separator: ".").map { part in Int(part).flatMap { spellOut($0) } ?? String(part) }
+                return parts.joined(separator: " ")
+            }
         }
         // Numbers, with thousands separators and decimals, then an ordinal or plural ending and a percent sign.
         let pattern = english
@@ -62,6 +70,9 @@ enum SpokenNumbers {
     }
 
     // MARK: - English
+
+    /// "p." or "pp." just before a number.
+    static let pageAbbreviation = #"(?<![\p{L}])([pP]{1,2})\.\s?(?=\d)"#
 
     /// A number that reads as a year ("nineteen ninety", "two thousand five", "twenty twenty-four"), or nil.
     static func yearWords(_ value: Int) -> String? {
@@ -170,7 +181,12 @@ extension ReadingSentence {
     /// The words the voice says for each of the sentence's words: the word itself, or for a number the words it's
     /// read as. One list per word in `words`.
     func spokenWords(in language: ListenLanguage) -> [[String]] {
-        words.map { word in
+        words.enumerated().map { index, word in
+            // "p" and "pp" before a number are read as page and pages (see `SpokenNumbers.spoken`).
+            if language == .english, ["p", "pp"].contains(word.text.lowercased()),
+               words.indices.contains(index + 1), words[index + 1].text.first?.isNumber == true {
+                return [word.text.count == 1 ? "page" : "pages"]
+            }
             let spoken = SpokenNumbers.spoken(word.text, language: language)
                 .split(whereSeparator: \.isWhitespace).map(String.init)
             return spoken.isEmpty ? [word.text] : spoken
