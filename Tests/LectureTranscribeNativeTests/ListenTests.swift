@@ -80,7 +80,7 @@ func makeTestListenModel(
     sentencesAtOnce: Int = 2,
     player: ListenAudioPlayer? = nil,
     mlxWork: MLXWorkGate = MLXWorkGate(),
-    defaults: UserDefaults = UserDefaults(suiteName: "ListenTests.\(UUID().uuidString)")!
+    defaults: UserDefaults = InMemoryDefaults()
 ) -> ListenModel {
     let model = ListenModel(
         synthesizer: synthesizer,
@@ -398,6 +398,31 @@ final class MLXWorkGateTests: XCTestCase {
     }
 }
 
+/// Settings kept in memory, for tests: each test's model gets its own, so tests don't see each other's, and nothing
+/// is written to ~/Library/Preferences (a settings domain per test left a file there after every run, even emptied).
+/// Every way ListenModel reads and saves its settings is overridden, so none reaches the real storage.
+final class InMemoryDefaults: UserDefaults, @unchecked Sendable {
+    private let values = Locked<[String: Any]>([:])
+
+    init() {
+        super.init(suiteName: nil)!
+    }
+
+    override func object(forKey defaultName: String) -> Any? { values.value[defaultName] }
+    override func set(_ value: Any?, forKey defaultName: String) { values.update { $0[defaultName] = value } }
+    override func set(_ value: Int, forKey defaultName: String) { set(value as Any?, forKey: defaultName) }
+    override func set(_ value: Double, forKey defaultName: String) { set(value as Any?, forKey: defaultName) }
+    override func set(_ value: Float, forKey defaultName: String) { set(value as Any?, forKey: defaultName) }
+    override func set(_ value: Bool, forKey defaultName: String) { set(value as Any?, forKey: defaultName) }
+    override func removeObject(forKey defaultName: String) { set(nil as Any?, forKey: defaultName) }
+    override func string(forKey defaultName: String) -> String? { object(forKey: defaultName) as? String }
+    override func integer(forKey defaultName: String) -> Int { (object(forKey: defaultName) as? NSNumber)?.intValue ?? 0 }
+    override func double(forKey defaultName: String) -> Double { (object(forKey: defaultName) as? NSNumber)?.doubleValue ?? 0 }
+    override func bool(forKey defaultName: String) -> Bool { (object(forKey: defaultName) as? NSNumber)?.boolValue ?? false }
+    override func dictionary(forKey defaultName: String) -> [String: Any]? { object(forKey: defaultName) as? [String: Any] }
+    override func dictionaryRepresentation() -> [String: Any] { values.value }
+}
+
 final class Locked<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: Value
@@ -405,6 +430,9 @@ final class Locked<Value>: @unchecked Sendable {
     var value: Value {
         get { lock.withLock { stored } }
         set { lock.withLock { stored = newValue } }
+    }
+    func update(_ change: (inout Value) -> Void) {
+        lock.withLock { change(&stored) }
     }
 }
 
@@ -635,6 +663,23 @@ final class ListenModelTests: XCTestCase {
         await waitUntil { model.errorMessage != nil }
         XCTAssertEqual(model.errorMessage, "Couldn't make the speech: The device didn't start.")
         XCTAssertEqual(model.stage, .editing)
+    }
+
+    /// Tests' settings stay in memory, each test's its own, instead of piling up as files in ~/Library/Preferences.
+    @MainActor
+    func testTestSettingsStayInMemory() {
+        let defaults = InMemoryDefaults()
+        let model = makeTestListenModel(directory: directory, sentencesAtOnce: 4, defaults: defaults)
+        model.speed = 1.5
+        model.voiceID = "aiden"
+        model.language = .french
+        let reopened = makeTestListenModel(directory: directory, defaults: defaults)
+        XCTAssertEqual(reopened.speed, 1.5)
+        XCTAssertEqual(reopened.voiceID, "aiden")
+        XCTAssertEqual(reopened.language, .french)
+        XCTAssertEqual(defaults.integer(forKey: "listen.sentencesAtOnce"), 2)
+        XCTAssertNil(InMemoryDefaults().object(forKey: "listen.speed"), "Another test's settings were seen")
+        XCTAssertNil(UserDefaults.standard.object(forKey: "listen.speed"), "A test's setting reached the real settings")
     }
 
     func testSentencesAtOnceDependsOnTheMacsGPUAndMemory() {
