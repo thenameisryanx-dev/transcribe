@@ -637,11 +637,18 @@ final class ListenModelTests: XCTestCase {
         XCTAssertEqual(model.stage, .editing)
     }
 
-    func testSentencesAtOnceDependsOnTheMacsMemory() {
+    func testSentencesAtOnceDependsOnTheMacsGPUAndMemory() {
         let gigabyte: UInt64 = 1_073_741_824
-        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 16 * gigabyte), 8)
-        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 8 * gigabyte), 4)
-        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 4 * gigabyte), 2)
+        // A base M4 with 16 GB: 24, where making more at once stopped getting faster.
+        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 16 * gigabyte, gpuCores: 10), 24)
+        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 64 * gigabyte, gpuCores: 40), 24)
+        // A GPU with fewer cores fills sooner.
+        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 16 * gigabyte, gpuCores: 8), 16)
+        // Little memory beside the model wins over a big GPU.
+        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 8 * gigabyte, gpuCores: 10), 4)
+        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 4 * gigabyte, gpuCores: 10), 2)
+        // When the GPU's size can't be read, a safe middle.
+        XCTAssertEqual(ListenVoiceModel.defaultSentencesAtOnce(physicalMemory: 16 * gigabyte, gpuCores: nil), 8)
         XCTAssertTrue(ListenVoiceModel.sentencesAtOnceChoices.contains(ListenVoiceModel.defaultSentencesAtOnce()))
         XCTAssertNotNil(ListenVoiceModel.voice(ListenVoiceModel.defaultVoiceID))
     }

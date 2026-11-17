@@ -1,5 +1,6 @@
 import AudioCommon
 import Foundation
+import IOKit
 import NaturalLanguage
 import Qwen3ASR
 import Qwen3TTSLocal
@@ -85,17 +86,41 @@ enum ListenVoiceModel {
     /// What its downloads add up to, for telling people before they start.
     static let approximateDownloadSize: Int64 = 3_480_000_000
 
-    /// How many sentences it makes at once on a Mac with this much memory. Each extra sentence needs little memory
-    /// (about 25 MB); the limit is the GPU, which gets busier for everything else. On a base M4 with 16 GB, 8 at
-    /// once make speech about 3.5 times as fast as one at a time (`ListenBenchmarkTests`).
-    static func defaultSentencesAtOnce(physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+    /// How many sentences it makes at once on this Mac, by its GPU and memory. Making more at once is faster until
+    /// the GPU is full, and each extra sentence needs little memory beside the model's own 3.8 GB. Measured on a
+    /// base M4 (10 GPU cores, 16 GB) with `ListenBenchmarkTests.testHowManyAtOnceStopsPayingOff`: seconds of work per
+    /// second of audio were 0.84 one at a time, 0.36 at 8, 0.26 at 16, 0.23 at 24 and 0.23 again at 32, with the
+    /// same peak GPU memory throughout, so 24 is where it stops getting faster. GPUs with fewer cores fill sooner;
+    /// Pro and Max chips weren't measured, so they get 24 too (more can be picked in Settings ▸ Listen).
+    static func defaultSentencesAtOnce(physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory,
+                                       gpuCores: Int? = thisMacGPUCores) -> Int {
         let gigabytes = physicalMemory / 1_073_741_824
-        if gigabytes >= 15 { return 8 }
-        if gigabytes >= 8 { return 4 }
-        return 2
+        // Little memory left beside the model: fewer at once, so the rest of the Mac keeps room.
+        let byMemory = gigabytes >= 15 ? 32 : (gigabytes >= 8 ? 4 : 2)
+        let byGPU: Int
+        switch gpuCores {
+        case let cores? where cores >= 10: byGPU = 24
+        case .some: byGPU = 16
+        // Virtual Macs (and any the system doesn't describe) don't say: the old default, which suits most.
+        case nil: byGPU = 8
+        }
+        return min(byMemory, byGPU)
     }
 
-    static let sentencesAtOnceChoices = [1, 2, 4, 6, 8]
+    static let sentencesAtOnceChoices = [1, 2, 4, 8, 16, 24, 32]
+
+    /// Read once: it doesn't change while the app runs.
+    static let thisMacGPUCores = gpuCoreCount()
+
+    /// How many cores this Mac's GPU has (10 on a base M4, 16–20 on a Pro, 32–40 on a Max), or nil when the system
+    /// doesn't say.
+    static func gpuCoreCount() -> Int? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AGXAccelerator"))
+        guard service != 0 else { return nil }
+        defer { IOObjectRelease(service) }
+        let property = IORegistryEntryCreateCFProperty(service, "gpu-core-count" as CFString, kCFAllocatorDefault, 0)
+        return (property?.takeRetainedValue() as? NSNumber)?.intValue
+    }
 }
 
 /// A voice of the voice model. Any voice can read any language; each sounds most natural in its own.

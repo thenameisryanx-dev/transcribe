@@ -1,4 +1,5 @@
 import Foundation
+import MLX
 import Qwen3TTSLocal
 import XCTest
 
@@ -97,6 +98,43 @@ final class ListenBenchmarkTests: XCTestCase {
             // People speak about 2.5 words a second; a sentence run to its cap is well under 1.5.
             XCTAssertGreaterThan(pace, 1.4, "“\(text)” ran on (\(length)s)")
             XCTAssertLessThan(pace, 5, "“\(text)” was cut short (\(length)s)")
+        }
+    }
+
+    /// Makes the same 48 sentences 8, 16, 24 and 32 at a time (48 splits evenly into each, so no size ends on a
+    /// small leftover batch), longest first as Listen does, and prints how fast each
+    /// is and the most GPU memory it used: where making more at once stops paying off on this Mac. Only prints; set
+    /// LISTEN_BATCH_SWEEP=1 as well, since it takes a few minutes.
+    func testHowManyAtOnceStopsPayingOff() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["LISTEN_BENCHMARK"] == "1", environment["LISTEN_BATCH_SWEEP"] == "1" else {
+            throw XCTSkip("Set LISTEN_BENCHMARK=1 and LISTEN_BATCH_SWEEP=1 to compare how many sentences to make at once.")
+        }
+        try XCTSkipUnless(SpeechModelFiles.isDownloaded(), "The Qwen3-TTS models aren't downloaded.")
+        let source = (ReadingDocument(text: Self.longerText).sentences + ReadingDocument(text: Self.text).sentences).map(\.spokenText)
+        let sentences = (0..<48).map { source[$0 % source.count] }
+            .sorted { $0.count > $1.count }
+        let model = try await Qwen3TTSModel.fromPretrained(
+            modelId: SpeechModelFiles.ttsModelID,
+            tokenizerModelId: SpeechModelFiles.ttsTokenizerID,
+            cacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.ttsModelID),
+            tokenizerCacheDir: try SpeechModelFiles.directory(for: SpeechModelFiles.ttsTokenizerID)
+        )
+        print("BENCH sweep: \(sentences.count) sentences, \(ProcessInfo.processInfo.physicalMemory / 1_073_741_824) GB, "
+            + "\(ListenVoiceModel.gpuCoreCount() ?? 0) GPU cores")
+        for atOnce in [8, 16, 24, 32] {
+            _ = try model.synthesizeVoiceBatch(texts: Array(repeating: "Warming up.", count: atOnce), language: "english", speaker: "ryan")
+            Memory.peakMemory = 0
+            let start = Date()
+            var audioSeconds = 0.0
+            for batch in stride(from: 0, to: sentences.count, by: atOnce) {
+                let texts = Array(sentences[batch..<min(batch + atOnce, sentences.count)])
+                audioSeconds += try model.synthesizeVoiceBatch(texts: texts, language: "english", speaker: "ryan")
+                    .reduce(0) { $0 + Double($1.count) / 24_000 }
+            }
+            let time = Date().timeIntervalSince(start)
+            print(String(format: "BENCH %2d at once: RTF %.2f (%.1fs for %.1fs of audio), peak GPU memory %.2f GB",
+                         atOnce, time / audioSeconds, time, audioSeconds, Double(Memory.peakMemory) / 1_073_741_824))
         }
     }
 
